@@ -11,6 +11,11 @@ projects:
       https://git-scm.com/docs/git-bundle
       Incremental updates are separate bundle files
 
+  - name: Fossil
+    website: https://fossil-scm.org/
+    repository: https://fossil-scm.org/
+    notes: |
+
   - name: Software Heritage
     website: https://www.softwareheritage.org/
     repository: https://gitlab.softwareheritage.org/swh/devel/docker
