@@ -42,6 +42,8 @@ projects:
   - name: gitbackup
     repository: https://github.com/super3/gitbackup
     notes: |
+      "To avoid directories with a very large number of entries
+      the paths will be constructed with a hash prefix."
     status: archived
 
   - name: gix
