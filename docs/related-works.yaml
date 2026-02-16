@@ -64,3 +64,8 @@ projects:
   - name: python-github-backup
     repository: https://github.com/josegonzalez/python-github-backup
     notes: |
+
+  - name: git-bug
+    repository: https://github.com/git-bug/git-bug
+    notes: |
+      Can import bugs (issue queues) to git namespace
