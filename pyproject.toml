@@ -1,0 +1,10 @@
+[project]
+name = "cache22"
+version = "0.0.1"
+description = "Development utilities"
+requires-python = ">=3.14"
+
+[dependency-groups]
+dev = [
+    "yamllint>=1.38.0",
+]
