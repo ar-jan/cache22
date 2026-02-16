@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: yamllint-related-works
+        name: yamllint docs/related-works.yaml
+        entry: uv run --group dev yamllint docs/related-works.yaml
+        language: system
+        pass_filenames: false
+        files: ^docs/related-works\.yaml$

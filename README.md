@@ -5,8 +5,10 @@
 ```sh
 # Create .venv and install dependencies
 uv sync --group dev
-source .venv/bin/activate
+# Install git hooks for this repo
+uv run --group dev pre-commit install
 # Check yaml:
-yamllint docs/related-works.yaml
-# Or run directly without activating .venv:
 uv run --group dev yamllint docs/related-works.yaml
+# Or run all pre-commit hooks:
+uv run --group dev pre-commit run --all-files
+```
