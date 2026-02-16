@@ -1,0 +1,54 @@
+---
+# Related works
+
+# Schema: name, website, repository, notes
+
+projects:
+  - name: Git
+    website: https://git-scm.com/
+    repository: https://git.kernel.org/pub/scm/git/git.git
+    notes: |
+      https://git-scm.com/docs/git-bundle
+      Incremental updates are separate bundle files
+
+  - name: Software Heritage
+    website: https://www.softwareheritage.org/
+    repository: https://gitlab.softwareheritage.org/swh/devel/docker
+    notes: |
+      Run your own Software Heritage:
+      https://docs.softwareheritage.org/devel/getting-started.html
+
+  - name: GitLab
+    website: https://about.gitlab.com/
+    repository: https://gitlab.com/gitlab-org/gitlab
+    notes: |
+      https://docs.gitlab.com/user/project/repository/mirror/pull/
+
+  - name: Gitea
+    website: https://about.gitea.com/
+    repository: https://github.com/go-gitea/gitea
+    notes: |
+
+  - name: Forgejo
+    website: https://forgejo.org/
+    repository: https://codeberg.org/forgejo/forgejo
+    notes: |
+
+  - name: gitbackup
+    repository: https://github.com/super3/gitbackup
+    notes: |
+    status: archived
+
+  - name: gix
+    website: https://docs.rs/gix/latest/gix/
+    repository: https://github.com/GitoxideLabs/gitoxide
+    notes: |
+
+  - name: Gickup
+    website: https://cooperspencer.github.io/gickup-documentation/
+    repository: https://github.com/cooperspencer/gickup
+    notes: |
+
+  - name: python-github-backup
+    repository: https://github.com/josegonzalez/python-github-backup
+    notes: |
