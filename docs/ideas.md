@@ -15,3 +15,8 @@ Which data types to consider beyond (software) VCS repositories?
 - Build artifacts
 - Documentation
 - Issue queues
+
+## Handle changes in remotes
+
+- How to handle changes in remote (e.g. GitHub to another provider/self-hosting)?
+- How to handle project renaming?
