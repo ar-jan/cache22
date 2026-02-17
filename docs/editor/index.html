@@ -34,7 +34,7 @@
             </div>
             
             <div class="button-group primary-actions">
-              <button type="button" id="save-in-place" class="btn btn-primary" title="Save to current file handle">
+              <button type="button" id="save-in-place" class="btn btn-primary" title="Save to current file">
                 <span class="icon">💾</span> Save In Place
               </button>
               <button type="button" id="save-as" class="btn btn-primary" title="Save as new file">
@@ -43,7 +43,6 @@
             </div>
 
             <div class="button-group">
-               <button type="button" id="change-save-target" class="btn btn-text">Change Save Target</button>
                <button type="button" id="download-yaml" class="btn btn-text">Download YAML</button>
             </div>
           </section>
@@ -52,27 +51,23 @@
              <h2>Status</h2>
              <dl class="status-list">
                 <div class="status-item">
-                  <dt>Source</dt>
-                  <dd id="source-label">Loading...</dd>
-                </div>
-                <div class="status-item">
-                  <dt>Target</dt>
-                  <dd id="save-target-label">Loading...</dd>
+                  <dt>File</dt>
+                  <dd id="file-label">Loading...</dd>
                 </div>
                 <div class="status-item">
                   <dt>Validation</dt>
                   <dd id="validation-label">Loading...</dd>
                 </div>
-                <div class="status-item hidden"> <!-- Hidden by default, less relevant for user unless error -->
-                  <dt>Access</dt>
+                <div class="status-item">
+                  <dt>Filesystem Access</dt>
                   <dd id="file-access-label">Checking...</dd>
                 </div>
                 <div class="status-item">
                   <dt>Modifications</dt>
-                  <dd id="dirty-label"><span class="badge">No</span></dd>
+                  <dd id="dirty-label">No</dd>
                 </div>
              </dl>
-             <p id="save-target-hint" class="save-target-hint" data-type="info"></p>
+             <p id="file-hint" class="file-hint" data-type="info"></p>
           </section>
         </aside>
 

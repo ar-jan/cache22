@@ -189,7 +189,7 @@ body {
   white-space: nowrap;
 }
 
-.save-target-hint {
+.file-hint {
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: var(--space-sm);
@@ -198,7 +198,7 @@ body {
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--color-primary);
 }
-.save-target-hint[data-type="warning"] {
+.file-hint[data-type="warning"] {
   border-left-color: var(--color-warning);
   background: #fffbeb; /* Amber 50 */
 }
@@ -315,4 +315,3 @@ button[data-action="add"] {
 .toast[data-type="success"] {
   background: var(--color-success);
 }
-

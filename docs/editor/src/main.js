@@ -25,7 +25,7 @@ const REPO_YAML_URL_CANDIDATES = [
   "../../related-works.yaml",
 ];
 const DEFAULT_DOWNLOAD_NAME = "related-works.yaml";
-const REPO_SOURCE_NAME = "docs/related-works.yaml (repo copy)";
+const REPO_FILE_LABEL = "docs/related-works.yaml (repo copy)";
 
 const elements = {
   editorRoot: document.querySelector("#editor"),
@@ -33,11 +33,9 @@ const elements = {
   openLocalButton: document.querySelector("#open-local"),
   saveInPlaceButton: document.querySelector("#save-in-place"),
   saveAsButton: document.querySelector("#save-as"),
-  changeSaveTargetButton: document.querySelector("#change-save-target"),
   downloadButton: document.querySelector("#download-yaml"),
-  sourceLabel: document.querySelector("#source-label"),
-  saveTargetLabel: document.querySelector("#save-target-label"),
-  saveTargetHint: document.querySelector("#save-target-hint"),
+  fileLabel: document.querySelector("#file-label"),
+  fileHint: document.querySelector("#file-hint"),
   validationLabel: document.querySelector("#validation-label"),
   fileAccessLabel: document.querySelector("#file-access-label"),
   dirtyLabel: document.querySelector("#dirty-label"),
@@ -47,8 +45,7 @@ const elements = {
 let schema = null;
 let editor = null;
 const state = {
-  sourceType: "repo",
-  sourceName: REPO_SOURCE_NAME,
+  fileLabel: REPO_FILE_LABEL,
   fileHandle: null,
   dirty: false,
   preamble: "",
@@ -65,51 +62,38 @@ function setMessage(text, type = "info") {
     clearTimeout(messageTimeout);
   }
 
-  // Auto-hide after 5 seconds
   messageTimeout = setTimeout(() => {
     elements.message.classList.remove("visible");
   }, 5000);
 }
 
 function localHandleLabel(fileName) {
-  return `${fileName} (local file handle)`;
+  return `${fileName} (local file)`;
 }
 
 function getHandleFileName(fileHandle) {
   return fileHandle?.name ?? DEFAULT_DOWNLOAD_NAME;
 }
 
-function getSaveTargetFileName() {
-  return getHandleFileName(state.fileHandle);
-}
+function updateFileUI() {
+  elements.fileLabel.textContent = state.fileLabel;
 
-function updateSaveTargetUI() {
   if (!state.fileHandle) {
-    elements.saveTargetLabel.textContent = "Not selected (will prompt on first save)";
     elements.saveInPlaceButton.textContent = "Save In Place (choose file)";
-    elements.saveTargetHint.textContent = "First Save In Place will prompt you to choose a YAML file.";
-    elements.saveTargetHint.dataset.type = "info";
+    elements.fileHint.textContent = "Editing repository copy. Save In Place will prompt you to choose a local YAML file.";
+    elements.fileHint.dataset.type = "warning";
     return;
   }
 
-  const targetName = getSaveTargetFileName();
-  elements.saveTargetLabel.textContent = localHandleLabel(targetName);
-  elements.saveInPlaceButton.textContent = `Save In Place (${targetName})`;
-
-  if (state.sourceType === "repo") {
-    elements.saveTargetHint.textContent = `Editing repo copy. Save In Place writes to ${targetName}.`;
-    elements.saveTargetHint.dataset.type = "warning";
-    return;
-  }
-
-  elements.saveTargetHint.textContent = `Save In Place writes to ${targetName}.`;
-  elements.saveTargetHint.dataset.type = "info";
+  const fileName = getHandleFileName(state.fileHandle);
+  elements.saveInPlaceButton.textContent = `Save In Place (${fileName})`;
+  elements.fileHint.textContent = `Editing and Save In Place write to ${fileName}.`;
+  elements.fileHint.dataset.type = "info";
 }
 
 function renderState() {
-  elements.sourceLabel.textContent = state.sourceName;
   elements.dirtyLabel.textContent = state.dirty ? "Yes" : "No";
-  updateSaveTargetUI();
+  updateFileUI();
 }
 
 function transitionState(patch) {
@@ -215,11 +199,21 @@ function extractYamlPreamble(text) {
     break;
   }
 
-  const preamble = lines.slice(0, index).join("\n").replace(/\s+$/, "");
-  return preamble;
+  return lines.slice(0, index).join("\n").replace(/\s+$/, "");
+}
+
+function parseYamlDocument(text) {
+  return {
+    data: parseYamlObject(text),
+    preamble: extractYamlPreamble(text),
+  };
 }
 
 function createEditor(data) {
+  if (editor && typeof editor.destroy === "function") {
+    editor.destroy();
+  }
+
   elements.editorRoot.replaceChildren();
   editor = new Jedison.Create({
     container: elements.editorRoot,
@@ -264,11 +258,10 @@ async function readTextFromFileHandle(fileHandle) {
   return file.text();
 }
 
-function applyLoadedDocument({ data, preamble, sourceName, sourceType, fileHandle = state.fileHandle }) {
+function applyLoadedDocument({ data, preamble, fileLabel, fileHandle = null }) {
   createEditor(data);
   transitionState({
-    sourceName,
-    sourceType,
+    fileLabel,
     fileHandle,
     preamble,
     dirty: false,
@@ -278,12 +271,11 @@ function applyLoadedDocument({ data, preamble, sourceName, sourceType, fileHandl
 async function loadFromFileHandle(fileHandle, fileName = fileHandle?.name) {
   await ensureSchemaLoaded();
   const yamlText = await readTextFromFileHandle(fileHandle);
-  const data = parseYamlObject(yamlText);
+  const { data, preamble } = parseYamlDocument(yamlText);
   applyLoadedDocument({
     data,
-    preamble: extractYamlPreamble(yamlText),
-    sourceName: localHandleLabel(fileName ?? DEFAULT_DOWNLOAD_NAME),
-    sourceType: "local",
+    preamble,
+    fileLabel: localHandleLabel(fileName ?? DEFAULT_DOWNLOAD_NAME),
     fileHandle,
   });
 }
@@ -291,12 +283,12 @@ async function loadFromFileHandle(fileHandle, fileName = fileHandle?.name) {
 async function loadFromRepo() {
   await ensureSchemaLoaded();
   const yamlText = await fetchFirstAvailable(REPO_YAML_URL_CANDIDATES, (response) => response.text(), "text");
-  const data = parseYamlObject(yamlText);
+  const { data, preamble } = parseYamlDocument(yamlText);
   applyLoadedDocument({
     data,
-    preamble: extractYamlPreamble(yamlText),
-    sourceName: REPO_SOURCE_NAME,
-    sourceType: "repo",
+    preamble,
+    fileLabel: REPO_FILE_LABEL,
+    fileHandle: null,
   });
   setMessage("Loaded schema and repository YAML.", "success");
 }
@@ -342,37 +334,32 @@ function confirmDiscardChanges(actionDescription) {
   return window.confirm(`You have unsaved changes. Discard them and ${actionDescription}?`);
 }
 
-async function handleOpenLocalFile() {
-  if (!confirmDiscardChanges("open a local YAML file")) {
-    return;
-  }
-
+async function runAction(action) {
   try {
-    const { fileHandle, fileName, text } = await openYamlFile();
-    const data = parseYamlObject(text);
-    applyLoadedDocument({
-      data,
-      preamble: extractYamlPreamble(text),
-      sourceName: localHandleLabel(fileName),
-      sourceType: "local",
-      fileHandle,
-    });
-    await persistHandle(fileHandle);
-    setMessage(`Loaded local YAML from ${fileName}.`, "success");
+    await action();
   } catch (error) {
     setMessage(describeError(error), "error");
   }
 }
 
-async function handleChangeSaveTarget() {
-  try {
-    const { fileHandle, fileName } = await chooseYamlFileHandle();
-    transitionState({ fileHandle });
-    await persistHandle(fileHandle);
-    setMessage(`Save target set to ${fileName}.`, "success");
-  } catch (error) {
-    setMessage(describeError(error), "error");
+async function handleOpenLocalFile() {
+  if (!confirmDiscardChanges("open a local YAML file")) {
+    return;
   }
+
+  await runAction(async () => {
+    await ensureSchemaLoaded();
+    const { fileHandle, fileName, text } = await openYamlFile();
+    const { data, preamble } = parseYamlDocument(text);
+    applyLoadedDocument({
+      data,
+      preamble,
+      fileLabel: localHandleLabel(fileName),
+      fileHandle,
+    });
+    await persistHandle(fileHandle);
+    setMessage(`Loaded local YAML from ${fileName}.`, "success");
+  });
 }
 
 async function ensureCurrentFileHandle() {
@@ -380,52 +367,47 @@ async function ensureCurrentFileHandle() {
     return state.fileHandle;
   }
 
-  const { fileHandle } = await chooseYamlFileHandle();
-  transitionState({ fileHandle });
+  const { fileHandle, fileName } = await chooseYamlFileHandle();
+  transitionState({
+    fileHandle,
+    fileLabel: localHandleLabel(fileName),
+  });
   await persistHandle(fileHandle);
-  return state.fileHandle;
+  return fileHandle;
 }
 
 async function handleSaveInPlace() {
-  try {
+  await runAction(async () => {
     const fileHandle = await ensureCurrentFileHandle();
     await saveYamlToHandle(fileHandle, getCurrentYamlText());
-    transitionState({ fileHandle, dirty: false });
-    setMessage(`Saved ${getSaveTargetFileName()}.`, "success");
-  } catch (error) {
-    setMessage(describeError(error), "error");
-  }
+    transitionState({
+      fileHandle,
+      fileLabel: localHandleLabel(getHandleFileName(fileHandle)),
+      dirty: false,
+    });
+    setMessage(`Saved ${getHandleFileName(fileHandle)}.`, "success");
+  });
 }
 
 async function handleSaveAs() {
-  try {
+  await runAction(async () => {
     const fileHandle = await saveYamlAs(getSuggestedFileName(), getCurrentYamlText());
     await persistHandle(fileHandle);
-
-    const patch = {
+    transitionState({
       fileHandle,
+      fileLabel: localHandleLabel(getHandleFileName(fileHandle)),
       dirty: false,
-    };
-
-    if (state.sourceType === "local") {
-      patch.sourceName = localHandleLabel(getHandleFileName(fileHandle));
-    }
-
-    transitionState(patch);
+    });
     setMessage(`Saved ${getHandleFileName(fileHandle)}.`, "success");
-  } catch (error) {
-    setMessage(describeError(error), "error");
-  }
+  });
 }
 
-function handleDownload() {
-  try {
+async function handleDownload() {
+  await runAction(async () => {
     const fileName = getSuggestedFileName();
     startDownload(fileName, getCurrentYamlText());
     setMessage(`Downloaded ${fileName}.`, "success");
-  } catch (error) {
-    setMessage(describeError(error), "error");
-  }
+  });
 }
 
 async function tryRestorePersistedHandle() {
@@ -451,7 +433,6 @@ async function tryRestorePersistedHandle() {
   }
 
   const handleName = getHandleFileName(fileHandle);
-  transitionState({ fileHandle });
 
   try {
     const permission = await fileHandle.queryPermission({ mode: "readwrite" });
@@ -460,7 +441,6 @@ async function tryRestorePersistedHandle() {
     }
   } catch (error) {
     console.warn("Failed to query persisted handle permissions:", error);
-    transitionState({ fileHandle: null });
     await clearPersistedHandle();
     return false;
   }
@@ -471,7 +451,6 @@ async function tryRestorePersistedHandle() {
     return true;
   } catch (error) {
     console.warn("Persisted handle is no longer usable; clearing it.", error);
-    transitionState({ fileHandle: null });
     await clearPersistedHandle();
     return false;
   }
@@ -483,16 +462,13 @@ function bindEvents() {
       return;
     }
 
-    try {
+    await runAction(async () => {
       await loadFromRepo();
-    } catch (error) {
-      setMessage(describeError(error), "error");
-    }
+    });
   });
   elements.openLocalButton.addEventListener("click", handleOpenLocalFile);
   elements.saveInPlaceButton.addEventListener("click", handleSaveInPlace);
   elements.saveAsButton.addEventListener("click", handleSaveAs);
-  elements.changeSaveTargetButton.addEventListener("click", handleChangeSaveTarget);
   elements.downloadButton.addEventListener("click", handleDownload);
 }
 
@@ -506,7 +482,6 @@ function setupFileAccessUI() {
   elements.openLocalButton.disabled = true;
   elements.saveInPlaceButton.disabled = true;
   elements.saveAsButton.disabled = true;
-  elements.changeSaveTargetButton.disabled = true;
   setMessage(
     "File System Access API is unavailable. Use Download YAML and replace the file manually.",
     "info",

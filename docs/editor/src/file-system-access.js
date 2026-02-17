@@ -80,8 +80,17 @@ export async function saveYamlToHandle(fileHandle, yamlText) {
   }
 
   const writable = await fileHandle.createWritable();
-  await writable.write(yamlText);
-  await writable.close();
+  try {
+    await writable.write(yamlText);
+    await writable.close();
+  } catch (error) {
+    try {
+      await writable.abort();
+    } catch {
+      // Ignore abort errors and surface the original write failure.
+    }
+    throw error;
+  }
 }
 
 export async function saveYamlAs(suggestedName, yamlText) {
