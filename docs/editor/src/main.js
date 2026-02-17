@@ -5,7 +5,8 @@ import {
   openYamlFile,
   saveYamlAs,
   saveYamlToHandle,
-  supportsFileSystemAccess,
+  supportsOpenFilePicker,
+  supportsSaveFilePicker,
 } from "./file-system-access.js";
 import {
   clearStoredRelatedWorksHandle,
@@ -49,6 +50,18 @@ const state = {
   fileHandle: null,
   dirty: false,
   preamble: "",
+  busy: false,
+};
+const fileAccessCapabilities = {
+  canOpen: supportsOpenFilePicker(),
+  canSaveAs: supportsSaveFilePicker(),
+};
+const actionAvailability = {
+  reloadRepo: true,
+  openLocal: true,
+  saveInPlace: true,
+  saveAs: true,
+  download: true,
 };
 
 let messageTimeout = null;
@@ -79,8 +92,19 @@ function updateFileUI() {
   elements.fileLabel.textContent = state.fileLabel;
 
   if (!state.fileHandle) {
-    elements.saveInPlaceButton.textContent = "Save In Place (choose file)";
-    elements.fileHint.textContent = "Editing repository copy. Save In Place will prompt you to choose a local YAML file.";
+    if (fileAccessCapabilities.canOpen) {
+      elements.saveInPlaceButton.textContent = "Save In Place (choose file)";
+      elements.fileHint.textContent = "Editing repository copy. Save In Place will prompt you to choose a local YAML file.";
+      elements.fileHint.dataset.type = "warning";
+      return;
+    }
+
+    elements.saveInPlaceButton.textContent = "Save In Place";
+    if (fileAccessCapabilities.canSaveAs) {
+      elements.fileHint.textContent = "Opening local files is unavailable. Use Save As first, then Save In Place will reuse that file.";
+    } else {
+      elements.fileHint.textContent = "Editing repository copy. File System Access is unavailable; use Download YAML and replace the file manually.";
+    }
     elements.fileHint.dataset.type = "warning";
     return;
   }
@@ -91,9 +115,27 @@ function updateFileUI() {
   elements.fileHint.dataset.type = "info";
 }
 
+function refreshActionAvailability() {
+  actionAvailability.reloadRepo = true;
+  actionAvailability.openLocal = fileAccessCapabilities.canOpen;
+  actionAvailability.saveAs = fileAccessCapabilities.canSaveAs;
+  actionAvailability.saveInPlace = Boolean(state.fileHandle) || fileAccessCapabilities.canOpen;
+  actionAvailability.download = true;
+}
+
+function applyActionDisabledState() {
+  elements.reloadRepoButton.disabled = state.busy || !actionAvailability.reloadRepo;
+  elements.openLocalButton.disabled = state.busy || !actionAvailability.openLocal;
+  elements.saveInPlaceButton.disabled = state.busy || !actionAvailability.saveInPlace;
+  elements.saveAsButton.disabled = state.busy || !actionAvailability.saveAs;
+  elements.downloadButton.disabled = state.busy || !actionAvailability.download;
+}
+
 function renderState() {
   elements.dirtyLabel.textContent = state.dirty ? "Yes" : "No";
   updateFileUI();
+  refreshActionAvailability();
+  applyActionDisabledState();
 }
 
 function transitionState(patch) {
@@ -335,10 +377,17 @@ function confirmDiscardChanges(actionDescription) {
 }
 
 async function runAction(action) {
+  if (state.busy) {
+    return;
+  }
+
+  transitionState({ busy: true });
   try {
     await action();
   } catch (error) {
     setMessage(describeError(error), "error");
+  } finally {
+    transitionState({ busy: false });
   }
 }
 
@@ -365,6 +414,10 @@ async function handleOpenLocalFile() {
 async function ensureCurrentFileHandle() {
   if (state.fileHandle) {
     return state.fileHandle;
+  }
+
+  if (!fileAccessCapabilities.canOpen) {
+    throw new Error("This browser cannot choose an existing file. Use Save As first.");
   }
 
   const { fileHandle, fileName } = await chooseYamlFileHandle();
@@ -411,7 +464,7 @@ async function handleDownload() {
 }
 
 async function tryRestorePersistedHandle() {
-  if (!supportsFileSystemAccess() || !supportsHandlePersistence()) {
+  if (!supportsHandlePersistence()) {
     return false;
   }
 
@@ -473,15 +526,24 @@ function bindEvents() {
 }
 
 function setupFileAccessUI() {
-  if (supportsFileSystemAccess()) {
-    elements.fileAccessLabel.textContent = "Supported";
+  if (fileAccessCapabilities.canOpen && fileAccessCapabilities.canSaveAs) {
+    elements.fileAccessLabel.textContent = "Open + Save As supported";
+    return;
+  }
+
+  if (fileAccessCapabilities.canOpen) {
+    elements.fileAccessLabel.textContent = "Open supported (Save As unavailable)";
+    setMessage("Save As is unavailable in this browser. Use Save In Place or Download YAML.", "info");
+    return;
+  }
+
+  if (fileAccessCapabilities.canSaveAs) {
+    elements.fileAccessLabel.textContent = "Save As supported (Open unavailable)";
+    setMessage("Opening local files is unavailable in this browser. Use Save As or Download YAML.", "info");
     return;
   }
 
   elements.fileAccessLabel.textContent = "Not supported in this browser";
-  elements.openLocalButton.disabled = true;
-  elements.saveInPlaceButton.disabled = true;
-  elements.saveAsButton.disabled = true;
   setMessage(
     "File System Access API is unavailable. Use Download YAML and replace the file manually.",
     "info",

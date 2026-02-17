@@ -9,11 +9,11 @@ const YAML_FILE_PICKER_TYPES = [
   },
 ];
 
-function supportsOpenFilePicker() {
+export function supportsOpenFilePicker() {
   return typeof window.showOpenFilePicker === "function";
 }
 
-function supportsSaveFilePicker() {
+export function supportsSaveFilePicker() {
   return typeof window.showSaveFilePicker === "function";
 }
 
