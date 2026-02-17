@@ -7,3 +7,15 @@ repos:
         language: system
         pass_filenames: false
         files: ^docs/related-works\.yaml$
+      - id: check-jsonschema-related-works-schema
+        name: check-jsonschema --check-metaschema docs/related-works.schema.json
+        entry: uv run --group dev check-jsonschema --check-metaschema docs/related-works.schema.json
+        language: system
+        pass_filenames: false
+        files: ^docs/related-works\.schema\.json$
+      - id: check-jsonschema-related-works-data
+        name: check-jsonschema docs/related-works.yaml
+        entry: uv run --group dev check-jsonschema --schemafile docs/related-works.schema.json docs/related-works.yaml
+        language: system
+        pass_filenames: false
+        files: ^docs/related-works\.yaml$
