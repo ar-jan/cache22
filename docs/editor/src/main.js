@@ -41,7 +41,7 @@ const elements = {
   validationLabel: document.querySelector("#validation-label"),
   fileAccessLabel: document.querySelector("#file-access-label"),
   dirtyLabel: document.querySelector("#dirty-label"),
-  message: document.querySelector("#message"),
+  message: document.querySelector("#message-toast"),
 };
 
 let schema = null;
@@ -54,9 +54,21 @@ const state = {
   preamble: "",
 };
 
+let messageTimeout = null;
+
 function setMessage(text, type = "info") {
   elements.message.textContent = text;
   elements.message.dataset.type = type;
+  elements.message.classList.add("visible");
+
+  if (messageTimeout) {
+    clearTimeout(messageTimeout);
+  }
+
+  // Auto-hide after 5 seconds
+  messageTimeout = setTimeout(() => {
+    elements.message.classList.remove("visible");
+  }, 5000);
 }
 
 function localHandleLabel(fileName) {
