@@ -7,6 +7,7 @@
     "doc": "docs"
   },
   "scripts": {
+    "editor:dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

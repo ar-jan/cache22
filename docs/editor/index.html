@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Related Works Editor</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <h1>Related Works Editor</h1>
+        <p>Schema-driven editor for <code>docs/related-works.yaml</code>.</p>
+      </header>
+
+      <section class="toolbar" aria-label="Editor actions">
+        <button type="button" id="reload-repo">Reload Repo YAML</button>
+        <button type="button" id="open-local">Open Local YAML</button>
+        <button type="button" id="save-in-place">Save In Place (choose file)</button>
+        <button type="button" id="save-as">Save As</button>
+        <button type="button" id="change-save-target">Change Save Target</button>
+        <button type="button" id="download-yaml">Download YAML</button>
+      </section>
+
+      <section class="meta">
+        <p><strong>Source:</strong> <span id="source-label">Loading...</span></p>
+        <p><strong>Save target:</strong> <span id="save-target-label">Loading...</span></p>
+        <p><strong>Validation:</strong> <span id="validation-label">Loading...</span></p>
+        <p><strong>File Access:</strong> <span id="file-access-label">Checking...</span></p>
+        <p><strong>Dirty:</strong> <span id="dirty-label">No</span></p>
+        <p id="save-target-hint" class="save-target-hint" data-type="info"></p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Form</h2>
+          <div id="editor" class="editor-root"></div>
+        </article>
+      </section>
+
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </main>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
