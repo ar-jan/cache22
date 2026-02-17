@@ -32,7 +32,8 @@
             "format": "uri"
           },
           "notes": {
-            "type": "string"
+            "type": "string",
+            "x-format": "textarea"
           },
           "status": {
             "type": "string",
