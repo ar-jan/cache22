@@ -1,5 +1,5 @@
 import Jedison from "jedison";
-import { dump as dumpYaml, load as loadYaml } from "js-yaml";
+import { parseDocument } from "yaml";
 import {
   chooseYamlFileHandle,
   openYamlFile,
@@ -49,7 +49,7 @@ const state = {
   fileLabel: REPO_FILE_LABEL,
   fileHandle: null,
   dirty: false,
-  preamble: "",
+  yamlDocument: null,
   busy: false,
 };
 const fileAccessCapabilities = {
@@ -94,16 +94,19 @@ function updateFileUI() {
   if (!state.fileHandle) {
     if (fileAccessCapabilities.canOpen) {
       elements.saveInPlaceButton.textContent = "Save In Place (choose file)";
-      elements.fileHint.textContent = "Editing repository copy. Save In Place will prompt you to choose a local YAML file.";
+      elements.fileHint.textContent =
+        "Editing repository copy. Save In Place will prompt you to choose a local YAML file.";
       elements.fileHint.dataset.type = "warning";
       return;
     }
 
     elements.saveInPlaceButton.textContent = "Save In Place";
     if (fileAccessCapabilities.canSaveAs) {
-      elements.fileHint.textContent = "Opening local files is unavailable. Use Save As first, then Save In Place will reuse that file.";
+      elements.fileHint.textContent =
+        "Opening local files is unavailable. Use Save As first, then Save In Place will reuse that file.";
     } else {
-      elements.fileHint.textContent = "Editing repository copy. File System Access is unavailable; use Download YAML and replace the file manually.";
+      elements.fileHint.textContent =
+        "Editing repository copy. File System Access is unavailable; use Download YAML and replace the file manually.";
     }
     elements.fileHint.dataset.type = "warning";
     return;
@@ -119,16 +122,21 @@ function refreshActionAvailability() {
   actionAvailability.reloadRepo = true;
   actionAvailability.openLocal = fileAccessCapabilities.canOpen;
   actionAvailability.saveAs = fileAccessCapabilities.canSaveAs;
-  actionAvailability.saveInPlace = Boolean(state.fileHandle) || fileAccessCapabilities.canOpen;
+  actionAvailability.saveInPlace =
+    Boolean(state.fileHandle) || fileAccessCapabilities.canOpen;
   actionAvailability.download = true;
 }
 
 function applyActionDisabledState() {
-  elements.reloadRepoButton.disabled = state.busy || !actionAvailability.reloadRepo;
-  elements.openLocalButton.disabled = state.busy || !actionAvailability.openLocal;
-  elements.saveInPlaceButton.disabled = state.busy || !actionAvailability.saveInPlace;
+  elements.reloadRepoButton.disabled =
+    state.busy || !actionAvailability.reloadRepo;
+  elements.openLocalButton.disabled =
+    state.busy || !actionAvailability.openLocal;
+  elements.saveInPlaceButton.disabled =
+    state.busy || !actionAvailability.saveInPlace;
   elements.saveAsButton.disabled = state.busy || !actionAvailability.saveAs;
-  elements.downloadButton.disabled = state.busy || !actionAvailability.download;
+  elements.downloadButton.disabled =
+    state.busy || !actionAvailability.download;
 }
 
 function renderState() {
@@ -183,72 +191,56 @@ function updateValidationLabel() {
   elements.validationLabel.textContent = `${errors.length} error(s)`;
 }
 
-function addBlankLinesBetweenProjectItems(yamlText) {
-  const lines = yamlText.replace(/\n+$/, "").split("\n");
-  const output = [];
-  let insideProjects = false;
-
-  for (const line of lines) {
-    const isTopLevelKey = /^[^ \t][^:]*:\s*$/.test(line);
-    if (isTopLevelKey) {
-      insideProjects = line.trim() === "projects:";
-    }
-
-    if (insideProjects && line.startsWith("  - ")) {
-      const previous = output[output.length - 1];
-      if (previous && previous.trim() !== "" && previous.trim() !== "projects:") {
-        output.push("");
-      }
-    }
-
-    output.push(line);
-  }
-
-  return `${output.join("\n")}\n`;
+function normalizeLineEndings(text) {
+  return text.replace(/\r\n?/g, "\n");
 }
 
-function toYaml(value) {
-  const dumped = dumpYaml(value, {
-    noRefs: true,
-    lineWidth: -1,
-    sortKeys: false,
-  });
-  const body = addBlankLinesBetweenProjectItems(dumped.trimStart());
-  if (state.preamble) {
-    return `${state.preamble}\n${body}`.replace(/\n?$/, "\n");
-  }
-  return body.replace(/\n?$/, "\n");
+function ensureTerminalNewline(text) {
+  return text.replace(/\n?$/, "\n");
 }
 
-function parseYamlObject(text) {
-  const parsed = loadYaml(text);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseYamlObject(value) {
+  if (!isPlainObject(value)) {
     throw new Error("YAML top-level value must be an object.");
   }
-  return parsed;
+  return value;
 }
 
-function extractYamlPreamble(text) {
-  const lines = text.split(/\r?\n/);
-  let index = 0;
+function createEmptyYamlDocument() {
+  const yamlDocument = parseDocument("", {
+    prettyErrors: true,
+  });
+  if (yamlDocument.errors.length > 0) {
+    throw yamlDocument.errors[0];
+  }
+  return yamlDocument;
+}
 
-  while (index < lines.length) {
-    const trimmed = lines[index].trim();
-    if (trimmed === "" || trimmed === "---" || trimmed.startsWith("#")) {
-      index += 1;
-      continue;
-    }
-    break;
+function buildYamlDocument(data) {
+  const value = parseYamlObject(data);
+  const yamlDocument = state.yamlDocument
+    ? state.yamlDocument.clone()
+    : createEmptyYamlDocument();
+
+  yamlDocument.contents = yamlDocument.createNode(value);
+  return yamlDocument;
+}
+
+function parseYamlText(text) {
+  const yamlDocument = parseDocument(normalizeLineEndings(text), {
+    prettyErrors: true,
+  });
+
+  if (yamlDocument.errors.length > 0) {
+    throw yamlDocument.errors[0];
   }
 
-  return lines.slice(0, index).join("\n").replace(/\s+$/, "");
-}
-
-function parseYamlDocument(text) {
-  return {
-    data: parseYamlObject(text),
-    preamble: extractYamlPreamble(text),
-  };
+  const data = parseYamlObject(yamlDocument.toJS());
+  return { data, yamlDocument };
 }
 
 function createEditor(data) {
@@ -291,7 +283,11 @@ async function fetchFirstAvailable(candidates, parser, kind) {
 
 async function ensureSchemaLoaded() {
   if (!schema) {
-    schema = await fetchFirstAvailable(REPO_SCHEMA_URL_CANDIDATES, (response) => response.json(), "JSON");
+    schema = await fetchFirstAvailable(
+      REPO_SCHEMA_URL_CANDIDATES,
+      (response) => response.json(),
+      "JSON",
+    );
   }
 }
 
@@ -300,12 +296,12 @@ async function readTextFromFileHandle(fileHandle) {
   return file.text();
 }
 
-function applyLoadedDocument({ data, preamble, fileLabel, fileHandle = null }) {
+function applyLoadedDocument({ data, yamlDocument, fileLabel, fileHandle = null }) {
   createEditor(data);
   transitionState({
     fileLabel,
     fileHandle,
-    preamble,
+    yamlDocument,
     dirty: false,
   });
 }
@@ -313,10 +309,10 @@ function applyLoadedDocument({ data, preamble, fileLabel, fileHandle = null }) {
 async function loadFromFileHandle(fileHandle, fileName = fileHandle?.name) {
   await ensureSchemaLoaded();
   const yamlText = await readTextFromFileHandle(fileHandle);
-  const { data, preamble } = parseYamlDocument(yamlText);
+  const { data, yamlDocument } = parseYamlText(yamlText);
   applyLoadedDocument({
     data,
-    preamble,
+    yamlDocument,
     fileLabel: localHandleLabel(fileName ?? DEFAULT_DOWNLOAD_NAME),
     fileHandle,
   });
@@ -324,11 +320,15 @@ async function loadFromFileHandle(fileHandle, fileName = fileHandle?.name) {
 
 async function loadFromRepo() {
   await ensureSchemaLoaded();
-  const yamlText = await fetchFirstAvailable(REPO_YAML_URL_CANDIDATES, (response) => response.text(), "text");
-  const { data, preamble } = parseYamlDocument(yamlText);
+  const yamlText = await fetchFirstAvailable(
+    REPO_YAML_URL_CANDIDATES,
+    (response) => response.text(),
+    "text",
+  );
+  const { data, yamlDocument } = parseYamlText(yamlText);
   applyLoadedDocument({
     data,
-    preamble,
+    yamlDocument,
     fileLabel: REPO_FILE_LABEL,
     fileHandle: null,
   });
@@ -340,7 +340,9 @@ function getSuggestedFileName() {
 }
 
 function startDownload(filename, contents) {
-  const blob = new Blob([contents], { type: "application/yaml;charset=utf-8" });
+  const blob = new Blob([contents], {
+    type: "application/yaml;charset=utf-8",
+  });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
@@ -351,11 +353,18 @@ function startDownload(filename, contents) {
   URL.revokeObjectURL(url);
 }
 
-function getCurrentYamlText() {
+function getCurrentYamlSnapshot() {
   if (!editor) {
     throw new Error("Editor is not initialized.");
   }
-  return toYaml(editor.getValue());
+
+  const data = parseYamlObject(editor.getValue());
+  const yamlDocument = buildYamlDocument(data);
+
+  return {
+    yamlDocument,
+    yamlText: ensureTerminalNewline(yamlDocument.toString()),
+  };
 }
 
 function describeError(error) {
@@ -373,7 +382,9 @@ function confirmDiscardChanges(actionDescription) {
     return true;
   }
 
-  return window.confirm(`You have unsaved changes. Discard them and ${actionDescription}?`);
+  return window.confirm(
+    `You have unsaved changes. Discard them and ${actionDescription}?`,
+  );
 }
 
 async function runAction(action) {
@@ -399,10 +410,10 @@ async function handleOpenLocalFile() {
   await runAction(async () => {
     await ensureSchemaLoaded();
     const { fileHandle, fileName, text } = await openYamlFile();
-    const { data, preamble } = parseYamlDocument(text);
+    const { data, yamlDocument } = parseYamlText(text);
     applyLoadedDocument({
       data,
-      preamble,
+      yamlDocument,
       fileLabel: localHandleLabel(fileName),
       fileHandle,
     });
@@ -432,10 +443,12 @@ async function ensureCurrentFileHandle() {
 async function handleSaveInPlace() {
   await runAction(async () => {
     const fileHandle = await ensureCurrentFileHandle();
-    await saveYamlToHandle(fileHandle, getCurrentYamlText());
+    const snapshot = getCurrentYamlSnapshot();
+    await saveYamlToHandle(fileHandle, snapshot.yamlText);
     transitionState({
       fileHandle,
       fileLabel: localHandleLabel(getHandleFileName(fileHandle)),
+      yamlDocument: snapshot.yamlDocument,
       dirty: false,
     });
     setMessage(`Saved ${getHandleFileName(fileHandle)}.`, "success");
@@ -444,11 +457,16 @@ async function handleSaveInPlace() {
 
 async function handleSaveAs() {
   await runAction(async () => {
-    const fileHandle = await saveYamlAs(getSuggestedFileName(), getCurrentYamlText());
+    const snapshot = getCurrentYamlSnapshot();
+    const fileHandle = await saveYamlAs(
+      getSuggestedFileName(),
+      snapshot.yamlText,
+    );
     await persistHandle(fileHandle);
     transitionState({
       fileHandle,
       fileLabel: localHandleLabel(getHandleFileName(fileHandle)),
+      yamlDocument: snapshot.yamlDocument,
       dirty: false,
     });
     setMessage(`Saved ${getHandleFileName(fileHandle)}.`, "success");
@@ -458,7 +476,8 @@ async function handleSaveAs() {
 async function handleDownload() {
   await runAction(async () => {
     const fileName = getSuggestedFileName();
-    startDownload(fileName, getCurrentYamlText());
+    const snapshot = getCurrentYamlSnapshot();
+    startDownload(fileName, snapshot.yamlText);
     setMessage(`Downloaded ${fileName}.`, "success");
   });
 }
@@ -500,7 +519,10 @@ async function tryRestorePersistedHandle() {
 
   try {
     await loadFromFileHandle(fileHandle, handleName);
-    setMessage(`Loaded local YAML from persisted handle (${handleName}).`, "success");
+    setMessage(
+      `Loaded local YAML from persisted handle (${handleName}).`,
+      "success",
+    );
     return true;
   } catch (error) {
     console.warn("Persisted handle is no longer usable; clearing it.", error);
@@ -533,13 +555,19 @@ function setupFileAccessUI() {
 
   if (fileAccessCapabilities.canOpen) {
     elements.fileAccessLabel.textContent = "Open supported (Save As unavailable)";
-    setMessage("Save As is unavailable in this browser. Use Save In Place or Download YAML.", "info");
+    setMessage(
+      "Save As is unavailable in this browser. Use Save In Place or Download YAML.",
+      "info",
+    );
     return;
   }
 
   if (fileAccessCapabilities.canSaveAs) {
     elements.fileAccessLabel.textContent = "Save As supported (Open unavailable)";
-    setMessage("Opening local files is unavailable in this browser. Use Save As or Download YAML.", "info");
+    setMessage(
+      "Opening local files is unavailable in this browser. Use Save As or Download YAML.",
+      "info",
+    );
     return;
   }
 
