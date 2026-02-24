@@ -21,6 +21,10 @@ Which data types to consider beyond (software) VCS repositories?
 - How to handle changes in remote (e.g. GitHub to another provider/self-hosting)?
 - How to handle project renaming?
 
+## Conflicts
+
+How to handle conflicts, e.g. from force-pushes with diverging commit graph?
+
 ## Git export workspace?
 
 Should git exports/checkouts from the Fossil archive be one-offs to a manually specified location,
