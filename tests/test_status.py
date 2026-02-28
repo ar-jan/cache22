@@ -19,8 +19,8 @@ def test_status_fossil_reports_version() -> None:
         stderr="",
     )
 
-    with patch("cache22.fossil.shutil.which", return_value=str(fossil_path)):
-        with patch("cache22.fossil.subprocess.run", return_value=completed) as run:
+    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
+        with patch("cache22.system_tools.subprocess.run", return_value=completed) as run:
             result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 0
@@ -38,7 +38,7 @@ def test_status_fossil_reports_version() -> None:
 def test_status_fossil_reports_missing_binary_without_traceback() -> None:
     runner = CliRunner()
 
-    with patch("cache22.fossil.shutil.which", return_value=None):
+    with patch("cache22.system_tools.shutil.which", return_value=None):
         result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 1
@@ -54,10 +54,23 @@ def test_status_fossil_reports_version_failure_without_traceback() -> None:
         cmd=[str(fossil_path), "version"],
     )
 
-    with patch("cache22.fossil.shutil.which", return_value=str(fossil_path)):
-        with patch("cache22.fossil.subprocess.run", side_effect=error):
+    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
+        with patch("cache22.system_tools.subprocess.run", side_effect=error):
             result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 1
     assert "fossil version command failed with exit code 2" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_status_fossil_reports_spawn_failure_without_traceback() -> None:
+    runner = CliRunner()
+    fossil_path = Path("/tmp/fossil")
+
+    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
+        with patch("cache22.system_tools.subprocess.run", side_effect=OSError("spawn failed")):
+            result = runner.invoke(app, ["status", "fossil"])
+
+    assert result.exit_code == 1
+    assert "fossil version command could not be run: spawn failed" in result.output
     assert "Traceback" not in result.output

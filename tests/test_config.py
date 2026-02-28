@@ -9,11 +9,13 @@ from typer.testing import CliRunner
 
 from cache22.cli import app
 from cache22.config import (
+    Config,
     ConfigError,
     add_archive_dir,
     list_archive_dirs,
     load_config,
     normalize_archive_dir,
+    save_config,
 )
 
 
@@ -114,6 +116,16 @@ def test_load_reports_unreadable_config_path(tmp_path: Path, monkeypatch: pytest
         load_config()
 
 
+def test_save_reports_unwritable_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with patch("pathlib.Path.open", side_effect=OSError("disk full")):
+        with pytest.raises(ConfigError, match="Config file could not be written"):
+            save_config(Config(archive_dirs=[archive_dir]))
+
+
 def test_list_reports_invalid_config_without_traceback(
     runner: CliRunner,
     tmp_path: Path,
@@ -126,6 +138,23 @@ def test_list_reports_invalid_config_without_traceback(
 
     assert result.exit_code == 1
     assert "'archive_dirs' must be a list of strings" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_add_reports_write_failure_without_traceback(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with patch("cache22.config.save_config", side_effect=OSError("disk full")):
+        result = runner.invoke(app, ["config", "archive", "add", str(archive_dir)])
+
+    assert result.exit_code == 1
+    assert "disk full" in result.output
     assert "Traceback" not in result.output
 
 

@@ -8,11 +8,25 @@ from typing import Any
 
 import tomli_w
 
-from .paths import config_file
-
 
 class ConfigError(ValueError):
     """Raised when the persisted config is invalid."""
+
+
+def config_home() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home)
+
+    return Path.home() / ".config"
+
+
+def config_dir() -> Path:
+    return config_home() / "cache22"
+
+
+def config_file() -> Path:
+    return config_dir() / "config.toml"
 
 
 @dataclass(slots=True)
@@ -43,8 +57,11 @@ def save_config(config: Config) -> None:
     payload = {
         "archive_dirs": [str(archive_dir) for archive_dir in config.archive_dirs],
     }
-    with path.open("wb") as handle:
-        handle.write(tomli_w.dumps(payload).encode())
+    try:
+        with path.open("wb") as handle:
+            handle.write(tomli_w.dumps(payload).encode())
+    except OSError as exc:
+        raise ConfigError(f"Config file could not be written: {path}") from exc
 
 
 def normalize_archive_dir(raw_path: str | Path) -> Path:
@@ -73,6 +90,14 @@ def add_archive_dir(raw_path: str | Path) -> tuple[Path, bool]:
 
 def list_archive_dirs() -> list[Path]:
     return load_config().archive_dirs
+
+
+def default_archive_dir() -> Path:
+    archive_dirs = list_archive_dirs()
+    if not archive_dirs:
+        raise ValueError("No archive directories configured. Add one with 'cache22 config archive add PATH'")
+
+    return archive_dirs[0]
 
 
 def _parse_archive_dirs(data: Any, path: Path) -> list[Path]:
