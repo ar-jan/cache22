@@ -246,13 +246,25 @@ function applySequenceSpacing(node) {
   }
 }
 
+function preserveRootPresentation(sourceNode, targetNode) {
+  if (!sourceNode || !targetNode) {
+    return;
+  }
+
+  targetNode.commentBefore = sourceNode.commentBefore ?? null;
+  targetNode.comment = sourceNode.comment ?? null;
+  targetNode.spaceBefore = sourceNode.spaceBefore ?? false;
+}
+
 function buildYamlDocument(data) {
   const value = parseYamlObject(data);
   const yamlDocument = state.yamlDocument
     ? state.yamlDocument.clone()
     : createEmptyYamlDocument();
+  const previousContents = yamlDocument.contents;
 
   yamlDocument.contents = yamlDocument.createNode(value);
+  preserveRootPresentation(previousContents, yamlDocument.contents);
   applySequenceSpacing(yamlDocument.contents);
   return yamlDocument;
 }
