@@ -5,7 +5,7 @@
 ```sh
 # Create .venv and install dependencies
 uv sync --group dev
-# Install npm dependencies for docs/editor
+# Install npm dependencies for utils/editor
 npm install
 # Install git hooks for this repo
 uv run --group dev pre-commit install
@@ -19,7 +19,7 @@ uv run --group dev pre-commit run --all-files
 
 ```sh
 # Run Vite dev server, then open:
-# http://127.0.0.1:5173/docs/editor/
+# http://127.0.0.1:5173/utils/editor/
 npm run editor:dev
 ```
 

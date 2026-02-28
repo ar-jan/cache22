@@ -17,13 +17,13 @@ import {
 
 const REPO_SCHEMA_URL_CANDIDATES = [
   "/docs/related-works.schema.json",
-  "../related-works.schema.json",
-  "../../related-works.schema.json",
+  "../../docs/related-works.schema.json",
+  "../../../docs/related-works.schema.json",
 ];
 const REPO_YAML_URL_CANDIDATES = [
   "/docs/related-works.yaml",
-  "../related-works.yaml",
-  "../../related-works.yaml",
+  "../../docs/related-works.yaml",
+  "../../../docs/related-works.yaml",
 ];
 const DEFAULT_DOWNLOAD_NAME = "related-works.yaml";
 const REPO_FILE_LABEL = "docs/related-works.yaml (repo copy)";
