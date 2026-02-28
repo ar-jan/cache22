@@ -1,5 +1,4 @@
 import Jedison from "jedison";
-import { isMap, isPair, isSeq, parseDocument } from "yaml";
 import {
   chooseYamlFileHandle,
   openYamlFile,
@@ -14,6 +13,12 @@ import {
   supportsHandlePersistence,
   writeStoredRelatedWorksHandle,
 } from "./file-handle-store.js";
+import {
+  buildYamlDocument,
+  ensureTerminalNewline,
+  parseYamlObject,
+  parseYamlText,
+} from "./yaml-document.js";
 
 const REPO_SCHEMA_URL_CANDIDATES = [
   "/docs/related-works.schema.json",
@@ -191,97 +196,6 @@ function updateValidationLabel() {
   elements.validationLabel.textContent = `${errors.length} error(s)`;
 }
 
-function normalizeLineEndings(text) {
-  return text.replace(/\r\n?/g, "\n");
-}
-
-function ensureTerminalNewline(text) {
-  return text.replace(/\n?$/, "\n");
-}
-
-function isPlainObject(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function parseYamlObject(value) {
-  if (!isPlainObject(value)) {
-    throw new Error("YAML top-level value must be an object.");
-  }
-  return value;
-}
-
-function createEmptyYamlDocument() {
-  const yamlDocument = parseDocument("", {
-    prettyErrors: true,
-  });
-  if (yamlDocument.errors.length > 0) {
-    throw yamlDocument.errors[0];
-  }
-  return yamlDocument;
-}
-
-function applySequenceSpacing(node) {
-  if (!node) {
-    return;
-  }
-
-  if (isSeq(node)) {
-    node.items.forEach((item, index) => {
-      if (item && typeof item === "object") {
-        item.spaceBefore = index > 0;
-      }
-      applySequenceSpacing(item);
-    });
-    return;
-  }
-
-  if (isMap(node)) {
-    node.items.forEach((pair) => applySequenceSpacing(pair));
-    return;
-  }
-
-  if (isPair(node)) {
-    applySequenceSpacing(node.key);
-    applySequenceSpacing(node.value);
-  }
-}
-
-function preserveRootPresentation(sourceNode, targetNode) {
-  if (!sourceNode || !targetNode) {
-    return;
-  }
-
-  targetNode.commentBefore = sourceNode.commentBefore ?? null;
-  targetNode.comment = sourceNode.comment ?? null;
-  targetNode.spaceBefore = sourceNode.spaceBefore ?? false;
-}
-
-function buildYamlDocument(data) {
-  const value = parseYamlObject(data);
-  const yamlDocument = state.yamlDocument
-    ? state.yamlDocument.clone()
-    : createEmptyYamlDocument();
-  const previousContents = yamlDocument.contents;
-
-  yamlDocument.contents = yamlDocument.createNode(value);
-  preserveRootPresentation(previousContents, yamlDocument.contents);
-  applySequenceSpacing(yamlDocument.contents);
-  return yamlDocument;
-}
-
-function parseYamlText(text) {
-  const yamlDocument = parseDocument(normalizeLineEndings(text), {
-    prettyErrors: true,
-  });
-
-  if (yamlDocument.errors.length > 0) {
-    throw yamlDocument.errors[0];
-  }
-
-  const data = parseYamlObject(yamlDocument.toJS());
-  return { data, yamlDocument };
-}
-
 function createEditor(data) {
   if (editor && typeof editor.destroy === "function") {
     editor.destroy();
@@ -398,7 +312,7 @@ function getCurrentYamlSnapshot() {
   }
 
   const data = parseYamlObject(editor.getValue());
-  const yamlDocument = buildYamlDocument(data);
+  const yamlDocument = buildYamlDocument(data, state.yamlDocument);
 
   return {
     yamlDocument,
