@@ -1,5 +1,5 @@
 import Jedison from "jedison";
-import { parseDocument } from "yaml";
+import { isMap, isPair, isSeq, parseDocument } from "yaml";
 import {
   chooseYamlFileHandle,
   openYamlFile,
@@ -220,6 +220,32 @@ function createEmptyYamlDocument() {
   return yamlDocument;
 }
 
+function applySequenceSpacing(node) {
+  if (!node) {
+    return;
+  }
+
+  if (isSeq(node)) {
+    node.items.forEach((item, index) => {
+      if (item && typeof item === "object") {
+        item.spaceBefore = index > 0;
+      }
+      applySequenceSpacing(item);
+    });
+    return;
+  }
+
+  if (isMap(node)) {
+    node.items.forEach((pair) => applySequenceSpacing(pair));
+    return;
+  }
+
+  if (isPair(node)) {
+    applySequenceSpacing(node.key);
+    applySequenceSpacing(node.value);
+  }
+}
+
 function buildYamlDocument(data) {
   const value = parseYamlObject(data);
   const yamlDocument = state.yamlDocument
@@ -227,6 +253,7 @@ function buildYamlDocument(data) {
     : createEmptyYamlDocument();
 
   yamlDocument.contents = yamlDocument.createNode(value);
+  applySequenceSpacing(yamlDocument.contents);
   return yamlDocument;
 }
 
