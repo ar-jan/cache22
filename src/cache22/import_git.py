@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import ArchiveType, default_archive_dir, default_archive_type, normalize_archive_dir
+from .config import (
+    ArchiveType,
+    default_archive_dir,
+    default_archive_type,
+    list_archive_dirs,
+    normalize_archive_dir,
+)
 from .system_tools import find_fossil_executable, find_git_executable
 
 _TEMP_IMPORT_DIR_NAME = ".cache22-import"
@@ -97,6 +104,29 @@ def import_git_repository(
     return ImportResult(paths.fossil_repository, tuple(info_messages))
 
 
+def clean_repository_import_state(
+    url: str,
+    archive_dirs: Sequence[Path] | None = None,
+) -> tuple[Path, ...]:
+    repository = parse_repository_url(url)
+    removed_paths: list[Path] = []
+
+    for archive_dir in _resolve_archive_dirs(archive_dirs):
+        paths = archive_paths_for_repository(archive_dir, repository)
+        removed_paths.extend(_clean_repository_directory(paths.repository_dir))
+
+    return tuple(sorted(removed_paths, key=str))
+
+
+def clean_all_import_state(archive_dirs: Sequence[Path] | None = None) -> tuple[Path, ...]:
+    removed_paths: list[Path] = []
+
+    for archive_dir in _resolve_archive_dirs(archive_dirs):
+        removed_paths.extend(_clean_partial_state_under(archive_dir))
+
+    return tuple(sorted(removed_paths, key=str))
+
+
 def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -> ImportPaths:
     repository_dir = _repository_root(archive_dir, repository)
     temp_dir = repository_dir / _TEMP_IMPORT_DIR_NAME
@@ -115,26 +145,24 @@ def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -
     )
 
 
-def clear_git_import_stage(url: str, archive_dir: Path | None = None) -> tuple[Path, bool]:
-    repository = parse_repository_url(url)
-    resolved_archive_dir = _resolve_archive_dir(archive_dir)
-    paths = archive_paths_for_repository(resolved_archive_dir, repository)
-    if paths.temp_dir.exists():
-        shutil.rmtree(paths.temp_dir)
-        return paths.temp_dir, True
-
-    if paths.mirror_repository.exists() and not paths.clone_complete_marker.exists():
-        shutil.rmtree(paths.mirror_repository)
-        return paths.mirror_repository, True
-
-    return paths.repository_dir, False
-
-
 def _resolve_archive_dir(archive_dir: Path | None) -> Path:
     if archive_dir is None:
         return default_archive_dir()
 
     return normalize_archive_dir(archive_dir)
+
+
+def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ...]:
+    if archive_dirs is not None:
+        return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
+
+    configured_archive_dirs = tuple(list_archive_dirs())
+    if not configured_archive_dirs:
+        raise ValueError(
+            "No archive directories configured. Add one with 'cache22 config archive add PATH'"
+        )
+
+    return configured_archive_dirs
 
 
 def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
@@ -170,8 +198,18 @@ def _repository_from_path(host: str, raw_path: str) -> GitRepository:
     if normalized_path.casefold().endswith(".git"):
         normalized_path = normalized_path[:-4]
 
-    parts = [part for part in normalized_path.split("/") if part]
-    if len(parts) < 2 or any(part in {".", ".."} for part in parts):
+    parts = _path_parts(
+        normalized_path,
+        empty_message=(
+            "Repository URL must have the form HOST/NAMESPACE[/SUBGROUP/...]/REPO(.git): "
+            f"{host}/{raw_path.strip('/')}"
+        ),
+        invalid_segment_message=(
+            "Repository URL must have the form HOST/NAMESPACE[/SUBGROUP/...]/REPO(.git): "
+            f"{host}/{raw_path.strip('/')}"
+        ),
+    )
+    if len(parts) < 2:
         raise ValueError(
             f"Repository URL must have the form HOST/NAMESPACE[/SUBGROUP/...]/REPO(.git): {host}/{raw_path.strip('/')}"
         )
@@ -200,7 +238,7 @@ def _ensure_final_git_mirror(
     if paths.mirror_repository.exists():
         raise ValueError(
             f"Mirror repository exists without a completion marker: {paths.mirror_repository}. "
-            f"Clear it with 'cache22 import git-clear {url}' to start over."
+            f"Clear it with 'cache22 clean repo {url}' to start over."
         )
 
     paths.repository_dir.mkdir(parents=True, exist_ok=True)
@@ -286,7 +324,7 @@ def _import_failure_message(
     if archive_type == "fossil" and paths.temp_dir.exists():
         return (
             f"{message}. Temporary Fossil import state was kept at {paths.temp_dir}. "
-            f"Clear it with 'cache22 import git-clear {url}' to start over."
+            f"Clear it with 'cache22 clean repo {url}' to start over."
         )
 
     return message
@@ -308,11 +346,94 @@ def _repository_root(root: Path, repository: GitRepository) -> Path:
     return root.joinpath(repository.host, *repository.namespace, repository.name)
 
 
+def _path_parts(
+    raw_path: str,
+    *,
+    empty_message: str,
+    invalid_segment_message: str,
+) -> list[str]:
+    parts = [part for part in raw_path.strip().strip("/").split("/") if part]
+    if not parts:
+        raise ValueError(empty_message)
+    if any(part in {".", ".."} for part in parts):
+        raise ValueError(invalid_segment_message)
+    return parts
+
+
 def _normalize_repository_parts(host: str, parts: list[str]) -> list[str]:
     if host in _CASEFOLDED_REPOSITORY_HOSTS:
         return [part.casefold() for part in parts]
 
     return parts
+
+
+def _clean_partial_state_under(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+
+    removed_paths: list[Path] = []
+    directories_to_visit = [root]
+
+    while directories_to_visit:
+        current_dir = directories_to_visit.pop()
+        if not current_dir.is_dir():
+            continue
+
+        if _looks_like_repository_dir(current_dir):
+            removed_paths.extend(_clean_repository_directory(current_dir))
+            continue
+
+        child_directories = sorted(
+            (child for child in current_dir.iterdir() if child.is_dir()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+        directories_to_visit.extend(child_directories)
+
+    return removed_paths
+
+
+def _looks_like_repository_dir(path: Path) -> bool:
+    mirror_repository = path / f"{path.name}.git"
+    fossil_repository = path / f"{path.name}.fossil"
+
+    return (
+        (path / _TEMP_IMPORT_DIR_NAME).exists()
+        or (path / _CLONE_COMPLETE_MARKER_NAME).exists()
+        or mirror_repository.exists()
+        or fossil_repository.exists()
+        or (path / "git.marks").exists()
+        or (path / "fossil.marks").exists()
+    )
+
+
+def _clean_repository_directory(repository_dir: Path) -> list[Path]:
+    removed_paths: list[Path] = []
+    temp_dir = repository_dir / _TEMP_IMPORT_DIR_NAME
+    clone_complete_marker = repository_dir / _CLONE_COMPLETE_MARKER_NAME
+    mirror_repository = repository_dir / f"{repository_dir.name}.git"
+
+    if temp_dir.exists():
+        _remove_path(temp_dir)
+        removed_paths.append(temp_dir)
+
+    if mirror_repository.exists() and not clone_complete_marker.exists():
+        _remove_path(mirror_repository)
+        removed_paths.append(mirror_repository)
+
+    if clone_complete_marker.exists() and not mirror_repository.exists():
+        _remove_path(clone_complete_marker)
+        removed_paths.append(clone_complete_marker)
+
+    return removed_paths
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+        return
+
+    path.unlink()
 
 
 def _run_fast_export_import(

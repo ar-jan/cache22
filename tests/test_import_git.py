@@ -11,7 +11,8 @@ from cache22.cli import app
 from cache22.import_git import (
     ImportResult,
     archive_paths_for_repository,
-    clear_git_import_stage,
+    clean_all_import_state,
+    clean_repository_import_state,
     import_git_repository,
     parse_repository_url,
 )
@@ -473,11 +474,13 @@ def test_import_git_repository_rejects_incomplete_final_clone(tmp_path: Path) ->
     paths.mirror_repository.mkdir(parents=True)
 
     with patch("cache22.import_git.find_git_executable", return_value=Path("/usr/bin/git")):
-        with pytest.raises(RuntimeError, match="cache22 import git-clear"):
+        with pytest.raises(RuntimeError, match="cache22 clean repo"):
             import_git_repository(url, archive_dir=archive_dir, archive_type="git")
 
 
-def test_clear_git_import_stage_removes_fossil_stage(tmp_path: Path) -> None:
+def test_clean_repository_import_state_removes_fossil_stage_and_incomplete_clone(
+    tmp_path: Path,
+) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
@@ -485,27 +488,49 @@ def test_clear_git_import_stage_removes_fossil_stage(tmp_path: Path) -> None:
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.temp_dir.mkdir(parents=True)
     (paths.temp_dir / "partial").write_text("partial")
+    paths.mirror_repository.mkdir(parents=True)
 
-    cleared_path, cleared = clear_git_import_stage(url, archive_dir=archive_dir)
+    removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
 
-    assert cleared_path == paths.temp_dir
-    assert cleared is True
+    assert removed_paths == (paths.temp_dir, paths.mirror_repository)
     assert not paths.temp_dir.exists()
+    assert not paths.mirror_repository.exists()
 
 
-def test_clear_git_import_stage_removes_incomplete_clone(tmp_path: Path) -> None:
+def test_clean_repository_import_state_removes_stray_clone_marker(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.mirror_repository.mkdir(parents=True)
+    paths.repository_dir.mkdir(parents=True)
+    paths.clone_complete_marker.write_text("complete\n")
 
-    cleared_path, cleared = clear_git_import_stage(url, archive_dir=archive_dir)
+    removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
 
-    assert cleared_path == paths.mirror_repository
-    assert cleared is True
-    assert not paths.mirror_repository.exists()
+    assert removed_paths == (paths.clone_complete_marker,)
+    assert not paths.clone_complete_marker.exists()
+
+
+def test_clean_all_import_state_removes_partial_state_in_all_archive_dirs(tmp_path: Path) -> None:
+    first_archive_dir = tmp_path / "archive-a"
+    second_archive_dir = tmp_path / "archive-b"
+    first_archive_dir.mkdir()
+    second_archive_dir.mkdir()
+    first_repository = parse_repository_url("https://github.com/ar-jan/cache22.git")
+    first_paths = archive_paths_for_repository(first_archive_dir, first_repository)
+    first_paths.temp_dir.mkdir(parents=True)
+    second_repository = parse_repository_url("https://gitlab.com/group/subgroup/cache22.git")
+    second_paths = archive_paths_for_repository(second_archive_dir, second_repository)
+    second_paths.mirror_repository.mkdir(parents=True)
+
+    removed_paths = clean_all_import_state(
+        archive_dirs=(first_archive_dir, second_archive_dir),
+    )
+
+    assert removed_paths == (first_paths.temp_dir, second_paths.mirror_repository)
+    assert not first_paths.temp_dir.exists()
+    assert not second_paths.mirror_repository.exists()
 
 
 def test_import_git_reports_missing_archive_dir_without_traceback(
@@ -515,7 +540,7 @@ def test_import_git_reports_missing_archive_dir_without_traceback(
     runner = CliRunner()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
+    result = runner.invoke(app, ["import", "https://github.com/ar-jan/cache22.git"])
 
     assert result.exit_code == 1
     assert "No archive directories configured" in result.output
@@ -529,7 +554,7 @@ def test_import_git_reports_success_path(runner: CliRunner, tmp_path: Path) -> N
         "cache22.cli.import_git_repository",
         return_value=ImportResult(archive_path=archive_path),
     ):
-        result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
+        result = runner.invoke(app, ["import", "https://github.com/ar-jan/cache22.git"])
 
     assert result.exit_code == 0
     assert f"Imported archive: {archive_path}" in result.output
@@ -548,7 +573,7 @@ def test_import_git_reports_info_messages_before_success_path(
             info_messages=(f"INFO: archive already exists: {archive_path}",),
         ),
     ):
-        result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
+        result = runner.invoke(app, ["import", "https://github.com/ar-jan/cache22.git"])
 
     assert result.exit_code == 0
     assert result.output.splitlines() == [
@@ -557,13 +582,32 @@ def test_import_git_reports_info_messages_before_success_path(
     ]
 
 
-def test_import_git_clear_reports_success_path(runner: CliRunner, tmp_path: Path) -> None:
-    cleared_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22-import"
+def test_import_rejects_extra_arguments_without_traceback(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
 
-    with patch("cache22.cli.clear_git_import_stage", return_value=(cleared_path, True)):
-        result = runner.invoke(
-            app, ["import", "git-clear", "https://github.com/ar-jan/cache22.git"]
-        )
+    assert result.exit_code == 2
+    assert "Traceback" not in result.output
+
+
+def test_clean_repo_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> None:
+    removed_paths = (
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22-import",
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git",
+    )
+
+    with patch("cache22.cli.clean_repository_import_state", return_value=removed_paths):
+        result = runner.invoke(app, ["clean", "repo", "https://github.com/ar-jan/cache22.git"])
 
     assert result.exit_code == 0
-    assert f"Cleared Git import state: {cleared_path}" in result.output
+    assert result.output.splitlines() == [
+        f"Removed partial import state: {removed_paths[0]}",
+        f"Removed partial import state: {removed_paths[1]}",
+    ]
+
+
+def test_clean_all_reports_no_partial_state(runner: CliRunner) -> None:
+    with patch("cache22.cli.clean_all_import_state", return_value=()):
+        result = runner.invoke(app, ["clean", "all"])
+
+    assert result.exit_code == 0
+    assert result.output == "No partial import state found in configured archive directories.\n"
