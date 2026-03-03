@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .config import default_archive_dir, normalize_archive_dir
+from .config import ArchiveType, default_archive_dir, default_archive_type, normalize_archive_dir
 from .system_tools import find_fossil_executable, find_git_executable
 
 _STAGING_ROOT_NAME = ".cache22"
@@ -25,16 +25,22 @@ class GitRepository:
 @dataclass(frozen=True, slots=True)
 class ImportPaths:
     repository_dir: Path
+    mirror_repository: Path
     fossil_repository: Path
     git_marks: Path
     fossil_marks: Path
     stage_root: Path
     stage_dir: Path
-    mirror_dir: Path
     staged_fossil_repository: Path
     staged_git_marks: Path
     staged_fossil_marks: Path
     clone_complete_marker: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ImportResult:
+    archive_path: Path
+    info_messages: tuple[str, ...] = ()
 
 
 def parse_repository_url(url: str) -> GitRepository:
@@ -46,34 +52,51 @@ def parse_repository_url(url: str) -> GitRepository:
     return _repository_from_path(host, raw_path)
 
 
-def import_git_repository(url: str, archive_dir: Path | None = None) -> Path:
+def import_git_repository(
+    url: str,
+    archive_dir: Path | None = None,
+    archive_type: ArchiveType | None = None,
+) -> ImportResult:
     repository = parse_repository_url(url)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
+    resolved_archive_type = _resolve_archive_type(archive_type)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
-    _ensure_archive_state_is_absent(paths)
+    requested_archive = _existing_requested_archive_path(paths, resolved_archive_type)
+    info_messages: list[str] = []
+
+    if requested_archive is not None:
+        info_messages.append(f"INFO: archive already exists: {requested_archive}")
+        return ImportResult(requested_archive, tuple(info_messages))
 
     git_executable = find_git_executable()
-    fossil_executable = find_fossil_executable()
 
     try:
-        _ensure_staged_clone(
+        existing_mirror_message = _ensure_final_git_mirror(
             git_executable=git_executable,
             url=url,
             paths=paths,
         )
-        _reset_staged_import_state(paths)
+        if existing_mirror_message is not None:
+            info_messages.append(existing_mirror_message)
+
+        if resolved_archive_type == "git":
+            return ImportResult(paths.mirror_repository, tuple(info_messages))
+
+        fossil_executable = find_fossil_executable()
+        _prepare_fossil_stage(paths)
         _run_fast_export_import(
             git_executable=git_executable,
             fossil_executable=fossil_executable,
-            mirror_dir=paths.mirror_dir,
             paths=paths,
         )
         _promote_staged_import_state(paths)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise RuntimeError(_staged_failure_message(url, paths, str(exc))) from exc
+        raise RuntimeError(
+            _import_failure_message(url, paths, resolved_archive_type, str(exc))
+        ) from exc
 
     _clear_stage_dir_after_success(paths)
-    return paths.fossil_repository
+    return ImportResult(paths.fossil_repository, tuple(info_messages))
 
 
 def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -> ImportPaths:
@@ -84,16 +107,16 @@ def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -
 
     return ImportPaths(
         repository_dir=repository_dir,
+        mirror_repository=repository_dir / f"{repository.name}.git",
         fossil_repository=repository_dir / f"{repository.name}.fossil",
         git_marks=repository_dir / "git.marks",
         fossil_marks=repository_dir / "fossil.marks",
         stage_root=stage_root,
         stage_dir=stage_dir,
-        mirror_dir=stage_dir / "repo.git",
         staged_fossil_repository=stage_dir / f"{repository.name}.fossil",
         staged_git_marks=stage_dir / "git.marks",
         staged_fossil_marks=stage_dir / "fossil.marks",
-        clone_complete_marker=stage_dir / _CLONE_COMPLETE_MARKER_NAME,
+        clone_complete_marker=repository_dir / _CLONE_COMPLETE_MARKER_NAME,
     )
 
 
@@ -101,12 +124,16 @@ def clear_git_import_stage(url: str, archive_dir: Path | None = None) -> tuple[P
     repository = parse_repository_url(url)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
-    if not paths.stage_dir.exists():
-        return paths.stage_dir, False
+    if paths.stage_dir.exists():
+        shutil.rmtree(paths.stage_dir)
+        _remove_empty_stage_parents(paths.stage_dir.parent, stop=paths.stage_root)
+        return paths.stage_dir, True
 
-    shutil.rmtree(paths.stage_dir)
-    _remove_empty_stage_parents(paths.stage_dir.parent, stop=paths.stage_root)
-    return paths.stage_dir, True
+    if paths.mirror_repository.exists() and not paths.clone_complete_marker.exists():
+        shutil.rmtree(paths.mirror_repository)
+        return paths.mirror_repository, True
+
+    return paths.repository_dir, False
 
 
 def _resolve_archive_dir(archive_dir: Path | None) -> Path:
@@ -114,6 +141,13 @@ def _resolve_archive_dir(archive_dir: Path | None) -> Path:
         return default_archive_dir()
 
     return normalize_archive_dir(archive_dir)
+
+
+def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
+    if archive_type is not None:
+        return archive_type
+
+    return default_archive_type()
 
 
 def _split_clone_url(raw_url: str) -> tuple[str, str]:
@@ -156,50 +190,65 @@ def _repository_from_path(host: str, raw_path: str) -> GitRepository:
     )
 
 
-def _ensure_archive_state_is_absent(paths: ImportPaths) -> None:
-    for path in (paths.fossil_repository, paths.git_marks, paths.fossil_marks):
-        if path.exists():
-            raise ValueError(f"Archive state already exists: {path}")
-
-
-def _ensure_staged_clone(
+def _ensure_final_git_mirror(
     *,
     git_executable: Path,
     url: str,
     paths: ImportPaths,
-) -> None:
+) -> str | None:
     if paths.clone_complete_marker.exists():
-        if not paths.mirror_dir.exists():
+        if not paths.mirror_repository.exists():
             raise ValueError(
-                f"Staged clone marker exists but mirror repository is missing: {paths.stage_dir}"
+                f"Clone marker exists but mirror repository is missing: {paths.repository_dir}"
             )
-        return
+        return f"INFO: archive already exists: {paths.mirror_repository}"
 
-    if paths.stage_dir.exists():
+    if paths.mirror_repository.exists():
         raise ValueError(
-            f"Staged clone is incomplete and must be cleared before retrying: {paths.stage_dir}"
+            f"Mirror repository exists without a completion marker: {paths.mirror_repository}. "
+            f"Clear it with 'cache22 import git-clear {url}' to start over."
         )
 
-    paths.stage_dir.parent.mkdir(parents=True, exist_ok=True)
+    paths.repository_dir.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            [str(git_executable), "clone", "--mirror", url, str(paths.mirror_dir)],
+            [str(git_executable), "clone", "--mirror", url, str(paths.mirror_repository)],
             check=True,
         )
     except subprocess.CalledProcessError as exc:
+        _clear_incomplete_mirror(paths)
         raise RuntimeError(f"git clone --mirror failed with exit code {exc.returncode}") from exc
 
-    paths.clone_complete_marker.write_text("complete\n")
+    try:
+        paths.clone_complete_marker.write_text("complete\n")
+    except OSError:
+        _clear_incomplete_mirror(paths)
+        raise
+
+    return None
 
 
-def _reset_staged_import_state(paths: ImportPaths) -> None:
-    for path in (
-        paths.staged_fossil_repository,
-        paths.staged_git_marks,
-        paths.staged_fossil_marks,
-    ):
-        if path.exists():
-            path.unlink()
+def _prepare_fossil_stage(paths: ImportPaths) -> None:
+    if paths.stage_dir.exists():
+        shutil.rmtree(paths.stage_dir)
+
+    paths.stage_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _clear_incomplete_mirror(paths: ImportPaths) -> None:
+    if paths.clone_complete_marker.exists():
+        try:
+            paths.clone_complete_marker.unlink()
+        except OSError:
+            return
+
+    if not paths.mirror_repository.exists():
+        return
+
+    try:
+        shutil.rmtree(paths.mirror_repository)
+    except OSError:
+        return
 
 
 def _promote_staged_import_state(paths: ImportPaths) -> None:
@@ -245,11 +294,31 @@ def _remove_empty_stage_parents(start: Path, *, stop: Path) -> None:
         current = current.parent
 
 
-def _staged_failure_message(url: str, paths: ImportPaths, message: str) -> str:
-    return (
-        f"{message}. Staged Git import state was kept at {paths.stage_dir}. "
-        f"Clear it with 'cache22 import git-clear {url}' to start over."
-    )
+def _import_failure_message(
+    url: str,
+    paths: ImportPaths,
+    archive_type: ArchiveType,
+    message: str,
+) -> str:
+    if archive_type == "fossil" and paths.stage_dir.exists():
+        return (
+            f"{message}. Staged Fossil import state was kept at {paths.stage_dir}. "
+            f"Clear it with 'cache22 import git-clear {url}' to start over."
+        )
+
+    return message
+
+
+def _existing_requested_archive_path(paths: ImportPaths, archive_type: ArchiveType) -> Path | None:
+    if archive_type == "git":
+        if paths.clone_complete_marker.exists() and paths.mirror_repository.exists():
+            return paths.mirror_repository
+        return None
+
+    if paths.fossil_repository.exists():
+        return paths.fossil_repository
+
+    return None
 
 
 def _repository_root(root: Path, repository: GitRepository) -> Path:
@@ -267,13 +336,12 @@ def _run_fast_export_import(
     *,
     git_executable: Path,
     fossil_executable: Path,
-    mirror_dir: Path,
     paths: ImportPaths,
 ) -> None:
     git_command = [
         str(git_executable),
         "-C",
-        str(mirror_dir),
+        str(paths.mirror_repository),
         "fast-export",
         "--all",
         "--signed-tags=warn-strip",

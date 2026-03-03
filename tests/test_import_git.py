@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from cache22.cli import app
 from cache22.import_git import (
+    ImportResult,
     archive_paths_for_repository,
     clear_git_import_stage,
     import_git_repository,
@@ -111,16 +112,16 @@ def test_archive_paths_for_repository_are_deterministic_for_github(
     paths = archive_paths_for_repository(tmp_path, repository)
 
     assert paths.repository_dir == tmp_path / "github.com" / "ar-jan" / "cache22"
+    assert paths.mirror_repository == paths.repository_dir / "cache22.git"
     assert paths.fossil_repository == paths.repository_dir / "cache22.fossil"
     assert paths.git_marks == paths.repository_dir / "git.marks"
     assert paths.fossil_marks == paths.repository_dir / "fossil.marks"
     assert paths.stage_root == tmp_path / ".cache22" / "git-import"
     assert paths.stage_dir == paths.stage_root / "github.com" / "ar-jan" / "cache22"
-    assert paths.mirror_dir == paths.stage_dir / "repo.git"
     assert paths.staged_fossil_repository == paths.stage_dir / "cache22.fossil"
     assert paths.staged_git_marks == paths.stage_dir / "git.marks"
     assert paths.staged_fossil_marks == paths.stage_dir / "fossil.marks"
-    assert paths.clone_complete_marker == paths.stage_dir / ".clone-complete"
+    assert paths.clone_complete_marker == paths.repository_dir / ".clone-complete"
 
 
 def test_archive_paths_for_repository_include_gitlab_subgroups(tmp_path: Path) -> None:
@@ -129,6 +130,7 @@ def test_archive_paths_for_repository_include_gitlab_subgroups(tmp_path: Path) -
     paths = archive_paths_for_repository(tmp_path, repository)
 
     assert paths.repository_dir == tmp_path / "gitlab.com" / "group" / "subgroup" / "cache22"
+    assert paths.mirror_repository == paths.repository_dir / "cache22.git"
     assert paths.fossil_repository == paths.repository_dir / "cache22.fossil"
     assert paths.git_marks == paths.repository_dir / "git.marks"
     assert paths.fossil_marks == paths.repository_dir / "fossil.marks"
@@ -146,12 +148,51 @@ def test_archive_paths_for_repository_include_alternative_git_host(
     paths = archive_paths_for_repository(tmp_path, repository)
 
     assert paths.repository_dir == tmp_path / "git.example.org" / "Team" / "Subgroup" / "Cache22"
+    assert paths.mirror_repository == paths.repository_dir / "Cache22.git"
     assert paths.fossil_repository == paths.repository_dir / "Cache22.fossil"
     assert paths.git_marks == paths.repository_dir / "git.marks"
     assert paths.fossil_marks == paths.repository_dir / "fossil.marks"
 
 
-def test_import_git_repository_runs_clone_and_pipeline(tmp_path: Path) -> None:
+def test_import_git_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    repository = parse_repository_url("https://gitlab.com/Group/Subgroup/Cache22.git")
+    paths = archive_paths_for_repository(archive_dir, repository)
+    clone_calls: list[list[str]] = []
+
+    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+        assert check is True
+        clone_calls.append(args)
+        Path(args[4]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    with patch("cache22.import_git.find_git_executable", return_value=Path("/usr/bin/git")):
+        with patch("cache22.import_git.find_fossil_executable", side_effect=AssertionError):
+            with patch("cache22.import_git.subprocess.run", side_effect=fake_run):
+                result = import_git_repository(
+                    "https://gitlab.com/Group/Subgroup/Cache22.git",
+                    archive_dir=archive_dir,
+                    archive_type="git",
+                )
+
+    assert result.archive_path == paths.mirror_repository
+    assert result.info_messages == ()
+    assert clone_calls == [
+        [
+            "/usr/bin/git",
+            "clone",
+            "--mirror",
+            "https://gitlab.com/Group/Subgroup/Cache22.git",
+            str(paths.mirror_repository),
+        ]
+    ]
+    assert paths.mirror_repository.exists()
+    assert paths.clone_complete_marker.exists()
+    assert not paths.stage_dir.exists()
+
+
+def test_import_git_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     repository = parse_repository_url("https://gitlab.com/Group/Subgroup/Cache22.git")
@@ -179,7 +220,8 @@ def test_import_git_repository_runs_clone_and_pipeline(tmp_path: Path) -> None:
         elif args[0] == "/usr/bin/fossil":
             fossil_marks = Path(args[4])
             fossil_repository = Path(args[5])
-            fossil_marks.parent.mkdir(parents=True, exist_ok=True)
+            assert fossil_repository.parent == paths.stage_dir
+            assert fossil_repository.parent.exists()
             fossil_marks.write_text("fossil marks")
             fossil_repository.write_text("fossil repo")
         popen_calls.append(process)
@@ -192,29 +234,26 @@ def test_import_git_repository_runs_clone_and_pipeline(tmp_path: Path) -> None:
         ):
             with patch("cache22.import_git.subprocess.run", side_effect=fake_run):
                 with patch("cache22.import_git.subprocess.Popen", side_effect=fake_popen):
-                    archive_path = import_git_repository(
+                    result = import_git_repository(
                         "https://gitlab.com/Group/Subgroup/Cache22.git",
                         archive_dir=archive_dir,
+                        archive_type="fossil",
                     )
 
-    assert (
-        archive_path
-        == archive_dir / "gitlab.com" / "group" / "subgroup" / "cache22" / "cache22.fossil"
-    )
-    assert len(clone_calls) == 1
+    assert result.archive_path == paths.fossil_repository
+    assert result.info_messages == ()
     assert clone_calls[0][:4] == [
         "/usr/bin/git",
         "clone",
         "--mirror",
         "https://gitlab.com/Group/Subgroup/Cache22.git",
     ]
-    assert clone_calls[0][4] == str(paths.mirror_dir)
-
+    assert clone_calls[0][4] == str(paths.mirror_repository)
     assert len(popen_calls) == 2
     assert popen_calls[0].args[:4] == [
         "/usr/bin/git",
         "-C",
-        clone_calls[0][4],
+        str(paths.mirror_repository),
         "fast-export",
     ]
     assert popen_calls[0].args[4:] == [
@@ -233,19 +272,23 @@ def test_import_git_repository_runs_clone_and_pipeline(tmp_path: Path) -> None:
     assert popen_calls[1].stdin is popen_calls[0].stdout
     assert popen_calls[0].stdout is not None
     assert popen_calls[0].stdout.closed is True
+    assert paths.mirror_repository.exists()
+    assert paths.clone_complete_marker.exists()
     assert paths.fossil_repository.exists()
     assert paths.git_marks.exists()
     assert paths.fossil_marks.exists()
     assert not paths.stage_dir.exists()
 
 
-def test_import_git_repository_reuses_completed_staged_clone(tmp_path: Path) -> None:
+def test_import_git_repository_reuses_completed_final_git_mirror_for_fossil(
+    tmp_path: Path,
+) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.mirror_dir.mkdir(parents=True)
+    paths.mirror_repository.mkdir(parents=True)
     paths.clone_complete_marker.write_text("complete\n")
     popen_calls: list[_FakeProcess] = []
 
@@ -261,6 +304,7 @@ def test_import_git_repository_reuses_completed_staged_clone(tmp_path: Path) -> 
         process = _FakeProcess(args, stdout=stdout, stdin=stdin)
         if args[0] == "/usr/bin/git":
             export_marks = _export_marks_path(args)
+            export_marks.parent.mkdir(parents=True, exist_ok=True)
             export_marks.write_text("git marks")
         elif args[0] == "/usr/bin/fossil":
             Path(args[4]).write_text("fossil marks")
@@ -275,12 +319,49 @@ def test_import_git_repository_reuses_completed_staged_clone(tmp_path: Path) -> 
         ):
             with patch("cache22.import_git.subprocess.run", side_effect=fake_run):
                 with patch("cache22.import_git.subprocess.Popen", side_effect=fake_popen):
-                    archive_path = import_git_repository(url, archive_dir=archive_dir)
+                    result = import_git_repository(
+                        url,
+                        archive_dir=archive_dir,
+                        archive_type="fossil",
+                    )
 
-    assert archive_path == paths.fossil_repository
+    assert result.archive_path == paths.fossil_repository
+    assert result.info_messages == (f"INFO: archive already exists: {paths.mirror_repository}",)
     assert len(popen_calls) == 2
     assert paths.fossil_repository.exists()
     assert not paths.stage_dir.exists()
+
+
+def test_import_git_repository_returns_existing_git_archive_with_info(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    url = "https://github.com/ar-jan/cache22.git"
+    repository = parse_repository_url(url)
+    paths = archive_paths_for_repository(archive_dir, repository)
+    paths.mirror_repository.mkdir(parents=True)
+    paths.clone_complete_marker.write_text("complete\n")
+
+    with patch("cache22.import_git.find_git_executable", side_effect=AssertionError):
+        result = import_git_repository(url, archive_dir=archive_dir, archive_type="git")
+
+    assert result.archive_path == paths.mirror_repository
+    assert result.info_messages == (f"INFO: archive already exists: {paths.mirror_repository}",)
+
+
+def test_import_git_repository_returns_existing_fossil_archive_with_info(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    url = "https://github.com/ar-jan/cache22.git"
+    repository = parse_repository_url(url)
+    paths = archive_paths_for_repository(archive_dir, repository)
+    paths.fossil_repository.parent.mkdir(parents=True)
+    paths.fossil_repository.write_text("existing")
+
+    with patch("cache22.import_git.find_git_executable", side_effect=AssertionError):
+        result = import_git_repository(url, archive_dir=archive_dir, archive_type="fossil")
+
+    assert result.archive_path == paths.fossil_repository
+    assert result.info_messages == (f"INFO: archive already exists: {paths.fossil_repository}",)
 
 
 def test_import_git_repository_keeps_success_when_stage_cleanup_fails(
@@ -324,16 +405,21 @@ def test_import_git_repository_keeps_success_when_stage_cleanup_fails(
                         "cache22.import_git._clear_stage_dir",
                         side_effect=OSError("cleanup failed"),
                     ):
-                        archive_path = import_git_repository(url, archive_dir=archive_dir)
+                        result = import_git_repository(
+                            url,
+                            archive_dir=archive_dir,
+                            archive_type="fossil",
+                        )
 
-    assert archive_path == paths.fossil_repository
+    assert result.archive_path == paths.fossil_repository
+    assert paths.mirror_repository.exists()
     assert paths.fossil_repository.exists()
     assert paths.git_marks.exists()
     assert paths.fossil_marks.exists()
     assert paths.stage_dir.exists()
 
 
-def test_import_git_repository_preserves_staged_clone_after_pipeline_failure(
+def test_import_git_repository_preserves_fossil_stage_after_pipeline_failure(
     tmp_path: Path,
 ) -> None:
     archive_dir = tmp_path / "archive"
@@ -367,57 +453,61 @@ def test_import_git_repository_preserves_staged_clone_after_pipeline_failure(
         ):
             with patch("cache22.import_git.subprocess.run", side_effect=fake_run):
                 with patch("cache22.import_git.subprocess.Popen", side_effect=fake_popen):
-                    with pytest.raises(RuntimeError, match="Staged Git import state was kept"):
-                        import_git_repository(url, archive_dir=archive_dir)
+                    with pytest.raises(RuntimeError, match="Staged Fossil import state was kept"):
+                        import_git_repository(
+                            url,
+                            archive_dir=archive_dir,
+                            archive_type="fossil",
+                        )
 
     assert paths.stage_dir.exists()
-    assert paths.mirror_dir.exists()
+    assert paths.mirror_repository.exists()
     assert paths.clone_complete_marker.exists()
     assert not paths.fossil_repository.exists()
 
 
-def test_import_git_repository_rejects_incomplete_staged_clone(tmp_path: Path) -> None:
+def test_import_git_repository_rejects_incomplete_final_clone(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.mirror_dir.mkdir(parents=True)
+    paths.mirror_repository.mkdir(parents=True)
 
     with patch("cache22.import_git.find_git_executable", return_value=Path("/usr/bin/git")):
-        with patch(
-            "cache22.import_git.find_fossil_executable",
-            return_value=Path("/usr/bin/fossil"),
-        ):
-            with pytest.raises(RuntimeError, match="cache22 import git-clear"):
-                import_git_repository(url, archive_dir=archive_dir)
+        with pytest.raises(RuntimeError, match="cache22 import git-clear"):
+            import_git_repository(url, archive_dir=archive_dir, archive_type="git")
 
 
-def test_clear_git_import_stage_removes_staged_clone(tmp_path: Path) -> None:
+def test_clear_git_import_stage_removes_fossil_stage(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.mirror_dir.mkdir(parents=True)
-    paths.clone_complete_marker.write_text("complete\n")
+    paths.stage_dir.mkdir(parents=True)
+    (paths.stage_dir / "partial").write_text("partial")
 
-    cleared_stage_dir, cleared = clear_git_import_stage(url, archive_dir=archive_dir)
+    cleared_path, cleared = clear_git_import_stage(url, archive_dir=archive_dir)
 
-    assert cleared_stage_dir == paths.stage_dir
+    assert cleared_path == paths.stage_dir
     assert cleared is True
     assert not paths.stage_dir.exists()
 
 
-def test_import_git_repository_rejects_existing_archive_state(tmp_path: Path) -> None:
+def test_clear_git_import_stage_removes_incomplete_clone(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
-    archive_path = archive_dir / "github.com" / "ar-jan" / "cache22" / "cache22.fossil"
-    archive_path.parent.mkdir(parents=True)
-    archive_path.write_text("existing")
+    url = "https://gitlab.com/group/subgroup/cache22.git"
+    repository = parse_repository_url(url)
+    paths = archive_paths_for_repository(archive_dir, repository)
+    paths.mirror_repository.mkdir(parents=True)
 
-    with pytest.raises(ValueError, match="Archive state already exists"):
-        import_git_repository("https://github.com/ar-jan/cache22.git", archive_dir=archive_dir)
+    cleared_path, cleared = clear_git_import_stage(url, archive_dir=archive_dir)
+
+    assert cleared_path == paths.mirror_repository
+    assert cleared is True
+    assert not paths.mirror_repository.exists()
 
 
 def test_import_git_reports_missing_archive_dir_without_traceback(
@@ -435,24 +525,47 @@ def test_import_git_reports_missing_archive_dir_without_traceback(
 
 
 def test_import_git_reports_success_path(runner: CliRunner, tmp_path: Path) -> None:
-    archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.fossil"
+    archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git"
 
-    with patch("cache22.cli.import_git_repository", return_value=archive_path):
+    with patch(
+        "cache22.cli.import_git_repository",
+        return_value=ImportResult(archive_path=archive_path),
+    ):
         result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
 
     assert result.exit_code == 0
     assert f"Imported archive: {archive_path}" in result.output
 
 
-def test_import_git_clear_reports_success_path(runner: CliRunner, tmp_path: Path) -> None:
-    stage_dir = (
-        tmp_path / "archive" / ".cache22" / "git-import" / "github.com" / "ar-jan" / "cache22"
-    )
+def test_import_git_reports_info_messages_before_success_path(
+    runner: CliRunner,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git"
 
-    with patch("cache22.cli.clear_git_import_stage", return_value=(stage_dir, True)):
+    with patch(
+        "cache22.cli.import_git_repository",
+        return_value=ImportResult(
+            archive_path=archive_path,
+            info_messages=(f"INFO: archive already exists: {archive_path}",),
+        ),
+    ):
+        result = runner.invoke(app, ["import", "git", "https://github.com/ar-jan/cache22.git"])
+
+    assert result.exit_code == 0
+    assert result.output.splitlines() == [
+        f"INFO: archive already exists: {archive_path}",
+        f"Imported archive: {archive_path}",
+    ]
+
+
+def test_import_git_clear_reports_success_path(runner: CliRunner, tmp_path: Path) -> None:
+    cleared_path = tmp_path / "archive" / ".cache22" / "git-import" / "github.com" / "ar-jan"
+
+    with patch("cache22.cli.clear_git_import_stage", return_value=(cleared_path, True)):
         result = runner.invoke(
             app, ["import", "git-clear", "https://github.com/ar-jan/cache22.git"]
         )
 
     assert result.exit_code == 0
-    assert f"Cleared staged Git import: {stage_dir}" in result.output
+    assert f"Cleared Git import state: {cleared_path}" in result.output

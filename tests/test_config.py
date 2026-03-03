@@ -12,10 +12,12 @@ from cache22.config import (
     Config,
     ConfigError,
     add_archive_dir,
+    default_archive_type,
     list_archive_dirs,
     load_config,
     normalize_archive_dir,
     save_config,
+    set_archive_type,
 )
 
 
@@ -32,6 +34,18 @@ def write_config(tmp_path: Path, contents: str) -> Path:
     return config_path
 
 
+def test_load_defaults_archive_type_to_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    write_config(tmp_path, f'archive_dirs = ["{archive_dir}"]\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    config = load_config()
+
+    assert config.archive_dirs == [archive_dir.resolve()]
+    assert config.archive_type == "git"
+
+
 def test_rejects_non_list_archive_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_config(tmp_path, 'archive_dirs = "not-a-list"\n')
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
@@ -45,6 +59,22 @@ def test_rejects_non_string_archive_dirs(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     with pytest.raises(ConfigError, match=r"'archive_dirs\[0\]' must be a string"):
+        load_config()
+
+
+def test_rejects_non_string_archive_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_config(tmp_path, "archive_type = 123\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(ConfigError, match="'archive_type' must be a string"):
+        load_config()
+
+
+def test_rejects_invalid_archive_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write_config(tmp_path, 'archive_type = "bundle"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    with pytest.raises(ConfigError, match="Unsupported archive type"):
         load_config()
 
 
@@ -106,6 +136,17 @@ def test_add_archive_dir_detects_duplicate_loaded_canonical_path(
     assert list_archive_dirs() == [archive_dir.resolve()]
 
 
+def test_set_archive_type_persists_normalized_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    archive_type = set_archive_type("FOSSIL")
+
+    assert archive_type == "fossil"
+    assert default_archive_type() == "fossil"
+
+
 def test_load_reports_unreadable_config_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -159,6 +200,35 @@ def test_add_reports_write_failure_without_traceback(
 
     assert result.exit_code == 1
     assert "disk full" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_archive_type_show_reports_configured_value(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_config(tmp_path, 'archive_type = "fossil"\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["config", "archive-type", "show"])
+
+    assert result.exit_code == 0
+    assert result.output == "fossil\n"
+
+
+def test_archive_type_set_updates_config_without_traceback(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    result = runner.invoke(app, ["config", "archive-type", "set", "fossil"])
+
+    assert result.exit_code == 0
+    assert "Default archive type: fossil" in result.output
+    assert default_archive_type() == "fossil"
     assert "Traceback" not in result.output
 
 
