@@ -9,8 +9,7 @@ from urllib.parse import urlsplit
 from .config import ArchiveType, default_archive_dir, default_archive_type, normalize_archive_dir
 from .system_tools import find_fossil_executable, find_git_executable
 
-_STAGING_ROOT_NAME = ".cache22"
-_GIT_IMPORT_STAGE_NAME = "git-import"
+_TEMP_IMPORT_DIR_NAME = ".cache22-import"
 _CLONE_COMPLETE_MARKER_NAME = ".clone-complete"
 _CASEFOLDED_REPOSITORY_HOSTS = frozenset({"github.com", "gitlab.com"})
 
@@ -29,11 +28,10 @@ class ImportPaths:
     fossil_repository: Path
     git_marks: Path
     fossil_marks: Path
-    stage_root: Path
-    stage_dir: Path
-    staged_fossil_repository: Path
-    staged_git_marks: Path
-    staged_fossil_marks: Path
+    temp_dir: Path
+    temp_fossil_repository: Path
+    temp_git_marks: Path
+    temp_fossil_marks: Path
     clone_complete_marker: Path
 
 
@@ -83,27 +81,25 @@ def import_git_repository(
             return ImportResult(paths.mirror_repository, tuple(info_messages))
 
         fossil_executable = find_fossil_executable()
-        _prepare_fossil_stage(paths)
+        _prepare_fossil_temp_dir(paths)
         _run_fast_export_import(
             git_executable=git_executable,
             fossil_executable=fossil_executable,
             paths=paths,
         )
-        _promote_staged_import_state(paths)
+        _promote_temp_import_state(paths)
     except (OSError, RuntimeError, ValueError) as exc:
         raise RuntimeError(
             _import_failure_message(url, paths, resolved_archive_type, str(exc))
         ) from exc
 
-    _clear_stage_dir_after_success(paths)
+    _clear_fossil_temp_dir_after_success(paths)
     return ImportResult(paths.fossil_repository, tuple(info_messages))
 
 
 def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -> ImportPaths:
     repository_dir = _repository_root(archive_dir, repository)
-
-    stage_root = archive_dir / _STAGING_ROOT_NAME / _GIT_IMPORT_STAGE_NAME
-    stage_dir = _repository_root(stage_root, repository)
+    temp_dir = repository_dir / _TEMP_IMPORT_DIR_NAME
 
     return ImportPaths(
         repository_dir=repository_dir,
@@ -111,11 +107,10 @@ def archive_paths_for_repository(archive_dir: Path, repository: GitRepository) -
         fossil_repository=repository_dir / f"{repository.name}.fossil",
         git_marks=repository_dir / "git.marks",
         fossil_marks=repository_dir / "fossil.marks",
-        stage_root=stage_root,
-        stage_dir=stage_dir,
-        staged_fossil_repository=stage_dir / f"{repository.name}.fossil",
-        staged_git_marks=stage_dir / "git.marks",
-        staged_fossil_marks=stage_dir / "fossil.marks",
+        temp_dir=temp_dir,
+        temp_fossil_repository=temp_dir / f"{repository.name}.fossil",
+        temp_git_marks=temp_dir / "git.marks",
+        temp_fossil_marks=temp_dir / "fossil.marks",
         clone_complete_marker=repository_dir / _CLONE_COMPLETE_MARKER_NAME,
     )
 
@@ -124,10 +119,9 @@ def clear_git_import_stage(url: str, archive_dir: Path | None = None) -> tuple[P
     repository = parse_repository_url(url)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
-    if paths.stage_dir.exists():
-        shutil.rmtree(paths.stage_dir)
-        _remove_empty_stage_parents(paths.stage_dir.parent, stop=paths.stage_root)
-        return paths.stage_dir, True
+    if paths.temp_dir.exists():
+        shutil.rmtree(paths.temp_dir)
+        return paths.temp_dir, True
 
     if paths.mirror_repository.exists() and not paths.clone_complete_marker.exists():
         shutil.rmtree(paths.mirror_repository)
@@ -228,11 +222,12 @@ def _ensure_final_git_mirror(
     return None
 
 
-def _prepare_fossil_stage(paths: ImportPaths) -> None:
-    if paths.stage_dir.exists():
-        shutil.rmtree(paths.stage_dir)
+def _prepare_fossil_temp_dir(paths: ImportPaths) -> None:
+    if paths.temp_dir.exists():
+        shutil.rmtree(paths.temp_dir)
 
-    paths.stage_dir.mkdir(parents=True, exist_ok=True)
+    paths.repository_dir.mkdir(parents=True, exist_ok=True)
+    paths.temp_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _clear_incomplete_mirror(paths: ImportPaths) -> None:
@@ -251,11 +246,11 @@ def _clear_incomplete_mirror(paths: ImportPaths) -> None:
         return
 
 
-def _promote_staged_import_state(paths: ImportPaths) -> None:
+def _promote_temp_import_state(paths: ImportPaths) -> None:
     staged_targets = (
-        (paths.staged_fossil_repository, paths.fossil_repository),
-        (paths.staged_git_marks, paths.git_marks),
-        (paths.staged_fossil_marks, paths.fossil_marks),
+        (paths.temp_git_marks, paths.git_marks),
+        (paths.temp_fossil_marks, paths.fossil_marks),
+        (paths.temp_fossil_repository, paths.fossil_repository),
     )
     for staged_path, _ in staged_targets:
         if not staged_path.exists():
@@ -266,32 +261,20 @@ def _promote_staged_import_state(paths: ImportPaths) -> None:
         staged_path.replace(final_path)
 
 
-def _clear_stage_dir(paths: ImportPaths) -> None:
-    if not paths.stage_dir.exists():
+def _clear_fossil_temp_dir(paths: ImportPaths) -> None:
+    if not paths.temp_dir.exists():
         return
 
-    shutil.rmtree(paths.stage_dir)
-    _remove_empty_stage_parents(paths.stage_dir.parent, stop=paths.stage_root)
+    shutil.rmtree(paths.temp_dir)
 
 
-def _clear_stage_dir_after_success(paths: ImportPaths) -> None:
+def _clear_fossil_temp_dir_after_success(paths: ImportPaths) -> None:
     try:
-        _clear_stage_dir(paths)
+        _clear_fossil_temp_dir(paths)
     except OSError:
         # The archive is already promoted. A cleanup failure should not turn a successful import
         # into a retry trap where the final archive exists but the command reported failure.
         return
-
-
-def _remove_empty_stage_parents(start: Path, *, stop: Path) -> None:
-    current = start
-    stop_parent = stop.parent
-    while current != stop_parent:
-        try:
-            current.rmdir()
-        except OSError:
-            return
-        current = current.parent
 
 
 def _import_failure_message(
@@ -300,9 +283,9 @@ def _import_failure_message(
     archive_type: ArchiveType,
     message: str,
 ) -> str:
-    if archive_type == "fossil" and paths.stage_dir.exists():
+    if archive_type == "fossil" and paths.temp_dir.exists():
         return (
-            f"{message}. Staged Fossil import state was kept at {paths.stage_dir}. "
+            f"{message}. Temporary Fossil import state was kept at {paths.temp_dir}. "
             f"Clear it with 'cache22 import git-clear {url}' to start over."
         )
 
@@ -345,15 +328,15 @@ def _run_fast_export_import(
         "fast-export",
         "--all",
         "--signed-tags=warn-strip",
-        f"--export-marks={paths.staged_git_marks}",
+        f"--export-marks={paths.temp_git_marks}",
     ]
     fossil_command = [
         str(fossil_executable),
         "import",
         "--git",
         "--export-marks",
-        str(paths.staged_fossil_marks),
-        str(paths.staged_fossil_repository),
+        str(paths.temp_fossil_marks),
+        str(paths.temp_fossil_repository),
     ]
 
     with subprocess.Popen(git_command, stdout=subprocess.PIPE) as git_process:
