@@ -21,6 +21,18 @@ dev = [
     "yamllint>=1.38.0",
 ]
 
+[tool.ruff]
+line-length = 100
+indent-width = 4
+
+[tool.ruff.lint]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+line-ending = "lf"
+
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
