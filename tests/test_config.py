@@ -106,7 +106,9 @@ def test_add_archive_dir_detects_duplicate_loaded_canonical_path(
     assert list_archive_dirs() == [archive_dir.resolve()]
 
 
-def test_load_reports_unreadable_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_reports_unreadable_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config_dir = tmp_path / "cache22"
     config_dir.mkdir()
     (config_dir / "config.toml").mkdir()
@@ -116,7 +118,9 @@ def test_load_reports_unreadable_config_path(tmp_path: Path, monkeypatch: pytest
         load_config()
 
 
-def test_save_reports_unwritable_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_save_reports_unwritable_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))

@@ -30,7 +30,9 @@ def get_fossil_status() -> FossilStatus:
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"fossil version command failed with exit code {exc.returncode}") from exc
+        raise RuntimeError(
+            f"fossil version command failed with exit code {exc.returncode}"
+        ) from exc
     except OSError as exc:
         raise RuntimeError(f"fossil version command could not be run: {exc}") from exc
     return FossilStatus(

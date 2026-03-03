@@ -95,7 +95,9 @@ def list_archive_dirs() -> list[Path]:
 def default_archive_dir() -> Path:
     archive_dirs = list_archive_dirs()
     if not archive_dirs:
-        raise ValueError("No archive directories configured. Add one with 'cache22 config archive add PATH'")
+        raise ValueError(
+            "No archive directories configured. Add one with 'cache22 config archive add PATH'"
+        )
 
     return archive_dirs[0]
 
@@ -130,4 +132,6 @@ def _normalize_persisted_archive_dir(raw_path: str, config_path: Path, index: in
     try:
         return archive_dir.resolve()
     except (OSError, RuntimeError) as exc:
-        raise ConfigError(f"'archive_dirs[{index}]' could not be resolved in {config_path}") from exc
+        raise ConfigError(
+            f"'archive_dirs[{index}]' could not be resolved in {config_path}"
+        ) from exc

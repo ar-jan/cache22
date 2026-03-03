@@ -170,11 +170,15 @@ def _ensure_staged_clone(
 ) -> None:
     if paths.clone_complete_marker.exists():
         if not paths.mirror_dir.exists():
-            raise ValueError(f"Staged clone marker exists but mirror repository is missing: {paths.stage_dir}")
+            raise ValueError(
+                f"Staged clone marker exists but mirror repository is missing: {paths.stage_dir}"
+            )
         return
 
     if paths.stage_dir.exists():
-        raise ValueError(f"Staged clone is incomplete and must be cleared before retrying: {paths.stage_dir}")
+        raise ValueError(
+            f"Staged clone is incomplete and must be cleared before retrying: {paths.stage_dir}"
+        )
 
     paths.stage_dir.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -189,7 +193,11 @@ def _ensure_staged_clone(
 
 
 def _reset_staged_import_state(paths: ImportPaths) -> None:
-    for path in (paths.staged_fossil_repository, paths.staged_git_marks, paths.staged_fossil_marks):
+    for path in (
+        paths.staged_fossil_repository,
+        paths.staged_git_marks,
+        paths.staged_fossil_marks,
+    ):
         if path.exists():
             path.unlink()
 
