@@ -1,5 +1,37 @@
 # cache22
 
+## Installation
+
+```sh
+uv sync
+source .venv/bin/activate
+```
+
+## Getting Started
+
+```sh
+# Configure where archives are stored
+cache22 config archive add /absolute/path/to/archive
+
+# Optional: switch the default archival format from git to fossil
+cache22 config archive-type set fossil
+
+# Import a repository
+cache22 import repo https://github.com/ar-jan/cache22.git
+```
+
+By default, imports are treated as Git repositories and stored as Git mirror clones. If you switch the archive type to `fossil`, cache22 keeps the Git mirror and also creates a Fossil archive alongside it.
+
+If an import is interrupted and leaves partial state behind, clean it up with:
+
+```sh
+# Clean one repository by URL
+cache22 import clean repo https://github.com/ar-jan/cache22.git
+
+# Clean all configured archive directories
+cache22 import clean all
+```
+
 ## Development
 
 ```sh
