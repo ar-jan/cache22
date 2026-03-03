@@ -13,11 +13,8 @@ from .config import (
     list_archive_dirs,
     set_archive_type,
 )
-from .import_git import (
-    clean_all_import_state,
-    clean_repository_import_state,
-    import_git_repository,
-)
+from .import_service import ImportResult, import_repository
+from .import_state import clean_all_import_state, clean_repository_import_state
 from .system_tools import get_fossil_status
 
 app = typer.Typer(
@@ -28,13 +25,15 @@ config_app = typer.Typer(help="Manage cache22 configuration.", no_args_is_help=T
 archive_app = typer.Typer(help="Manage archive directories.", no_args_is_help=True)
 archive_type_app = typer.Typer(help="Manage the default archival format.", no_args_is_help=True)
 status_app = typer.Typer(help="Inspect external tool availability.", no_args_is_help=True)
-clean_app = typer.Typer(help="Clean partial import state.", no_args_is_help=True)
+import_app = typer.Typer(help="Import repositories into the archive.", no_args_is_help=True)
+import_clean_app = typer.Typer(help="Clean partial import state.", no_args_is_help=True)
 
 app.add_typer(config_app, name="config")
 config_app.add_typer(archive_app, name="archive")
 config_app.add_typer(archive_type_app, name="archive-type")
 app.add_typer(status_app, name="status")
-app.add_typer(clean_app, name="clean")
+app.add_typer(import_app, name="import")
+import_app.add_typer(import_clean_app, name="clean")
 
 P = ParamSpec("P")
 
@@ -90,23 +89,16 @@ def status_fossil() -> None:
     typer.echo(f"version: {status.version}")
 
 
-@app.command(
-    "import",
-    help=("Import repositories into the archive. Repository URLs are treated as Git repositories."),
+@import_app.command(
+    "repo",
+    help=("Import a Git repository into the archive."),
 )
 @_user_command
-def import_repository(url: str) -> None:
-    _run_git_import(url)
+def import_repo(url: str) -> None:
+    _report_import_result(import_repository(url))
 
 
-def _run_git_import(url: str) -> None:
-    result = import_git_repository(url)
-    for message in result.info_messages:
-        typer.echo(message)
-    typer.echo(f"Imported archive: {result.archive_path}")
-
-
-@clean_app.command("repo")
+@import_clean_app.command("repo")
 @_user_command
 def clean_repo(url: str) -> None:
     _report_clean_result(
@@ -115,13 +107,19 @@ def clean_repo(url: str) -> None:
     )
 
 
-@clean_app.command("all")
+@import_clean_app.command("all")
 @_user_command
 def clean_all() -> None:
     _report_clean_result(
         clean_all_import_state(),
         empty_message="No partial import state found in configured archive directories.",
     )
+
+
+def _report_import_result(result: ImportResult) -> None:
+    for message in result.info_messages:
+        typer.echo(message)
+    typer.echo(f"Imported archive: {result.archive_path}")
 
 
 def _report_clean_result(removed_paths: tuple[Path, ...], *, empty_message: str) -> None:

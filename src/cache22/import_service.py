@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO
+
+from .archive_layout import ArchivePaths, archive_paths_for_repository
+from .config import (
+    ArchiveType,
+    default_archive_dir,
+    default_archive_type,
+    normalize_archive_dir,
+)
+from .fossil_archive import (
+    clear_staging_dir_after_success,
+    import_failure_message,
+    open_fossil_import,
+    prepare_staging_dir,
+    promote_staged_archive,
+)
+from .git_mirror import ensure_git_mirror, open_fast_export
+from .repository_ref import parse_repository_url
+from .system_tools import find_fossil_executable, find_git_executable
+
+
+@dataclass(frozen=True, slots=True)
+class ImportResult:
+    archive_path: Path
+    info_messages: tuple[str, ...] = ()
+
+
+def import_repository(
+    url: str,
+    archive_dir: Path | None = None,
+    archive_type: ArchiveType | None = None,
+) -> ImportResult:
+    repository = parse_repository_url(url)
+    resolved_archive_dir = _resolve_archive_dir(archive_dir)
+    resolved_archive_type = _resolve_archive_type(archive_type)
+    paths = archive_paths_for_repository(resolved_archive_dir, repository)
+    requested_archive = _existing_requested_archive_path(paths, resolved_archive_type)
+    info_messages: list[str] = []
+
+    if requested_archive is not None:
+        info_messages.append(f"INFO: archive already exists: {requested_archive}")
+        return ImportResult(requested_archive, tuple(info_messages))
+
+    git_executable = find_git_executable()
+
+    try:
+        existing_mirror_message = ensure_git_mirror(
+            git_executable=git_executable,
+            url=url,
+            paths=paths,
+        )
+        if existing_mirror_message is not None:
+            info_messages.append(existing_mirror_message)
+
+        if resolved_archive_type == "git":
+            return ImportResult(paths.mirror_repository, tuple(info_messages))
+
+        fossil_executable = find_fossil_executable()
+        prepare_staging_dir(paths)
+        _run_fossil_import_pipeline(
+            git_executable=git_executable,
+            fossil_executable=fossil_executable,
+            paths=paths,
+        )
+        promote_staged_archive(paths)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(_failure_message(url, paths, resolved_archive_type, str(exc))) from exc
+
+    clear_staging_dir_after_success(paths)
+    return ImportResult(paths.fossil_repository, tuple(info_messages))
+
+
+def _resolve_archive_dir(archive_dir: Path | None) -> Path:
+    if archive_dir is None:
+        return default_archive_dir()
+
+    return normalize_archive_dir(archive_dir)
+
+
+def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
+    if archive_type is not None:
+        return archive_type
+
+    return default_archive_type()
+
+
+def _existing_requested_archive_path(paths: ArchivePaths, archive_type: ArchiveType) -> Path | None:
+    if archive_type == "git":
+        if paths.clone_complete_marker.exists() and paths.mirror_repository.exists():
+            return paths.mirror_repository
+        return None
+
+    if paths.fossil_repository.exists():
+        return paths.fossil_repository
+
+    return None
+
+
+def _run_fossil_import_pipeline(
+    *,
+    git_executable: Path,
+    fossil_executable: Path,
+    paths: ArchivePaths,
+) -> None:
+    fossil_returncode: int | None = None
+    git_process, fast_export_stream = open_fast_export(
+        git_executable=git_executable,
+        paths=paths,
+    )
+
+    with git_process:
+        try:
+            with open_fossil_import(
+                fossil_executable=fossil_executable,
+                paths=paths,
+                fast_export_stream=fast_export_stream,
+            ) as fossil_process:
+                fast_export_stream.close()
+                fossil_returncode = fossil_process.wait()
+        finally:
+            if not _stream_is_closed(fast_export_stream):
+                fast_export_stream.close()
+            git_returncode = git_process.wait()
+
+    if fossil_returncode != 0:
+        raise RuntimeError(f"fossil import --git failed with exit code {fossil_returncode}")
+    if git_returncode != 0:
+        raise RuntimeError(f"git fast-export --all failed with exit code {git_returncode}")
+
+
+def _stream_is_closed(stream: IO[bytes]) -> bool:
+    return bool(getattr(stream, "closed", False))
+
+
+def _failure_message(
+    url: str,
+    paths: ArchivePaths,
+    archive_type: ArchiveType,
+    message: str,
+) -> str:
+    if archive_type == "fossil":
+        return import_failure_message(url, paths, message)
+
+    return message
