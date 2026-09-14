@@ -39,8 +39,10 @@ cache22 import clean all
 uv sync --group dev
 # Upgrade Python dependencies
 uv lock --upgrade
-# Install npm dependencies for utils/editor
+# Install NPM dependencies for utils/editor
 npm install
+# Upgrade NPM dependencies
+npm update
 # Install git hooks for this repo
 uv run --group dev pre-commit install
 # Check yaml:
