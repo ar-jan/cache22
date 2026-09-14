@@ -30,7 +30,9 @@ def test_import_repo_reports_missing_archive_dir_without_traceback(
 
 
 def test_import_repo_reports_success_path(runner: CliRunner, tmp_path: Path) -> None:
-    archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git"
+    archive_path = (
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22" / "cache22.git"
+    )
 
     with patch(
         "cache22.cli.import_repository",
@@ -46,7 +48,9 @@ def test_import_repo_reports_info_messages_before_success_path(
     runner: CliRunner,
     tmp_path: Path,
 ) -> None:
-    archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git"
+    archive_path = (
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22" / "cache22.git"
+    )
 
     with patch(
         "cache22.cli.import_repository",
@@ -76,8 +80,8 @@ def test_import_repo_rejects_extra_arguments_without_traceback(runner: CliRunner
 
 def test_import_clean_repo_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> None:
     removed_paths = (
-        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22-import",
-        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git",
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22" / ".cache22-import",
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22" / "cache22.git",
     )
 
     with patch("cache22.cli.clean_repository_import_state", return_value=removed_paths):

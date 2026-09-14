@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
 from .archive_layout import ArchivePaths, archive_paths_for_repository
+from .archive_storage import RepositoryStorage, repository_operation
 from .config import (
     ArchiveType,
     default_archive_dir,
@@ -38,6 +40,14 @@ def import_repository(
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
     resolved_archive_type = _resolve_archive_type(archive_type)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
+    with repository_operation(resolved_archive_dir, paths, create=True) as storage:
+        assert storage is not None
+        return _import_locked_repository(url, paths, resolved_archive_type, storage)
+
+
+def _import_locked_repository(
+    url: str, paths: ArchivePaths, resolved_archive_type: ArchiveType, storage: RepositoryStorage
+) -> ImportResult:
     requested_archive = _existing_requested_archive_path(paths, resolved_archive_type)
     info_messages: list[str] = []
 
@@ -51,7 +61,7 @@ def import_repository(
         existing_mirror_message = ensure_git_mirror(
             git_executable=git_executable,
             url=url,
-            paths=paths,
+            storage=storage,
         )
         if existing_mirror_message is not None:
             info_messages.append(existing_mirror_message)
@@ -60,25 +70,22 @@ def import_repository(
             return ImportResult(paths.mirror_repository, tuple(info_messages))
 
         fossil_executable = find_fossil_executable()
-        prepare_staging_dir(paths)
+        prepare_staging_dir(storage)
         _run_fossil_import_pipeline(
             git_executable=git_executable,
             fossil_executable=fossil_executable,
             paths=paths,
         )
-        promote_staged_archive(paths)
+        promote_staged_archive(storage)
     except (OSError, RuntimeError, ValueError) as exc:
         raise RuntimeError(_failure_message(url, paths, resolved_archive_type, str(exc))) from exc
 
-    clear_staging_dir_after_success(paths)
+    clear_staging_dir_after_success(storage)
     return ImportResult(paths.fossil_repository, tuple(info_messages))
 
 
 def _resolve_archive_dir(archive_dir: Path | None) -> Path:
-    if archive_dir is None:
-        return default_archive_dir()
-
-    return normalize_archive_dir(archive_dir)
+    return normalize_archive_dir(default_archive_dir() if archive_dir is None else archive_dir)
 
 
 def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
@@ -130,6 +137,31 @@ def _run_fossil_import_pipeline(
         raise RuntimeError(f"fossil import --git failed with exit code {fossil_returncode}")
     if git_returncode != 0:
         raise RuntimeError(f"git fast-export --all failed with exit code {git_returncode}")
+
+    missing_marks = [
+        path for path in (paths.temp_git_marks, paths.temp_fossil_marks) if not path.exists()
+    ]
+    if missing_marks:
+        try:
+            result = subprocess.run(
+                [
+                    str(git_executable),
+                    "-C",
+                    str(paths.mirror_repository),
+                    "rev-list",
+                    "--all",
+                    "--count",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError("Could not check whether the Git mirror has commits") from exc
+        if result.stdout.strip() == "0":
+            for path in missing_marks:
+                with path.open("xb"):
+                    pass
 
 
 def _stream_is_closed(stream: IO[bytes]) -> bool:

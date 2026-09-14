@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import shutil
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from .archive_layout import (
-    CLONE_COMPLETE_MARKER_NAME,
-    TEMP_IMPORT_DIR_NAME,
-    archive_paths_for_repository,
-    looks_like_repository_dir,
-)
+from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
+from .archive_storage import RepositoryStorage, open_archive_directory, repository_operation
 from .config import list_archive_dirs, normalize_archive_dir
-from .repository_ref import parse_repository_url
+from .repository_ref import STORAGE_DIR_NAME, parse_repository_url
 
 
 def clean_repository_import_state(
@@ -23,7 +19,9 @@ def clean_repository_import_state(
 
     for archive_dir in _resolve_archive_dirs(archive_dirs):
         paths = archive_paths_for_repository(archive_dir, repository)
-        removed_paths.extend(_clean_repository_directory(paths.repository_dir))
+        with repository_operation(archive_dir, paths) as storage:
+            if storage is not None:
+                removed_paths.extend(_clean_repository_storage(storage))
 
     return tuple(sorted(removed_paths, key=str))
 
@@ -38,68 +36,56 @@ def clean_all_import_state(archive_dirs: Sequence[Path] | None = None) -> tuple[
 
 
 def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ...]:
-    if archive_dirs is not None:
-        return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
-
-    configured_archive_dirs = tuple(list_archive_dirs())
-    if not configured_archive_dirs:
-        raise ValueError(
-            "No archive directories configured. Add one with 'cache22 config archive add PATH'"
-        )
-
-    return configured_archive_dirs
+    if archive_dirs is None:
+        archive_dirs = list_archive_dirs()
+        if not archive_dirs:
+            raise ValueError(
+                "No archive directories configured. Add one with 'cache22 config archive add PATH'"
+            )
+    return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
 
 
 def _clean_partial_state_under(root: Path) -> list[Path]:
-    if not root.exists():
-        return []
-
     removed_paths: list[Path] = []
-    directories_to_visit = [root]
+    directories_to_visit = [Path()]
 
     while directories_to_visit:
-        current_dir = directories_to_visit.pop()
-        if not current_dir.is_dir():
-            continue
+        relative = directories_to_visit.pop()
+        with open_archive_directory(root, relative) as directory_fd:
+            if directory_fd is None:
+                continue
+            with os.scandir(directory_fd) as entries:
+                children = sorted(
+                    (entry.name for entry in entries if entry.is_dir(follow_symlinks=False)),
+                    reverse=True,
+                )
 
-        if looks_like_repository_dir(current_dir):
-            removed_paths.extend(_clean_repository_directory(current_dir))
-            continue
+            if STORAGE_DIR_NAME in children and len(relative.parts) >= 3:
+                paths = archive_paths_for_directory(root / relative)
+                with repository_operation(root, paths) as storage:
+                    if storage is not None:
+                        removed_paths.extend(_clean_repository_storage(storage))
 
-        child_directories = sorted(
-            (child for child in current_dir.iterdir() if child.is_dir()),
-            key=lambda path: path.name,
-            reverse=True,
-        )
-        directories_to_visit.extend(child_directories)
+            directories_to_visit.extend(
+                relative / name for name in children if name != STORAGE_DIR_NAME
+            )
 
     return removed_paths
 
 
-def _clean_repository_directory(repository_dir: Path) -> list[Path]:
+def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
+    paths = storage.paths
     removed_paths: list[Path] = []
-    temp_dir = repository_dir / TEMP_IMPORT_DIR_NAME
-    clone_complete_marker = repository_dir / CLONE_COMPLETE_MARKER_NAME
-    mirror_repository = repository_dir / f"{repository_dir.name}.git"
+    if storage.remove(paths.temp_dir.name):
+        removed_paths.append(paths.temp_dir)
 
-    if temp_dir.exists():
-        _remove_path(temp_dir)
-        removed_paths.append(temp_dir)
-
-    if mirror_repository.exists() and not clone_complete_marker.exists():
-        _remove_path(mirror_repository)
-        removed_paths.append(mirror_repository)
-
-    if clone_complete_marker.exists() and not mirror_repository.exists():
-        _remove_path(clone_complete_marker)
-        removed_paths.append(clone_complete_marker)
+    mirror_exists = storage.entry(paths.mirror_repository.name) is not None
+    marker_exists = storage.entry(paths.clone_complete_marker.name) is not None
+    if mirror_exists and not marker_exists:
+        storage.remove(paths.mirror_repository.name)
+        removed_paths.append(paths.mirror_repository)
+    if marker_exists and not mirror_exists:
+        storage.remove(paths.clone_complete_marker.name)
+        removed_paths.append(paths.clone_complete_marker)
 
     return removed_paths
-
-
-def _remove_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-        return
-
-    path.unlink()

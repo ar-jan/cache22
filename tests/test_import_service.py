@@ -61,7 +61,7 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
     def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
         assert check is True
         clone_calls.append(args)
-        Path(args[4]).mkdir(parents=True, exist_ok=True)
+        Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
 
     with (
@@ -81,6 +81,7 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
             "/usr/bin/git",
             "clone",
             "--mirror",
+            "--",
             "https://gitlab.com/Group/Subgroup/Cache22.git",
             str(paths.mirror_repository),
         ]
@@ -101,7 +102,7 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
     def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
         assert check is True
         clone_calls.append(args)
-        Path(args[4]).mkdir(parents=True, exist_ok=True)
+        Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
 
     def fake_popen(
@@ -143,13 +144,14 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
 
     assert result.archive_path == paths.fossil_repository
     assert result.info_messages == ()
-    assert clone_calls[0][:4] == [
+    assert clone_calls[0][:5] == [
         "/usr/bin/git",
         "clone",
         "--mirror",
+        "--",
         "https://gitlab.com/Group/Subgroup/Cache22.git",
     ]
-    assert clone_calls[0][4] == str(paths.mirror_repository)
+    assert clone_calls[0][5] == str(paths.mirror_repository)
     assert len(popen_calls) == 2
     assert popen_calls[0].args[:4] == [
         "/usr/bin/git",
@@ -279,7 +281,7 @@ def test_import_repository_keeps_success_when_stage_cleanup_fails(
 
     def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
         assert check is True
-        Path(args[4]).mkdir(parents=True, exist_ok=True)
+        Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
 
     def fake_popen(
@@ -336,7 +338,7 @@ def test_import_repository_preserves_fossil_stage_after_pipeline_failure(
     paths = archive_paths_for_repository(archive_dir, repository)
 
     def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
-        Path(args[4]).mkdir(parents=True, exist_ok=True)
+        Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
 
     def fake_popen(
@@ -389,3 +391,31 @@ def test_import_repository_rejects_incomplete_final_clone(tmp_path: Path) -> Non
         pytest.raises(RuntimeError, match="cache22 import clean repo"),
     ):
         import_repository(url, archive_dir=archive_dir, archive_type="git")
+
+
+def test_failed_clone_releases_lock_and_removes_only_incomplete_output(tmp_path: Path) -> None:
+    url = "https://host/team/project"
+    paths = archive_paths_for_repository(tmp_path, parse_repository_url(url))
+    calls = 0
+
+    def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        Path(args[-1]).mkdir()
+        if calls == 1:
+            raise subprocess.CalledProcessError(128, args)
+        return subprocess.CompletedProcess(args, 0)
+
+    with (
+        patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
+        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+    ):
+        with pytest.raises(RuntimeError, match="git clone --mirror failed"):
+            import_repository(url, tmp_path, "git")
+        assert not paths.mirror_repository.exists()
+        assert not paths.clone_complete_marker.exists()
+        assert paths.lock_file.is_file()
+        result = import_repository(url, tmp_path, "git")
+
+    assert result.archive_path == paths.mirror_repository
+    assert paths.clone_complete_marker.is_file()

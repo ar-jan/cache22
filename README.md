@@ -1,5 +1,7 @@
 # cache22
 
+Cache22 currently supports Linux and macOS on local POSIX filesystems.
+
 ## Installation
 
 ```sh
@@ -31,6 +33,24 @@ cache22 import clean repo https://github.com/ar-jan/cache22.git
 # Clean all configured archive directories
 cache22 import clean all
 ```
+
+## Archive storage and recovery
+
+For `https://Git.Example.ORG/Team/Project.git`, files are stored under
+`ARCHIVE/git.example.org/team/project/.cache22/`, including `project.git`, the
+`.clone-complete` marker, and the persistent `.lock` file. Optional Fossil output
+and staging data also live there. The `.cache22` namespace or repository name
+is reserved. Previous layouts are not migrated or discovered.
+
+Imports and cleanup fail immediately with a repository-busy error when another
+Cache22 command holds its lock. Cleanup keeps completed archives and lock files.
+`clean all` also visits nested repositories, skips directory symlinks, and stops
+on a busy repository without rolling back earlier cleanup. Targeted operations
+reject symlinked storage paths. Missing archive roots are errors and must be
+restored before importing or cleaning.
+
+Empty Git repositories can be converted to Fossil. Configuration updates use
+atomic replacement so a failed write preserves the previous configuration.
 
 ## Development
 

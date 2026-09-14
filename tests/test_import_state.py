@@ -32,7 +32,7 @@ def test_clean_repository_import_state_removes_stray_clone_marker(tmp_path: Path
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.repository_dir.mkdir(parents=True)
+    paths.storage_dir.mkdir(parents=True)
     paths.clone_complete_marker.write_text("complete\n")
 
     removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))

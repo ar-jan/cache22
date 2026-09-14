@@ -3,6 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+STORAGE_DIR_NAME = ".cache22"
+
+
+def validate_storage_component(component: str) -> None:
+    if (
+        not component
+        or component in {".", ".."}
+        or any(char in "/\\" or ord(char) < 32 or ord(char) == 127 for char in component)
+    ):
+        raise ValueError(f"Unsafe repository storage component: {component!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class RepositoryRef:
@@ -18,6 +29,7 @@ def parse_repository_url(url: str) -> RepositoryRef:
         raise ValueError("Repository URL must not be empty")
 
     host, raw_path = _split_clone_url(raw_url)
+    validate_storage_component(host)
     return _repository_from_path(host, raw_path)
 
 
@@ -66,6 +78,12 @@ def _repository_from_path(host: str, raw_path: str) -> RepositoryRef:
         )
 
     normalized_parts = _normalize_repository_parts(parts)
+    if STORAGE_DIR_NAME in normalized_parts:
+        raise ValueError(
+            f"Repository paths must not contain the reserved {STORAGE_DIR_NAME!r} segment"
+        )
+    for part in normalized_parts:
+        validate_storage_component(part)
     return RepositoryRef(
         host=host,
         namespace=tuple(normalized_parts[:-1]),
