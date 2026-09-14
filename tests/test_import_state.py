@@ -16,8 +16,10 @@ def test_clean_repository_import_state_removes_fossil_stage_and_incomplete_clone
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.temp_dir.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
     (paths.temp_dir / "partial").write_text("partial")
     paths.mirror_repository.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
 
     removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
 
@@ -33,6 +35,7 @@ def test_clean_repository_import_state_removes_stray_clone_marker(tmp_path: Path
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.storage_dir.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
     paths.clone_complete_marker.write_text("complete\n")
 
     removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
@@ -49,9 +52,11 @@ def test_clean_all_import_state_removes_partial_state_in_all_archive_dirs(tmp_pa
     first_repository = parse_repository_url("https://github.com/ar-jan/cache22.git")
     first_paths = archive_paths_for_repository(first_archive_dir, first_repository)
     first_paths.temp_dir.mkdir(parents=True)
+    first_paths.lock_file.write_text("cache22-storage-v1\n")
     second_repository = parse_repository_url("https://gitlab.com/group/subgroup/cache22.git")
     second_paths = archive_paths_for_repository(second_archive_dir, second_repository)
     second_paths.mirror_repository.mkdir(parents=True)
+    second_paths.lock_file.write_text("cache22-storage-v1\n")
 
     removed_paths = clean_all_import_state(
         archive_dirs=(first_archive_dir, second_archive_dir),

@@ -53,7 +53,7 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
             patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
             pytest.raises(RepositoryBusyError, match="Repository is busy"),
         ):
-            import_repository(URL, tmp_path, "git")
+            import_repository("https://host/Team/Project", tmp_path, "git", case_sensitive=True)
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
             clean_repository_import_state(URL, (tmp_path,))
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):

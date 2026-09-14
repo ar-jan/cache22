@@ -93,8 +93,13 @@ def status_fossil() -> None:
     help=("Import a Git repository into the archive."),
 )
 @_user_command
-def import_repo(url: str) -> None:
-    _report_import_result(import_repository(url))
+def import_repo(
+    url: str,
+    case_sensitive: bool = typer.Option(
+        False, "--case-sensitive", help="Preserve remote repository path casing."
+    ),
+) -> None:
+    _report_import_result(import_repository(url, case_sensitive=case_sensitive))
 
 
 @import_clean_app.command("repo")

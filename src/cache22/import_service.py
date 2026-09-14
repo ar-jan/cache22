@@ -35,14 +35,22 @@ def import_repository(
     url: str,
     archive_dir: Path | None = None,
     archive_type: ArchiveType | None = None,
+    *,
+    case_sensitive: bool = False,
 ) -> ImportResult:
-    repository = parse_repository_url(url)
+    repository = parse_repository_url(url, case_sensitive=case_sensitive)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
     resolved_archive_type = _resolve_archive_type(archive_type)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
     with repository_operation(resolved_archive_dir, paths, create=True) as storage:
         assert storage is not None
-        return _import_locked_repository(url, paths, resolved_archive_type, storage)
+        storage.bind_source(repository.source_path)
+        try:
+            return _import_locked_repository(
+                repository.clone_url, paths, resolved_archive_type, storage
+            )
+        finally:
+            storage.release_unused_source()
 
 
 def _import_locked_repository(

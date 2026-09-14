@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 
 from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
 from .archive_storage import RepositoryStorage, open_archive_directory, repository_operation
 from .config import list_archive_dirs, normalize_archive_dir
-from .repository_ref import STORAGE_DIR_NAME, parse_repository_url
+from .repository_ref import STORAGE_DIR_NAME, parse_repository_url, validate_storage_component
 
 
 def clean_repository_import_state(
@@ -62,12 +64,23 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
 
             if STORAGE_DIR_NAME in children and len(relative.parts) >= 3:
                 paths = archive_paths_for_directory(root / relative)
-                with repository_operation(root, paths) as storage:
+                marker = paths.lock_file
+                try:
+                    marker_is_symlink = stat.S_ISLNK(marker.lstat().st_mode)
+                except FileNotFoundError:
+                    marker_is_symlink = False
+                with (
+                    repository_operation(root, paths)
+                    if not marker_is_symlink
+                    else nullcontext(None) as storage
+                ):
                     if storage is not None:
                         removed_paths.extend(_clean_repository_storage(storage))
 
             directories_to_visit.extend(
-                relative / name for name in children if name != STORAGE_DIR_NAME
+                relative / name
+                for name in children
+                if name != STORAGE_DIR_NAME and _valid_component(name)
             )
 
     return removed_paths
@@ -88,4 +101,13 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
         storage.remove(paths.clone_complete_marker.name)
         removed_paths.append(paths.clone_complete_marker)
 
+    removed_paths.extend(storage.release_unused_source())
     return removed_paths
+
+
+def _valid_component(name: str) -> bool:
+    try:
+        validate_storage_component(name)
+    except ValueError:
+        return False
+    return True

@@ -43,6 +43,7 @@ def test_cleanup_preserves_reserved_looking_names_and_finds_nested_repositories(
     archives = [archive_paths_for_repository(tmp_path, parse_repository_url(url)) for url in urls]
     for paths in archives:
         paths.mirror_repository.mkdir(parents=True)
+        paths.lock_file.write_text("cache22-storage-v1\n")
         paths.clone_complete_marker.write_text("complete\n")
         paths.temp_dir.mkdir()
 
@@ -76,6 +77,8 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
     }[link_target]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.symlink_to(external, target_is_directory=True)
+    if link_target in {"mirror", "stage"}:
+        paths.lock_file.write_text("cache22-storage-v1\n")
 
     for operation in (
         lambda: clean_repository_import_state(url, (root,)),
@@ -94,6 +97,7 @@ def test_clean_all_skips_external_and_cyclic_directory_symlinks(tmp_path: Path) 
     outside = tmp_path / "outside"
     paths = archive_paths_for_repository(outside, parse_repository_url("https://host/team/project"))
     paths.temp_dir.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
     (root / "external").symlink_to(outside, target_is_directory=True)
     (root / "cycle").symlink_to(root, target_is_directory=True)
 
@@ -111,6 +115,7 @@ def test_cleanup_unlinks_internal_symlinks_without_following_them(tmp_path: Path
     url = "https://host/team/project"
     paths = archive_paths_for_repository(root, parse_repository_url(url))
     paths.temp_dir.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
     (paths.temp_dir / "link").symlink_to(external, target_is_directory=True)
 
     assert clean_repository_import_state(url, (root,)) == (paths.temp_dir,)

@@ -21,16 +21,50 @@ class RepositoryRef:
     namespace: tuple[str, ...]
     name: str
     display_path: str = field(compare=False)
+    clone_url: str = field(default="", compare=False)
+    source_path: str = field(default="", compare=False)
 
 
-def parse_repository_url(url: str) -> RepositoryRef:
+def parse_repository_url(url: str, *, case_sensitive: bool = False) -> RepositoryRef:
     raw_url = url.strip()
     if not raw_url:
         raise ValueError("Repository URL must not be empty")
 
     host, raw_path = _split_clone_url(raw_url)
     validate_storage_component(host)
-    return _repository_from_path(host, raw_path)
+    repository = _repository_from_path(host, raw_path)
+    effective = (
+        repository.display_path.split("/", 1)[1]
+        if case_sensitive
+        else "/".join((*repository.namespace, repository.name))
+    )
+    suffix = raw_path.strip().rstrip("/")[-4:]
+    if suffix.casefold() != ".git":
+        suffix = ""
+    elif not case_sensitive:
+        suffix = ".git"
+    path = effective + suffix
+    if "://" not in raw_url:
+        user_host = raw_url.partition(":")[0]
+        user = user_host.rpartition("@")[0]
+        clone_url = f"{user}@{host}:{'/' if raw_path.startswith('/') else ''}{path}"
+    else:
+        parsed = urlsplit(raw_url)
+        credentials, separator, authority = parsed.netloc.rpartition("@")
+        if not separator:
+            authority = parsed.netloc
+        port = authority[len(authority.split(":", 1)[0]) :]
+        clone_url = (
+            f"{parsed.scheme.lower()}://{credentials + '@' if separator else ''}{host}{port}/{path}"
+        )
+    return RepositoryRef(
+        repository.host,
+        repository.namespace,
+        repository.name,
+        repository.display_path,
+        clone_url,
+        f"{host}/{effective}",
+    )
 
 
 def _split_clone_url(raw_url: str) -> tuple[str, str]:

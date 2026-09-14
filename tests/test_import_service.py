@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Self
@@ -82,7 +83,7 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
             "clone",
             "--mirror",
             "--",
-            "https://gitlab.com/Group/Subgroup/Cache22.git",
+            "https://gitlab.com/group/subgroup/cache22.git",
             str(paths.mirror_repository),
         ]
     ]
@@ -149,7 +150,7 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
         "clone",
         "--mirror",
         "--",
-        "https://gitlab.com/Group/Subgroup/Cache22.git",
+        "https://gitlab.com/group/subgroup/cache22.git",
     ]
     assert clone_calls[0][5] == str(paths.mirror_repository)
     assert len(popen_calls) == 2
@@ -192,6 +193,8 @@ def test_import_repository_reuses_completed_final_git_mirror_for_fossil(
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.mirror_repository.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
+    paths.source_file.write_text(json.dumps({"source_path": repository.source_path}))
     paths.clone_complete_marker.write_text("complete\n")
     popen_calls: list[_FakeProcess] = []
 
@@ -245,6 +248,8 @@ def test_import_repository_returns_existing_git_archive_with_info(tmp_path: Path
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.mirror_repository.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
+    paths.source_file.write_text(json.dumps({"source_path": repository.source_path}))
     paths.clone_complete_marker.write_text("complete\n")
 
     with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
@@ -261,6 +266,8 @@ def test_import_repository_returns_existing_fossil_archive_with_info(tmp_path: P
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.fossil_repository.parent.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
+    paths.source_file.write_text(json.dumps({"source_path": repository.source_path}))
     paths.fossil_repository.write_text("existing")
 
     with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
@@ -385,6 +392,8 @@ def test_import_repository_rejects_incomplete_final_clone(tmp_path: Path) -> Non
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.mirror_repository.mkdir(parents=True)
+    paths.lock_file.write_text("cache22-storage-v1\n")
+    paths.source_file.write_text(json.dumps({"source_path": repository.source_path}))
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),

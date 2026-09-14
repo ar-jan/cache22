@@ -16,6 +16,7 @@ LOCK_FILE_NAME = ".lock"
 class ArchivePaths:
     repository_dir: Path
     storage_dir: Path
+    source_file: Path
     lock_file: Path
     mirror_repository: Path
     fossil_repository: Path
@@ -45,6 +46,7 @@ def archive_paths_for_directory(repository_dir: Path) -> ArchivePaths:
     return ArchivePaths(
         repository_dir=repository_dir,
         storage_dir=storage_dir,
+        source_file=storage_dir / "source.json",
         lock_file=storage_dir / LOCK_FILE_NAME,
         mirror_repository=storage_dir / f"{name}.git",
         fossil_repository=storage_dir / f"{name}.fossil",
