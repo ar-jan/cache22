@@ -58,6 +58,8 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
 
     while directories_to_visit:
         relative = directories_to_visit.pop()
+        paths = None
+        marker_is_symlink = False
         with open_archive_directory(root, relative) as directory_fd:
             if directory_fd is None:
                 continue
@@ -74,20 +76,18 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
                     marker_is_symlink = stat.S_ISLNK(marker.lstat().st_mode)
                 except FileNotFoundError:
                     marker_is_symlink = False
-                with (
-                    repository_operation(root, paths)
-                    if not marker_is_symlink
-                    else nullcontext(None) as storage
-                ):
-                    if storage is not None:
-                        removed_paths.extend(_clean_repository_storage(storage))
-                # Repository artifacts are never namespace directories, including
-                # when the marker is malformed or cleanup leaves a complete mirror.
-                continue
-
-            directories_to_visit.extend(
-                relative / name for name in children if _valid_component(name)
-            )
+        # Release shared discovery reservations before requesting an exclusive
+        # repository reservation. repository_operation rechecks the marker.
+        if paths is not None:
+            with (
+                repository_operation(root, paths)
+                if not marker_is_symlink
+                else nullcontext(None) as storage
+            ):
+                if storage is not None:
+                    removed_paths.extend(_clean_repository_storage(storage))
+            continue
+        directories_to_visit.extend(relative / name for name in children if _valid_component(name))
 
     return removed_paths
 

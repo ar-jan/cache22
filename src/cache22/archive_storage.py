@@ -35,16 +35,17 @@ def has_repository_boundary(directory_fd: int) -> bool:
 
 @contextmanager
 def open_archive_directory(
-    root: Path, relative: Path, *, create: bool = False
+    root: Path, relative: Path, *, create: bool = False, exclusive: bool = False
 ) -> Iterator[int | None]:
-    """Open directories beneath a resolved archive root without following symlinks."""
+    """Reserve ancestors shared and the target shared/exclusive, without following symlinks."""
     if relative.is_absolute():
         raise ValueError(f"Archive path must be relative: {relative}")
     for part in relative.parts:
         validate_storage_component(part)
 
-    directory_fd = os.open(root, _DIRECTORY_FLAGS)
-    try:
+    with ExitStack() as stack:
+        directory_fd = os.open(root, _DIRECTORY_FLAGS)
+        stack.callback(os.close, directory_fd)
         for depth, part in enumerate(relative.parts):
             if depth >= 3 and has_repository_boundary(directory_fd):
                 ancestor = root.joinpath(*relative.parts[:depth])
@@ -60,11 +61,25 @@ def open_archive_directory(
                 with suppress(FileExistsError):
                     os.mkdir(part, dir_fd=directory_fd)
                 child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory_fd)
-            os.close(directory_fd)
+            stack.callback(os.close, child_fd)
+            child_path = root.joinpath(*relative.parts[: depth + 1])
+            final = depth == len(relative.parts) - 1
+            if not final and depth >= 2 and has_repository_boundary(child_fd):
+                raise ValueError(
+                    f"Repository path conflict: {root / relative} is inside repository {child_path}"
+                )
+            _lock_directory(child_fd, child_path, exclusive=exclusive and final)
             directory_fd = child_fd
         yield directory_fd
-    finally:
-        os.close(directory_fd)
+
+
+def _lock_directory(fd: int, path: Path, *, exclusive: bool) -> None:
+    try:
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EAGAIN, errno.EACCES}:
+            raise RepositoryBusyError(f"Repository is busy: {path}") from exc
+        raise
 
 
 @dataclass(frozen=True)
@@ -238,39 +253,57 @@ def repository_operation(
         raise ValueError("Storage preparation requires create=True")
     relative = paths.repository_dir.relative_to(root)
     with ExitStack() as stack:
-        # Serialize namespace checks and marker publication, not the import itself.
-        # Lock the existing root inode so no filename is reserved in the namespace.
-        root_fd = os.open(root, _DIRECTORY_FLAGS)
-        try:
-            fcntl.flock(root_fd, fcntl.LOCK_EX)
+        # Directory reservations survive this short root-lock section. They
+        # exclude ancestors/descendants while allowing unrelated work to proceed.
+        with _root_lock(root):
             directory_fd = stack.enter_context(
-                open_archive_directory(root, relative, create=create)
+                open_archive_directory(root, relative, create=create, exclusive=True)
             )
             lock_fd = None
+            deferred_publication = False
             if directory_fd is not None:
-                if prepare is not None:
-                    lock_fd = _prepare_owned_lock(directory_fd, paths, prepare)
-                else:
+                storage = RepositoryStorage(paths, directory_fd)
+                deferred_publication = (
+                    prepare is not None
+                    and storage.entry(paths.lock_file.name) is None
+                    and bool(os.listdir(directory_fd))
+                )
+                if not deferred_publication:
                     lock_fd = _open_owned_lock(directory_fd, paths, create=create)
             if lock_fd is not None:
                 stack.callback(os.close, lock_fd)
                 _lock(lock_fd, paths)
-        finally:
-            os.close(root_fd)
         if directory_fd is None:
             yield None
             return
-        if lock_fd is None:
+        if lock_fd is None and not deferred_publication:
             yield None
             return
-        if os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
+        if lock_fd is not None and os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
             if create:
                 raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
             yield None
             return
         storage = RepositoryStorage(paths, directory_fd)
+        if prepare is not None:
+            # Includes full fsck for adoption; never hold the root lock here.
+            prepare(storage)
+        if deferred_publication:
+            with _root_lock(root):
+                lock_fd = _publish_lock(directory_fd, paths)
+                stack.callback(os.close, lock_fd)
         storage.validate()
         yield storage
+
+
+@contextmanager
+def _root_lock(root: Path) -> Iterator[None]:
+    fd = os.open(root, _DIRECTORY_FLAGS)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _lock(fd: int, paths: ArchivePaths) -> None:
@@ -280,26 +313,6 @@ def _lock(fd: int, paths: ArchivePaths) -> None:
         if exc.errno in {errno.EAGAIN, errno.EACCES}:
             raise RepositoryBusyError(f"Repository is busy: {paths.repository_dir}") from exc
         raise
-
-
-def _prepare_owned_lock(
-    directory_fd: int, paths: ArchivePaths, prepare: Callable[[RepositoryStorage], None]
-) -> int:
-    storage = RepositoryStorage(paths, directory_fd)
-    if storage.entry(paths.lock_file.name) is None and os.listdir(directory_fd):
-        # No marker may be published until the candidate has been verified.
-        # The root lock excludes competing registration and cleanup throughout.
-        prepare(storage)
-        return _publish_lock(directory_fd, paths)
-    fd = _open_owned_lock(directory_fd, paths, create=True)
-    assert fd is not None
-    try:
-        _lock(fd, paths)
-        prepare(storage)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
 
 
 def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) -> int | None:

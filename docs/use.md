@@ -12,7 +12,11 @@ cache22 import repo https://github.com/ar-jan/cache22.git
 
 In Git archive mode, repeating an import fetches updates into the existing mirror.
 Updates include new refs, forced changes, and pruning branches and tags deleted
-upstream. A failed fetch keeps the initialized mirror for retry.
+upstream. The mirror's HEAD follows the advertised default branch, including
+renames, or the advertised detached commit. A failed fetch keeps the initialized
+mirror for retry. Ref updates are atomic; updating HEAD is a subsequent step.
+If that step fails, the command reports an incomplete update and retains the
+fetched refs. Retry the import to complete it.
 
 ### Adopting an existing mirror
 
@@ -44,7 +48,32 @@ or partial clones, external object alternates, symlinked storage, unrelated file
 unfinished staging state, and conflicting or malformed metadata are rejected.
 HTTPS and SSH origins are equivalent, but origin path casing must match the
 effective requested source; use `--case-sensitive` when appropriate.
-Fossil mode does not support adoption and retains its existing reuse behavior.
+Fossil archives and marks files are rejected when adoption would establish missing
+ownership or source metadata: Git verification cannot certify those files.
+Sidecars already associated with a valid Cache22 ownership marker and matching
+source binding are preserved. Fossil mode does not support adoption and retains
+its existing reuse behavior.
+
+### Repository Git configuration
+
+Before adoption verification or an existing-mirror update, Cache22 checks the
+mirror's local configuration without following include directives. Unsupported
+settings and worktree configuration are rejected without rewriting them.
+Use user-level Git configuration for authentication and transport customization;
+normal SSH and credential settings from that trusted configuration remain available.
+
+Allowed local settings are:
+
+- `core.repositoryformatversion`, `core.filemode`, `core.bare`,
+  `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, and `core.symlinks`
+- `extensions.objectformat` (`sha1` or `sha256`)
+- `remote.origin.url`, `remote.origin.fetch` (`+refs/*:refs/*`), and `remote.origin.mirror`
+- `remote.origin.tagOpt` (`--tags` or `--no-tags`; Git 2.55 mirror clones emit the latter)
+
+The origin must match the requested source and describe a full bare mirror.
+Local includes, additional remotes, SSH commands, credential helpers, and custom
+hook paths are not accepted. Repository hooks are disabled during verification,
+fetching, and HEAD synchronization; fetching does not run automatic maintenance.
 
 ### Case-sensitive sources
 
@@ -88,6 +117,12 @@ repositories remain supported.
 Previous layouts are unsupported and are not migrated.
 
 Imports and cleanup fail immediately with a repository-busy error when another Cache22 command holds its lock.
+Verification reserves the candidate directory and its namespace ancestors using
+inode locks. It creates no reservation files and does not hold the archive-wide
+root lock during the integrity check. Sibling imports and targeted cleanup can
+continue while verification runs; conflicting reservations fail immediately.
+Reservations release on process exit, including interrupted adoption before any
+Cache22 metadata has been published.
 Cleanup keeps completed archives and lock files.
 The retained lock keeps the path reserved as a repository even after its archive data is removed.
 `clean all` visits subgroup namespaces, stops traversal at repository boundaries,

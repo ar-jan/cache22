@@ -254,15 +254,13 @@ def test_import_repository_updates_existing_git_archive_with_info(tmp_path: Path
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run") as run,
+        patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
         result = import_repository(url, archive_dir=archive_dir, archive_type="git")
 
     assert result.archive_path == paths.mirror_repository
     assert result.info_messages == (f"INFO: updated Git mirror: {paths.mirror_repository}",)
-    assert run.call_count == 1
-    assert run.call_args.args[0][3] == "fetch"
-    assert run.call_args.args[0][-2:] == [url, "+refs/*:refs/*"]
+    fetch.assert_called_once_with(git_executable=Path("git"), url=url, paths=paths)
 
 
 def test_import_repository_returns_existing_fossil_archive_with_info(tmp_path: Path) -> None:

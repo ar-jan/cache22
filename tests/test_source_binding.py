@@ -76,13 +76,13 @@ def test_ipv6_clone_url_and_archive_reuse(
         assert run.call_args.args[0][-2] == expected
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run") as fetch,
+        patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
         assert (
             import_repository(url, tmp_path, "git", case_sensitive=case_sensitive).archive_path
             == first.archive_path
         )
-        assert fetch.call_args.args[0][-2] == expected
+        assert fetch.call_args.kwargs["url"] == expected
 
 
 @pytest.mark.parametrize("first_override", [False, True])
@@ -111,7 +111,7 @@ def test_source_conflicts_before_archive_reuse(
     path = "Team/Repo" if first_override else "team/repo"
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run") as fetch,
+        patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
         reused = import_repository(
             f"User@host:/{path}", tmp_path, archive_type, case_sensitive=True
@@ -221,7 +221,7 @@ def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:
         patch("cache22.git_mirror.subprocess.run", side_effect=clone),
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=True)
-    with patch("cache22.git_mirror.subprocess.run"):
+    with patch("cache22.git_mirror._fetch_git_mirror"):
         assert (
             import_repository(url, tmp_path, "git", case_sensitive=True).archive_path
             == first.archive_path

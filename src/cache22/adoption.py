@@ -7,8 +7,11 @@ from pathlib import Path
 
 from .archive_layout import LOCK_FILE_NAME
 from .archive_storage import RepositoryStorage
-from .git_mirror import git_repository_environment
-from .repository_ref import parse_repository_url
+from .git_config import (
+    git_repository_command,
+    git_repository_environment,
+    validate_git_mirror_config,
+)
 from .system_tools import find_git_executable
 
 
@@ -28,7 +31,7 @@ class AdoptionRequiredError(ValueError):
 def prepare_git_import(
     storage: RepositoryStorage, *, archive_dir: Path, source_path: str, adopt: bool
 ) -> bool:
-    """Verify and initialize under the root lock and any existing repository lock."""
+    """Verify and initialize under directory reservations and any existing repository lock."""
     paths = storage.paths
     owned = storage.entry(paths.lock_file.name) is not None
     try:
@@ -79,6 +82,12 @@ def _conflict_message(repository_dir: Path) -> str:
 
 def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
     paths = storage.paths
+    bound = storage.check_source(source_path, allow_unbound=True) is not None
+    managed = storage.entry(paths.lock_file.name) is not None and bound
+    if not managed:
+        for path in (paths.fossil_repository, paths.git_marks, paths.fossil_marks):
+            if storage.entry(path.name) is not None:
+                raise ValueError(f"Git adoption cannot verify Fossil artifacts: {path}")
     allowed = {
         paths.mirror_repository.name,
         paths.lock_file.name,
@@ -94,7 +103,6 @@ def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
             f"Cannot adopt {paths.repository_dir}: unexpected entries: "
             f"{', '.join(sorted(unexpected))}"
         )
-    storage.check_source(source_path, allow_unbound=True)
     if (
         storage.entry(paths.clone_complete_marker.name) is not None
         and paths.clone_complete_marker.read_bytes() != b"complete\n"
@@ -134,54 +142,25 @@ def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
 
 def _verify_mirror(mirror: Path, source_path: str) -> None:
     git = find_git_executable()
+    validate_git_mirror_config(git, mirror, source_path)
     env = git_repository_environment()
     env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
 
-    def run(*args: str, optional: bool = False) -> str:
+    def run(*args: str) -> str:
         result = subprocess.run(
-            [str(git), "--git-dir", str(mirror), *args],
+            git_repository_command(git, mirror, *args),
             check=False,
             capture_output=True,
             text=True,
             env=env,
         )
-        if result.returncode != 0 and not (optional and result.returncode == 1):
+        if result.returncode != 0:
             raise ValueError(
                 f"Git mirror verification failed at {mirror} ({args[0]}): "
                 f"{result.stderr.strip() or result.stdout.strip() or f'exit code {result.returncode}'}"
             )
         return result.stdout.strip()
 
-    def config(key: str) -> list[str]:
-        return run("config", "--includes", "--get-all", key, optional=True).splitlines()
-
     if run("rev-parse", "--is-bare-repository") != "true":
         raise ValueError(f"Adoption requires a bare Git mirror: {mirror}")
-    origins = config("remote.origin.url")
-    if len(origins) != 1:
-        raise ValueError(f"Adoption requires exactly one origin URL: {mirror}")
-    origin = parse_repository_url(origins[0], case_sensitive=True)
-    if origin.source_path != source_path:
-        raise ValueError(
-            f"Repository source conflict: origin {origin.source_path}; requested {source_path}"
-        )
-    if run(
-        "config",
-        "--includes",
-        "--bool",
-        "--get-all",
-        "remote.origin.mirror",
-        optional=True,
-    ) != "true" or config("remote.origin.fetch") != ["+refs/*:refs/*"]:
-        raise ValueError(
-            f"Adoption requires origin to be configured as a full Git mirror: {mirror}"
-        )
-    if config("extensions.partialclone") or run(
-        "config",
-        "--includes",
-        "--get-regexp",
-        r"^remote\..*\.(promisor|partialclonefilter)$",
-        optional=True,
-    ):
-        raise ValueError(f"Cannot adopt a partial Git clone: {mirror}")
     run("fsck", "--full")
