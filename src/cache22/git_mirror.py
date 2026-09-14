@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import IO
@@ -8,11 +9,32 @@ from .archive_layout import ArchivePaths
 from .archive_storage import RepositoryStorage
 
 
+def git_repository_environment() -> dict[str, str]:
+    """Keep transport/configuration settings, but select storage explicitly."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE",
+            "GIT_NAMESPACE",
+            "GIT_SHALLOW_FILE",
+            "GIT_REPLACE_REF_BASE",
+        }
+    }
+
+
 def ensure_git_mirror(
     *,
     git_executable: Path,
     url: str,
     storage: RepositoryStorage,
+    update: bool = False,
 ) -> str | None:
     paths = storage.paths
     if paths.clone_complete_marker.exists():
@@ -20,6 +42,9 @@ def ensure_git_mirror(
             raise ValueError(
                 f"Clone marker exists but mirror repository is missing: {paths.repository_dir}"
             )
+        if update:
+            _fetch_git_mirror(git_executable=git_executable, url=url, paths=paths)
+            return f"INFO: updated Git mirror: {paths.mirror_repository}"
         return f"INFO: archive already exists: {paths.mirror_repository}"
 
     if paths.mirror_repository.exists():
@@ -44,6 +69,33 @@ def ensure_git_mirror(
         raise
 
     return None
+
+
+def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) -> None:
+    try:
+        subprocess.run(
+            [
+                str(git_executable),
+                "-C",
+                str(paths.mirror_repository),
+                "fetch",
+                "--atomic",
+                "--prune",
+                "--no-recurse-submodules",
+                "--no-write-fetch-head",
+                "--refmap=",
+                "--",
+                url,
+                "+refs/*:refs/*",
+            ],
+            check=True,
+            env=git_repository_environment(),
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"git fetch failed with exit code {exc.returncode}; "
+            "the initialized mirror was kept. Retry the import to fetch updates."
+        ) from exc
 
 
 def open_fast_export(

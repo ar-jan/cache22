@@ -10,6 +10,42 @@ cache22 config archive add /absolute/path/to/archive
 cache22 import repo https://github.com/ar-jan/cache22.git
 ```
 
+In Git archive mode, repeating an import fetches updates into the existing mirror.
+Updates include new refs, forced changes, and pruning branches and tags deleted
+upstream. A failed fetch keeps the initialized mirror for retry.
+
+### Adopting an existing mirror
+
+If a mirror already exists at the expected path, for example
+`ARCHIVE/github.com/karpathy/llm.c/llm.c.git`, initialize it with:
+
+```sh
+cache22 import repo https://github.com/karpathy/llm.c.git --adopt
+```
+
+Cache22 verifies the origin identity, bare mirror configuration, and full Git
+object integrity before writing missing metadata and fetching updates. It never
+reclones or deletes the supplied mirror on failure. Later imports need no flag.
+Verification can take time for large mirrors.
+
+An ordinary import encountering an eligible uninitialized directory offers:
+
+```text
+Verify and adopt the existing Git mirror, then fetch updates? [y/N]:
+```
+
+The default is No. Acceptance performs the same verification as `--adopt`.
+The prompt appears on stderr only when both stdin and stderr are terminals;
+scripts and redirected sessions must supply `--adopt` explicitly. Locks are
+released while waiting for an answer, and the same target is rechecked afterward.
+
+Adoption supports the current container layout only. Working checkouts, shallow
+or partial clones, external object alternates, symlinked storage, unrelated files,
+unfinished staging state, and conflicting or malformed metadata are rejected.
+HTTPS and SSH origins are equivalent, but origin path casing must match the
+effective requested source; use `--case-sensitive` when appropriate.
+Fossil mode does not support adoption and retains its existing reuse behavior.
+
 ### Case-sensitive sources
 
 Use `cache22 import repo https://host/Team/Repo --case-sensitive` to preserve remote path casing on a case-sensitive server.
@@ -29,7 +65,8 @@ cache22 config archive-type set fossil
 
 ### Clean-up
 
-If an import is interrupted and leaves partial state behind, clean it up with:
+If an interrupted import leaves a complete Git mirror without Cache22 metadata,
+try `--adopt` to verify and retain it. To discard incomplete import state instead:
 
 ```sh
 # Clean one repository by URL

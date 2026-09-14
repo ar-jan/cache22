@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,7 +126,7 @@ class RepositoryStorage:
             )
         )
 
-    def bind_source(self, source_path: str) -> None:
+    def read_source(self) -> str | None:
         name = self.paths.source_file.name
         stored = None
         if self.entry(name) is not None:
@@ -150,17 +150,27 @@ class RepositoryStorage:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}") from exc
             if valid.source_path != stored:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
+        return stored
+
+    def check_source(self, source_path: str, *, allow_unbound: bool = False) -> str | None:
+        stored = self.read_source()
         if self.has_import_state():
-            if stored is None:
+            if stored is None and not allow_unbound:
                 raise ValueError(f"Archive data has no source binding: {self.paths.repository_dir}")
-            if stored != source_path:
+            if stored is not None and stored != source_path:
                 raise ValueError(
                     f"Repository source conflict: stored {stored}; requested {source_path}"
                 )
+        return stored
+
+    def bind_source(self, source_path: str, *, allow_unbound: bool = False) -> None:
+        stored = self.check_source(source_path, allow_unbound=allow_unbound)
         if stored != source_path:
             if not self.has_import_state():
                 self.release_unused_source()
-            temporary = f".source-{uuid.uuid4().hex}"
+            # Keep incomplete publications outside the terminal container, so an
+            # interrupted initialization can be verified and retried.
+            temporary = f"../.cache22-source-init-{uuid.uuid4().hex}"
             fd = os.open(
                 temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.directory_fd
             )
@@ -171,8 +181,12 @@ class RepositoryStorage:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(
-                    temporary, name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd
+                    temporary,
+                    self.paths.source_file.name,
+                    src_dir_fd=self.directory_fd,
+                    dst_dir_fd=self.directory_fd,
                 )
+                os.fsync(self.directory_fd)
             finally:
                 with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=self.directory_fd)
@@ -188,8 +202,9 @@ class RepositoryStorage:
 
     def write_clone_marker(self) -> None:
         name = self.paths.clone_complete_marker.name
+        temporary = f"../.cache22-clone-init-{uuid.uuid4().hex}"
         fd = os.open(
-            name,
+            temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
             dir_fd=self.directory_fd,
@@ -197,16 +212,30 @@ class RepositoryStorage:
         try:
             with os.fdopen(fd, "w") as handle:
                 handle.write("complete\n")
-        except OSError:
-            with suppress(OSError):
-                os.unlink(name, dir_fd=self.directory_fd)
-            raise
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=self.directory_fd,
+                dst_dir_fd=self.directory_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(self.directory_fd)
+        finally:
+            os.unlink(temporary, dir_fd=self.directory_fd)
 
 
 @contextmanager
 def repository_operation(
-    root: Path, paths: ArchivePaths, *, create: bool = False
+    root: Path,
+    paths: ArchivePaths,
+    *,
+    create: bool = False,
+    prepare: Callable[[RepositoryStorage], None] | None = None,
 ) -> Iterator[RepositoryStorage | None]:
+    if prepare is not None and not create:
+        raise ValueError("Storage preparation requires create=True")
     relative = paths.repository_dir.relative_to(root)
     with ExitStack() as stack:
         # Serialize namespace checks and marker publication, not the import itself.
@@ -217,11 +246,12 @@ def repository_operation(
             directory_fd = stack.enter_context(
                 open_archive_directory(root, relative, create=create)
             )
-            lock_fd = (
-                _open_owned_lock(directory_fd, paths, create=create)
-                if directory_fd is not None
-                else None
-            )
+            lock_fd = None
+            if directory_fd is not None:
+                if prepare is not None:
+                    lock_fd = _prepare_owned_lock(directory_fd, paths, prepare)
+                else:
+                    lock_fd = _open_owned_lock(directory_fd, paths, create=create)
             if lock_fd is not None:
                 stack.callback(os.close, lock_fd)
                 _lock(lock_fd, paths)
@@ -252,6 +282,26 @@ def _lock(fd: int, paths: ArchivePaths) -> None:
         raise
 
 
+def _prepare_owned_lock(
+    directory_fd: int, paths: ArchivePaths, prepare: Callable[[RepositoryStorage], None]
+) -> int:
+    storage = RepositoryStorage(paths, directory_fd)
+    if storage.entry(paths.lock_file.name) is None and os.listdir(directory_fd):
+        # No marker may be published until the candidate has been verified.
+        # The root lock excludes competing registration and cleanup throughout.
+        prepare(storage)
+        return _publish_lock(directory_fd, paths)
+    fd = _open_owned_lock(directory_fd, paths, create=True)
+    assert fd is not None
+    try:
+        _lock(fd, paths)
+        prepare(storage)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) -> int | None:
     try:
         fd = os.open(
@@ -266,26 +316,7 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
                 f"Repository path conflict: {paths.repository_dir} is a nonempty "
                 "namespace or uninitialized directory"
             )
-        temporary = f"../.cache22-lock-init-{uuid.uuid4().hex}"
-        fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
-        try:
-            os.write(fd, LOCK_SIGNATURE)
-            os.fsync(fd)
-            _lock(fd, paths)
-            os.link(
-                temporary,
-                paths.lock_file.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            result = fd
-            fd = -1
-            return result
-        finally:
-            if fd != -1:
-                os.close(fd)
-            os.unlink(temporary, dir_fd=directory_fd)
+        return _publish_lock(directory_fd, paths)
     mode = os.fstat(fd).st_mode
     if not stat.S_ISREG(mode):
         os.close(fd)
@@ -302,3 +333,27 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
         return None
     return fd
+
+
+def _publish_lock(directory_fd: int, paths: ArchivePaths) -> int:
+    temporary = f"../.cache22-lock-init-{uuid.uuid4().hex}"
+    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+    try:
+        os.write(fd, LOCK_SIGNATURE)
+        os.fsync(fd)
+        _lock(fd, paths)
+        os.link(
+            temporary,
+            paths.lock_file.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(directory_fd)
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd != -1:
+            os.close(fd)
+        os.unlink(temporary, dir_fd=directory_fd)

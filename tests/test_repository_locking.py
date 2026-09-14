@@ -122,7 +122,8 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     assert process.exitcode == 0
     assert paths.clone_complete_marker.is_file()
     lock_inode = paths.lock_file.stat().st_ino
-    assert import_repository(URL, tmp_path, "git").archive_path == paths.mirror_repository
+    with patch("cache22.git_mirror.subprocess.run"):
+        assert import_repository(URL, tmp_path, "git").archive_path == paths.mirror_repository
     assert clean_repository_import_state(URL, (tmp_path,)) == ()
     assert paths.lock_file.stat().st_ino == lock_inode
     assert (paths.mirror_repository / "HEAD").read_text() == "winner"

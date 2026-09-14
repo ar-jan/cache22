@@ -1,0 +1,462 @@
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event
+from unittest.mock import patch
+
+import pytest
+from typer.testing import CliRunner
+
+from cache22 import adoption
+from cache22.adoption import AdoptionRequiredError
+from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
+from cache22.archive_storage import LOCK_SIGNATURE, RepositoryBusyError, repository_operation
+from cache22.cli import app
+from cache22.import_service import import_repository
+from cache22.import_state import clean_repository_import_state
+from cache22.repository_ref import parse_repository_url
+
+URL = "https://host/team/project"
+
+
+def git(directory: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(directory), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@dataclass
+class Mirror:
+    root: Path
+    source: Path
+    paths: ArchivePaths
+
+    def commit(self, text: str) -> str:
+        (self.source / "file.txt").write_text(text)
+        git(self.source, "add", "file.txt")
+        git(self.source, "commit", "-m", text)
+        return git(self.source, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def mirror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Mirror:
+    if shutil.which("git") is None:
+        pytest.skip("Git is required for mirror adoption tests")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Cache22 Test")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "test@example.org")
+    source = tmp_path / "source"
+    source.mkdir()
+    git(source, "init", "--initial-branch=main")
+    root = tmp_path / "archive"
+    root.mkdir()
+    paths = archive_paths_for_repository(root, parse_repository_url(URL))
+    result = Mirror(root, source, paths)
+    result.commit("first")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{source}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", URL)
+    paths.repository_dir.mkdir(parents=True)
+    git(source, "clone", "--mirror", URL, str(paths.mirror_repository))
+    return result
+
+
+def snapshot(directory: Path) -> dict[str, bytes | str | None]:
+    return {
+        str(path.relative_to(directory)): (
+            str(path.readlink())
+            if path.is_symlink()
+            else path.read_bytes()
+            if path.is_file()
+            else None
+        )
+        for path in directory.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_adoption_registers_without_recloning_then_import_updates(
+    mirror: Mirror, owned: bool
+) -> None:
+    paths = mirror.paths
+    if owned:
+        paths.lock_file.write_bytes(LOCK_SIGNATURE)
+    before = snapshot(paths.repository_dir)
+    with pytest.raises(AdoptionRequiredError, match="--adopt") as error:
+        import_repository(URL, mirror.root, "git")
+    assert error.value.archive_dir == mirror.root
+    assert snapshot(paths.repository_dir) == before
+    inode = paths.mirror_repository.stat().st_ino
+    new_commit = mirror.commit("second")
+    result = import_repository(URL, mirror.root, "git", adopt=True)
+    assert "adopted Git mirror" in result.info_messages[0]
+    assert paths.mirror_repository.stat().st_ino == inode
+    assert paths.lock_file.read_bytes() == LOCK_SIGNATURE
+    assert paths.clone_complete_marker.read_text() == "complete\n"
+    assert json.loads(paths.source_file.read_text()) == {"source_path": "host/team/project"}
+    assert git(paths.mirror_repository, "rev-parse", "HEAD") == new_commit
+    lock_inode = paths.lock_file.stat().st_ino
+
+    git(mirror.source, "branch", "later")
+    git(mirror.source, "tag", "v1")
+    import_repository(URL, mirror.root, "git")
+    assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
+    assert paths.lock_file.stat().st_ino == lock_inode
+
+    # Force a tag and a branch backwards, remove a ref, and add a new branch.
+    first = git(mirror.source, "rev-parse", "HEAD^")
+    git(mirror.source, "update-ref", "refs/heads/main", first)
+    git(mirror.source, "tag", "--force", "v1", first)
+    git(mirror.source, "branch", "--delete", "--force", "later")
+    git(mirror.source, "branch", "added")
+    import_repository(URL, mirror.root, "git")
+    assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
+    git(mirror.source, "tag", "--delete", "v1")
+    import_repository(URL, mirror.root, "git")
+    assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "origin",
+        "multiple_origins",
+        "refspec",
+        "bare",
+        "corruption",
+        "partial",
+        "included_partial",
+        "shallow",
+        "alternates",
+        "symlink",
+        "namespace",
+        "metadata",
+        "binding",
+        "marker",
+        "stage",
+    ],
+)
+def test_invalid_adoption_never_changes_existing_data(mirror: Mirror, problem: str) -> None:
+    paths = mirror.paths
+    repo = paths.mirror_repository
+    if problem == "origin":
+        git(repo, "config", "remote.origin.url", "https://host/other/project")
+    elif problem == "multiple_origins":
+        git(repo, "config", "--add", "remote.origin.url", URL)
+    elif problem == "refspec":
+        git(repo, "config", "remote.origin.fetch", "+refs/heads/*:refs/heads/*")
+    elif problem == "bare":
+        git(repo, "config", "core.bare", "false")
+    elif problem == "corruption":
+        blob = git(repo, "rev-parse", "HEAD:file.txt")
+        obj = repo / "objects" / blob[:2] / blob[2:]
+        obj.unlink()  # Local clones can hardlink read-only objects to the source.
+        obj.write_bytes(b"corrupt object")
+    elif problem == "partial":
+        git(repo, "config", "remote.origin.promisor", "true")
+    elif problem == "included_partial":
+        config = mirror.root / "partial.config"
+        config.write_text('[remote "origin"]\n    promisor = true\n')
+        git(repo, "config", "include.path", str(config))
+    elif problem == "shallow":
+        (repo / "shallow").write_text(git(repo, "rev-parse", "HEAD") + "\n")
+    elif problem == "alternates":
+        (repo / "objects" / "info" / "alternates").write_text(str(mirror.source / ".git/objects"))
+    elif problem == "symlink":
+        (repo / "refs" / "external").symlink_to(mirror.source)
+    elif problem == "namespace":
+        (repo / "child").mkdir()
+        (repo / "child" / ".lock").write_bytes(LOCK_SIGNATURE)
+    elif problem == "metadata":
+        paths.source_file.write_text("{}")
+    elif problem == "binding":
+        paths.source_file.write_text('{"source_path":"host/other/project"}')
+    elif problem == "marker":
+        paths.clone_complete_marker.write_text("unfinished")
+    elif problem == "stage":
+        paths.temp_dir.mkdir()
+    before = snapshot(paths.repository_dir)
+    with pytest.raises(ValueError):
+        import_repository(URL, mirror.root, "git", adopt=True)
+    assert snapshot(paths.repository_dir) == before
+    assert not paths.lock_file.exists()
+
+
+@pytest.mark.parametrize("case_sensitive", [False, True])
+def test_adoption_matches_transport_but_preserves_source_casing(
+    mirror: Mirror, monkeypatch: pytest.MonkeyPatch, case_sensitive: bool
+) -> None:
+    git(mirror.paths.mirror_repository, "config", "remote.origin.url", "git@HOST:Team/Project.git")
+    with pytest.raises(ValueError, match="origin host/Team/Project; requested host/team/project"):
+        import_repository(URL, mirror.root, "git", adopt=True)
+    url = "https://host/Team/Project" if case_sensitive else URL
+    if case_sensitive:
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
+    else:
+        git(
+            mirror.paths.mirror_repository,
+            "config",
+            "remote.origin.url",
+            "git@HOST:team/project.git",
+        )
+    import_repository(url, mirror.root, "git", adopt=True, case_sensitive=case_sensitive)
+    # A repeated explicit adoption verifies again without replacing the lock.
+    inode = mirror.paths.lock_file.stat().st_ino
+    import_repository(url, mirror.root, "git", adopt=True, case_sensitive=case_sensitive)
+    assert mirror.paths.lock_file.stat().st_ino == inode
+
+
+def test_empty_mirror_can_be_adopted(mirror: Mirror) -> None:
+    for directory in (mirror.source, mirror.paths.mirror_repository):
+        git(directory, "update-ref", "-d", "refs/heads/main")
+    assert (
+        import_repository(URL, mirror.root, "git", adopt=True).archive_path
+        == mirror.paths.mirror_repository
+    )
+
+
+def test_git_environment_cannot_redirect_adoption_or_updates(
+    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latest = mirror.commit("update the mirror only")
+    source_before = snapshot(mirror.source)
+    monkeypatch.setenv("GIT_DIR", str(mirror.source / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(mirror.source / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(mirror.source))
+    import_repository(URL, mirror.root, "git", adopt=True)
+    assert snapshot(mirror.source) == source_before
+    for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(key)
+    assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
+
+
+def test_adoption_fetch_failure_keeps_initialization_for_retry(
+    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refs = git(mirror.paths.mirror_repository, "show-ref")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{mirror.root / 'missing'}.insteadOf")
+    with pytest.raises(RuntimeError, match="git fetch failed"):
+        import_repository(URL, mirror.root, "git", adopt=True)
+    assert mirror.paths.lock_file.exists()
+    assert mirror.paths.source_file.exists()
+    assert mirror.paths.clone_complete_marker.exists()
+    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert git(mirror.paths.mirror_repository, "show-ref") == refs
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{mirror.source}.insteadOf")
+    latest = mirror.commit("retry")
+    import_repository(URL, mirror.root, "git")
+    assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
+
+
+def test_failed_fetch_updates_no_refs(mirror: Mirror) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    refs = git(mirror.paths.mirror_repository, "show-ref")
+    mirror.commit("atomic update")
+    git(mirror.source, "branch", "second")
+    ref_lock = mirror.paths.mirror_repository / "refs/heads/second.lock"
+    ref_lock.touch()
+    with pytest.raises(RuntimeError, match="git fetch failed"):
+        import_repository(URL, mirror.root, "git")
+    assert git(mirror.paths.mirror_repository, "show-ref") == refs
+    ref_lock.unlink()
+    import_repository(URL, mirror.root, "git")
+    assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
+
+
+@pytest.mark.parametrize("owned,failure", [(False, "source"), (True, "source"), (False, "lock")])
+def test_interrupted_initialization_can_be_retried(
+    mirror: Mirror, owned: bool, failure: str
+) -> None:
+    if owned:
+        mirror.paths.lock_file.write_bytes(LOCK_SIGNATURE)
+    target = (
+        "cache22.archive_storage.RepositoryStorage.bind_source"
+        if failure == "source"
+        else "cache22.archive_storage._publish_lock"
+    )
+    with (
+        patch(target, side_effect=OSError("publication interrupted")),
+        pytest.raises(OSError, match="publication interrupted"),
+    ):
+        import_repository(URL, mirror.root, "git", adopt=True)
+    assert mirror.paths.clone_complete_marker.exists()
+    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert (
+        import_repository(URL, mirror.root, "git", adopt=True).archive_path
+        == mirror.paths.mirror_repository
+    )
+
+
+def test_adoption_obeys_existing_lock_and_blocks_nested_imports(mirror: Mirror) -> None:
+    mirror.paths.lock_file.write_bytes(LOCK_SIGNATURE)
+    with repository_operation(mirror.root, mirror.paths):
+        with pytest.raises(RepositoryBusyError):
+            import_repository(URL, mirror.root, "git", adopt=True)
+        with pytest.raises(RepositoryBusyError):
+            clean_repository_import_state(URL, (mirror.root,))
+    import_repository(URL, mirror.root, "git", adopt=True)
+    with pytest.raises(ValueError, match="Repository path conflict"):
+        import_repository(URL + "/child", mirror.root, "git", adopt=True)
+
+
+def test_concurrent_cleanup_and_child_import_wait_for_adoption(mirror: Mirror) -> None:
+    verified, release = Event(), Event()
+    cleaning, cleaned, importing, imported = Event(), Event(), Event(), Event()
+    verify = adoption._verify_mirror
+
+    def paused_verify(path: Path, source_path: str) -> None:
+        verify(path, source_path)
+        verified.set()
+        if not release.wait(10):
+            raise RuntimeError("Timed out waiting to publish adoption metadata")
+
+    def clean() -> None:
+        cleaning.set()
+        try:
+            assert clean_repository_import_state(URL, (mirror.root,)) == ()
+        except RepositoryBusyError:
+            pass  # Fetch may still hold the repository lock after publication.
+        cleaned.set()
+
+    def child() -> None:
+        importing.set()
+        with pytest.raises(ValueError, match="Repository path conflict"):
+            import_repository(URL + "/child", mirror.root, "git")
+        imported.set()
+
+    with (
+        patch("cache22.adoption._verify_mirror", side_effect=paused_verify),
+        ThreadPoolExecutor(max_workers=3) as pool,
+    ):
+        adopting = pool.submit(import_repository, URL, mirror.root, "git", adopt=True)
+        try:
+            assert verified.wait(10)
+            assert not mirror.paths.lock_file.exists()
+            cleanup, nested = pool.submit(clean), pool.submit(child)
+            assert cleaning.wait(10) and importing.wait(10)
+            assert not cleaned.wait(0.1) and not imported.wait(0.1)
+        finally:
+            release.set()
+        adopting.result(timeout=10)
+        cleanup.result(timeout=10)
+        nested.result(timeout=10)
+    assert mirror.paths.clone_complete_marker.exists()
+    assert not (mirror.paths.repository_dir / "child").exists()
+
+
+@pytest.mark.parametrize(
+    "answer,success", [("y\n", True), ("n\n", False), ("\n", False), ("", False)]
+)
+@pytest.mark.parametrize("owned", [False, True])
+def test_cli_offers_adoption_and_releases_locks_before_prompt(
+    mirror: Mirror, answer: str, success: bool, owned: bool
+) -> None:
+    if owned:
+        mirror.paths.lock_file.write_bytes(LOCK_SIGNATURE)
+
+    def terminal() -> bool:
+        # isatty is consulted only after the failed service call unwinds.
+        fd = os.open(mirror.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        if owned:
+            with repository_operation(mirror.root, mirror.paths):
+                pass
+        return True
+
+    before = snapshot(mirror.paths.repository_dir)
+    with (
+        patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
+        patch("cache22.import_service.default_archive_type", return_value="git"),
+        patch("cache22.cli._is_interactive", side_effect=terminal),
+    ):
+        result = CliRunner().invoke(app, ["import", "repo", URL], input=answer)
+    assert (result.exit_code == 0) == success, result.output
+    assert "[y/N]" in result.stderr
+    assert "Verify and adopt" not in result.stdout
+    if success:
+        assert mirror.paths.source_file.exists()
+    else:
+        assert snapshot(mirror.paths.repository_dir) == before
+
+
+def test_cli_noninteractive_requires_flag_and_explicit_adoption_never_prompts(
+    mirror: Mirror,
+) -> None:
+    with (
+        patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
+        patch("cache22.import_service.default_archive_type", return_value="git"),
+        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
+    ):
+        runner = CliRunner()
+        result = runner.invoke(app, ["import", "repo", URL])
+        assert result.exit_code == 1
+        assert "--adopt" in result.stderr
+        result = runner.invoke(app, ["import", "repo", URL, "--adopt"])
+        assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("problem", ["namespace", "symlink", "metadata"])
+def test_ineligible_conflicts_never_offer_adoption(mirror: Mirror, problem: str) -> None:
+    if problem == "namespace":
+        (mirror.paths.repository_dir / "child").mkdir()
+    elif problem == "symlink":
+        mirror.paths.source_file.symlink_to(mirror.source / "file.txt")
+    else:
+        mirror.paths.source_file.write_text("malformed")
+    before = snapshot(mirror.paths.repository_dir)
+    with (
+        patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
+        patch("cache22.import_service.default_archive_type", return_value="git"),
+        patch("cache22.cli._is_interactive", return_value=True),
+        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
+    ):
+        result = CliRunner().invoke(app, ["import", "repo", URL])
+    assert result.exit_code == 1
+    assert "[y/N]" not in result.stderr
+    assert not isinstance(result.exception, AssertionError)
+    assert snapshot(mirror.paths.repository_dir) == before
+
+
+def test_prompt_retry_pins_configuration_and_revalidates_state(mirror: Mirror) -> None:
+    def confirm(*args: object, **kwargs: object) -> bool:
+        mirror.paths.source_file.write_text('{"source_path":"host/other/project"}')
+        return True
+
+    with (
+        patch(
+            "cache22.import_service.default_archive_dir", side_effect=[mirror.root, AssertionError]
+        ),
+        patch("cache22.import_service.default_archive_type", side_effect=["git", AssertionError]),
+        patch("cache22.cli._is_interactive", return_value=True),
+        patch("cache22.cli.typer.confirm", side_effect=confirm) as prompt,
+    ):
+        result = CliRunner().invoke(app, ["import", "repo", URL])
+    assert result.exit_code == 1
+    assert "source conflict" in result.stderr
+    assert prompt.call_count == 1
+    assert not mirror.paths.lock_file.exists()
+
+
+def test_fossil_rejects_adoption_without_changes_or_prompt(mirror: Mirror) -> None:
+    before = snapshot(mirror.paths.repository_dir)
+    with (
+        patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
+        patch("cache22.import_service.default_archive_type", return_value="fossil"),
+        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
+    ):
+        result = CliRunner().invoke(app, ["import", "repo", URL, "--adopt"])
+    assert result.exit_code == 1
+    assert "only supported in Git" in result.stderr
+    assert snapshot(mirror.paths.repository_dir) == before

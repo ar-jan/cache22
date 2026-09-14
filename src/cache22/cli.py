@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import NoReturn
 
 import typer
 
+from .adoption import AdoptionRequiredError
 from .config import (
     ConfigError,
     add_archive_dir,
@@ -90,7 +92,7 @@ def status_fossil() -> None:
 
 @import_app.command(
     "repo",
-    help=("Import a Git repository into the archive."),
+    help="Import or update a Git mirror, or create a Fossil archive.",
 )
 @_user_command
 def import_repo(
@@ -98,8 +100,34 @@ def import_repo(
     case_sensitive: bool = typer.Option(
         False, "--case-sensitive", help="Preserve remote repository path casing."
     ),
+    adopt: bool = typer.Option(
+        False, "--adopt", help="Verify and initialize an existing Git mirror before updating it."
+    ),
 ) -> None:
-    _report_import_result(import_repository(url, case_sensitive=case_sensitive))
+    try:
+        result = import_repository(url, case_sensitive=case_sensitive, adopt=adopt)
+    except AdoptionRequiredError as exc:
+        if adopt or not _is_interactive():
+            raise
+        typer.echo(exc.conflict_message, err=True)
+        if not typer.confirm(
+            "Verify and adopt the existing Git mirror, then fetch updates?", default=False, err=True
+        ):
+            raise typer.Exit(code=1) from exc
+        # The first attempt has released its locks. Retry against the same root
+        # and archive mode even if configuration changed while awaiting input.
+        result = import_repository(
+            url,
+            archive_dir=exc.archive_dir,
+            archive_type="git",
+            case_sensitive=case_sensitive,
+            adopt=True,
+        )
+    _report_import_result(result)
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
 
 
 @import_clean_app.command("repo")

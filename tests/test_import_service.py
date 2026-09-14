@@ -241,7 +241,7 @@ def test_import_repository_reuses_completed_final_git_mirror_for_fossil(
     assert not paths.temp_dir.exists()
 
 
-def test_import_repository_returns_existing_git_archive_with_info(tmp_path: Path) -> None:
+def test_import_repository_updates_existing_git_archive_with_info(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://github.com/ar-jan/cache22.git"
@@ -252,11 +252,17 @@ def test_import_repository_returns_existing_git_archive_with_info(tmp_path: Path
     paths.source_file.write_text(json.dumps({"source_path": repository.source_path}))
     paths.clone_complete_marker.write_text("complete\n")
 
-    with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
+    with (
+        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.git_mirror.subprocess.run") as run,
+    ):
         result = import_repository(url, archive_dir=archive_dir, archive_type="git")
 
     assert result.archive_path == paths.mirror_repository
-    assert result.info_messages == (f"INFO: archive already exists: {paths.mirror_repository}",)
+    assert result.info_messages == (f"INFO: updated Git mirror: {paths.mirror_repository}",)
+    assert run.call_count == 1
+    assert run.call_args.args[0][3] == "fetch"
+    assert run.call_args.args[0][-2:] == [url, "+refs/*:refs/*"]
 
 
 def test_import_repository_returns_existing_fossil_archive_with_info(tmp_path: Path) -> None:
@@ -397,7 +403,7 @@ def test_import_repository_rejects_incomplete_final_clone(tmp_path: Path) -> Non
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        pytest.raises(RuntimeError, match="cache22 import clean repo"),
+        pytest.raises(ValueError, match="Adoption requires a bare Git mirror"),
     ):
         import_repository(url, archive_dir=archive_dir, archive_type="git")
 
