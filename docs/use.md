@@ -15,8 +15,16 @@ Updates include new refs, forced changes, and pruning branches and tags deleted
 upstream. The mirror's HEAD follows the advertised default branch, including
 renames, or the advertised detached commit. A failed fetch keeps the initialized
 mirror for retry. Ref updates are atomic; updating HEAD is a subsequent step.
-If that step fails, the command reports an incomplete update and retains the
-fetched refs. Retry the import to complete it.
+Before publishing HEAD, Cache22 checks that its remote target and object ID stayed
+the same across the fetch and that the fetched target matches. If this check or
+HEAD publication fails, the command reports an incomplete update and retains the
+fetched refs without publishing HEAD. Retry the import to complete it; Cache22
+does not retry automatically.
+
+Every existing-mirror update rechecks the storage layout before running Git.
+Symlinks, redirected storage, and shallow or partial-clone state are rejected
+without modifying the mirror. These checks inspect filesystem entries; full Git
+object verification runs only during explicit adoption.
 
 ### Adopting an existing mirror
 

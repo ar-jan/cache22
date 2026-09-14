@@ -628,13 +628,28 @@ def test_head_publication_failure_retains_fetched_refs_for_retry(mirror: Mirror)
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/renamed"
 
 
-def test_default_branch_change_during_fetch_is_retryable(mirror: Mirror) -> None:
+@pytest.mark.parametrize("change", ["rename", "existing_branch", "symbolic_oid", "detached_oid"])
+def test_remote_head_change_during_fetch_is_retryable(mirror: Mirror, change: str) -> None:
+    if change == "existing_branch":
+        git(mirror.source, "branch", "release")
+    elif change == "detached_oid":
+        git(mirror.source, "checkout", "--detach")
     import_repository(URL, mirror.root, "git", adopt=True)
+    previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
     discover = git_mirror._remote_head
+    discoveries = 0
 
     def changing_remote(executable: Path, path: Path, url: str) -> git_mirror._RemoteHead:
+        nonlocal discoveries
         head = discover(executable, path, url)
-        git(mirror.source, "branch", "-m", "renamed")
+        discoveries += 1
+        if discoveries == 1:
+            if change == "rename":
+                git(mirror.source, "branch", "-m", "renamed")
+            elif change == "existing_branch":
+                git(mirror.source, "symbolic-ref", "HEAD", "refs/heads/release")
+            else:
+                mirror.commit("changed during fetching")
         return head
 
     with (
@@ -642,6 +657,120 @@ def test_default_branch_change_during_fetch_is_retryable(mirror: Mirror) -> None
         pytest.raises(RuntimeError, match="HEAD synchronization failed"),
     ):
         import_repository(URL, mirror.root, "git")
+    assert discoveries == 2  # No automatic retry.
+    assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
+    assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
+    assert mirror.paths.clone_complete_marker.exists()
+    import_repository(URL, mirror.root, "git")
+    assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == (
+        mirror.source / ".git/HEAD"
+    ).read_bytes()
+
+
+def test_fetched_head_must_match_even_when_advertisements_agree(mirror: Mirror) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
+    original = git(mirror.source, "rev-parse", "HEAD")
+    discover = git_mirror._remote_head
+    discoveries = 0
+    fetched = ""
+
+    def changing_remote(executable: Path, path: Path, url: str) -> git_mirror._RemoteHead:
+        nonlocal discoveries, fetched
+        discoveries += 1
+        if discoveries == 2:
+            # Restore the advertised OID after fetch has already received a different one.
+            git(mirror.source, "update-ref", "refs/heads/main", original)
+        head = discover(executable, path, url)
+        if discoveries == 1:
+            fetched = mirror.commit("temporary remote tip")
+        return head
+
+    with (
+        patch("cache22.git_mirror._remote_head", side_effect=changing_remote),
+        pytest.raises(RuntimeError, match="HEAD synchronization failed"),
+    ):
+        import_repository(URL, mirror.root, "git")
+    assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
+    assert git(mirror.paths.mirror_repository, "rev-parse", "refs/heads/main") == fetched
+    assert mirror.paths.clone_complete_marker.exists()
+    import_repository(URL, mirror.root, "git")
+    assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == original
+
+
+def test_post_fetch_head_discovery_failure_retains_refs_for_retry(mirror: Mirror) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
+    git(mirror.source, "branch", "-m", "renamed")
+    discover = git_mirror._remote_head
+    discoveries = 0
+
+    def failing_discovery(executable: Path, path: Path, url: str) -> git_mirror._RemoteHead:
+        nonlocal discoveries
+        discoveries += 1
+        if discoveries == 2:
+            raise subprocess.CalledProcessError(128, [str(executable), "ls-remote"])
+        return discover(executable, path, url)
+
+    with (
+        patch("cache22.git_mirror._remote_head", side_effect=failing_discovery),
+        pytest.raises(RuntimeError, match="refs were fetched, but HEAD synchronization failed"),
+    ):
+        import_repository(URL, mirror.root, "git")
+    assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
+    assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     assert mirror.paths.clone_complete_marker.exists()
     import_repository(URL, mirror.root, "git")
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/renamed"
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "objects/info/alternates",
+        "objects/info/http-alternates",
+        "commondir",
+        "shallow",
+        "objects/pack/partial.promisor",
+        "symlink_directory",
+        "symlink_head",
+        "special_file",
+        "nested_boundary",
+        "missing_refs",
+    ],
+)
+def test_unsafe_initialized_layout_is_rejected_before_git(mirror: Mirror, problem: str) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    repo = mirror.paths.mirror_repository
+    if problem == "symlink_directory":
+        (repo / "refs/external").symlink_to(mirror.source / ".git/refs", target_is_directory=True)
+    elif problem == "symlink_head":
+        (repo / "HEAD").unlink()
+        (repo / "HEAD").symlink_to(mirror.source / ".git/HEAD")
+    elif problem == "special_file":
+        os.mkfifo(repo / "objects/info/pipe")
+    elif problem == "nested_boundary":
+        (repo / "nested").mkdir()
+        (repo / "nested/.lock").write_bytes(LOCK_SIGNATURE)
+    elif problem == "missing_refs":
+        shutil.rmtree(repo / "refs")
+    else:
+        (repo / problem).write_text(str(mirror.source / ".git/objects") + "\n")
+    before = snapshot(mirror.paths.repository_dir)
+    external_before = snapshot(mirror.source)
+
+    with (
+        patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
+        pytest.raises(RuntimeError, match="Unsafe|self-contained|Partial|nested|bare Git mirror"),
+    ):
+        import_repository(URL, mirror.root, "git")
+    assert snapshot(mirror.paths.repository_dir) == before
+    assert snapshot(mirror.source) == external_before
+
+
+def test_ordinary_update_does_not_repeat_full_object_verification(mirror: Mirror) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    latest = mirror.commit("ordinary update")
+    with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Do not repeat fsck")):
+        import_repository(URL, mirror.root, "git")
+    assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest

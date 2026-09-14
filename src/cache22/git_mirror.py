@@ -13,6 +13,7 @@ from .git_config import (
     git_repository_environment,
     validate_git_mirror_config,
 )
+from .git_layout import validate_git_mirror_layout
 from .repository_ref import parse_repository_url
 
 
@@ -60,6 +61,7 @@ def ensure_git_mirror(
 
 def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) -> None:
     mirror = paths.mirror_repository
+    validate_git_mirror_layout(mirror)
     validate_git_mirror_config(
         git_executable, mirror, parse_repository_url(url, case_sensitive=True).source_path
     )
@@ -99,6 +101,8 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
             "the initialized mirror was kept. Retry the import to fetch updates."
         ) from exc
     try:
+        if _remote_head(git_executable, mirror, url) != head:
+            raise ValueError("Remote HEAD changed during fetching")
         _synchronize_head(git_executable, mirror, head)
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         raise RuntimeError(
@@ -153,6 +157,8 @@ def _synchronize_head(git: Path, mirror: Path, head: _RemoteHead) -> None:
         )
         if target.returncode != 0 and (head.oid is not None or _has_refs(git, mirror)):
             raise ValueError("Advertised HEAD target disappeared during fetching")
+        if target.returncode == 0 and target.stdout.strip() != head.oid:
+            raise ValueError("Fetched HEAD target does not match the advertised object ID")
         _read_git(git, mirror, "symbolic-ref", "HEAD", head.target)
     elif head.oid is not None:
         _read_git(git, mirror, "cat-file", "-e", f"{head.oid}^{{commit}}")

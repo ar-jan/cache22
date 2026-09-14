@@ -401,7 +401,7 @@ def test_import_repository_rejects_incomplete_final_clone(tmp_path: Path) -> Non
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        pytest.raises(ValueError, match="Adoption requires a bare Git mirror"),
+        pytest.raises(ValueError, match="Expected a bare Git mirror"),
     ):
         import_repository(url, archive_dir=archive_dir, archive_type="git")
 

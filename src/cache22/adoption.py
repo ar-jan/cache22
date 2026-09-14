@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 from pathlib import Path
 
-from .archive_layout import LOCK_FILE_NAME
 from .archive_storage import RepositoryStorage
 from .git_config import (
     git_repository_command,
     git_repository_environment,
     validate_git_mirror_config,
 )
+from .git_layout import validate_git_mirror_layout
 from .system_tools import find_git_executable
 
 
@@ -109,35 +108,7 @@ def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
     ):
         raise ValueError(f"Malformed clone completion marker: {paths.clone_complete_marker}")
 
-    mirror = paths.mirror_repository
-    for name, directory in (("HEAD", False), ("config", False), ("objects", True), ("refs", True)):
-        entry = mirror / name
-        try:
-            mode = entry.lstat().st_mode
-        except FileNotFoundError as exc:
-            raise ValueError(f"Adoption requires a bare Git mirror: missing {entry}") from exc
-        if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
-            raise ValueError(f"Unsafe Git mirror entry: {entry}")
-
-    # Git must not traverse redirected storage or a nested Cache22 repository.
-    def walk_error(exc: OSError) -> None:
-        raise exc
-
-    for directory, children, files in os.walk(mirror, onerror=walk_error, followlinks=False):
-        for name in (*children, *files):
-            entry = Path(directory) / name
-            mode = entry.lstat().st_mode
-            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
-                raise ValueError(f"Unsafe Git mirror entry: {entry}")
-            if name == LOCK_FILE_NAME and not stat.S_ISDIR(mode):
-                raise ValueError(f"Repository path conflict: nested repository boundary: {entry}")
-    for name in ("commondir", "shallow", "objects/info/alternates", "objects/info/http-alternates"):
-        if (mirror / name).exists():
-            raise ValueError(
-                f"Adoption requires a complete, self-contained mirror: {mirror / name}"
-            )
-    if any((mirror / "objects" / "pack").glob("*.promisor")):
-        raise ValueError(f"Cannot adopt a partial Git clone: {mirror}")
+    validate_git_mirror_layout(paths.mirror_repository)
 
 
 def _verify_mirror(mirror: Path, source_path: str) -> None:
