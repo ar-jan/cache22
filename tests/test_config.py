@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -97,9 +100,11 @@ def test_rejects_relative_archive_dirs(tmp_path: Path, monkeypatch: pytest.Monke
 def test_requires_search_permission(tmp_path: Path) -> None:
     archive_dir = tmp_path
 
-    with patch("cache22.config.os.access", return_value=False) as access:
-        with pytest.raises(ValueError, match="not writable and searchable"):
-            normalize_archive_dir(archive_dir)
+    with (
+        patch("cache22.config.os.access", return_value=False) as access,
+        pytest.raises(ValueError, match="not writable and searchable"),
+    ):
+        normalize_archive_dir(archive_dir)
 
     access.assert_called_once_with(archive_dir, os.W_OK | os.X_OK)
 
@@ -166,9 +171,46 @@ def test_save_reports_unwritable_config_path(
     archive_dir.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    with patch("pathlib.Path.open", side_effect=OSError("disk full")):
-        with pytest.raises(ConfigError, match="Config file could not be written"):
-            save_config(Config(archive_dirs=[archive_dir]))
+    with (
+        patch("cache22.config.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")),
+        pytest.raises(ConfigError, match="Config file could not be written"),
+    ):
+        save_config(Config(archive_dirs=[archive_dir]))
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync", "replace"])
+def test_failed_save_preserves_previous_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    original = Config([tmp_path / "archive"], "fossil")
+    save_config(original)
+    path = tmp_path / "cache22" / "config.toml"
+    previous_bytes = path.read_bytes()
+    real_temporary_file = tempfile.NamedTemporaryFile
+
+    @contextmanager
+    def failing_writer(**kwargs) -> Iterator[object]:
+        with (
+            real_temporary_file(**kwargs) as handle,
+            patch.object(handle, "write", side_effect=OSError("disk full")),
+        ):
+            yield handle
+
+    target, effect = {
+        "write": ("cache22.config.tempfile.NamedTemporaryFile", failing_writer),
+        "fsync": ("cache22.config.os.fsync", OSError("disk full")),
+        "replace": ("pathlib.Path.replace", OSError("replacement failed")),
+    }[failure]
+    with (
+        patch(target, side_effect=effect),
+        pytest.raises(ConfigError, match="Config file could not be written"),
+    ):
+        save_config(Config(original.archive_dirs, "git"))
+
+    assert path.read_bytes() == previous_bytes
+    assert load_config() == original
+    assert list(path.parent.iterdir()) == [path]
 
 
 def test_list_reports_invalid_config_without_traceback(

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import wraps
 from pathlib import Path
-from typing import Callable, NoReturn, ParamSpec
+from typing import NoReturn
 
 import typer
 
@@ -35,10 +36,8 @@ app.add_typer(status_app, name="status")
 app.add_typer(import_app, name="import")
 import_app.add_typer(import_clean_app, name="clean")
 
-P = ParamSpec("P")
 
-
-def _user_command(command: Callable[P, None]) -> Callable[P, None]:
+def _user_command[**P](command: Callable[P, None]) -> Callable[P, None]:
     @wraps(command)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         try:
@@ -94,8 +93,13 @@ def status_fossil() -> None:
     help=("Import a Git repository into the archive."),
 )
 @_user_command
-def import_repo(url: str) -> None:
-    _report_import_result(import_repository(url))
+def import_repo(
+    url: str,
+    case_sensitive: bool = typer.Option(
+        False, "--case-sensitive", help="Preserve remote repository path casing."
+    ),
+) -> None:
+    _report_import_result(import_repository(url, case_sensitive=case_sensitive))
 
 
 @import_clean_app.command("repo")

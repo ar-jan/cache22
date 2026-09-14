@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import tomllib
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -60,17 +62,29 @@ def load_config() -> Config:
 
 def save_config(config: Config) -> None:
     path = config_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
         "archive_dirs": [str(archive_dir) for archive_dir in config.archive_dirs],
         "archive_type": config.archive_type,
     }
+    encoded = tomli_w.dumps(payload).encode()
+    temporary_path: Path | None = None
     try:
-        with path.open("wb") as handle:
-            handle.write(tomli_w.dumps(payload).encode())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=".config-", delete=False
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
     except OSError as exc:
         raise ConfigError(f"Config file could not be written: {path}") from exc
+    finally:
+        if temporary_path is not None:
+            with suppress(OSError):
+                temporary_path.unlink()
 
 
 def normalize_archive_dir(raw_path: str | Path) -> Path:

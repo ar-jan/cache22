@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 from typing import IO
 
 from .archive_layout import ArchivePaths
+from .archive_storage import RepositoryStorage
 
 
 def ensure_git_mirror(
     *,
     git_executable: Path,
     url: str,
-    paths: ArchivePaths,
+    storage: RepositoryStorage,
 ) -> str | None:
+    paths = storage.paths
     if paths.clone_complete_marker.exists():
         if not paths.mirror_repository.exists():
             raise ValueError(
@@ -27,20 +28,19 @@ def ensure_git_mirror(
             f"Clear it with 'cache22 import clean repo {url}' to start over."
         )
 
-    paths.repository_dir.mkdir(parents=True, exist_ok=True)
     try:
         subprocess.run(
-            [str(git_executable), "clone", "--mirror", url, str(paths.mirror_repository)],
+            [str(git_executable), "clone", "--mirror", "--", url, str(paths.mirror_repository)],
             check=True,
         )
     except subprocess.CalledProcessError as exc:
-        _clear_incomplete_mirror(paths)
+        _clear_incomplete_mirror(storage)
         raise RuntimeError(f"git clone --mirror failed with exit code {exc.returncode}") from exc
 
     try:
-        paths.clone_complete_marker.write_text("complete\n")
+        storage.write_clone_marker()
     except OSError:
-        _clear_incomplete_mirror(paths)
+        _clear_incomplete_mirror(storage)
         raise
 
     return None
@@ -71,17 +71,7 @@ def open_fast_export(
     return process, process.stdout
 
 
-def _clear_incomplete_mirror(paths: ArchivePaths) -> None:
-    if paths.clone_complete_marker.exists():
-        try:
-            paths.clone_complete_marker.unlink()
-        except OSError:
-            return
-
-    if not paths.mirror_repository.exists():
+def _clear_incomplete_mirror(storage: RepositoryStorage) -> None:
+    if storage.entry(storage.paths.clone_complete_marker.name) is not None:
         return
-
-    try:
-        shutil.rmtree(paths.mirror_repository)
-    except OSError:
-        return
+    storage.remove(storage.paths.mirror_repository.name)
