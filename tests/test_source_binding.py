@@ -53,6 +53,34 @@ def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args, 0)
 
 
+@pytest.mark.parametrize(
+    "scheme,credentials", [("https", ""), ("ssh", "User@"), ("https", "User:Pass@")]
+)
+@pytest.mark.parametrize("port", ["", ":0022"])
+@pytest.mark.parametrize("case_sensitive", [False, True])
+def test_ipv6_clone_url_and_archive_reuse(
+    tmp_path: Path, scheme: str, credentials: str, port: str, case_sensitive: bool
+) -> None:
+    url = f"{scheme}://{credentials}[2001:DB8::1]{port}/Team/Repo.git"
+    path = "Team/Repo" if case_sensitive else "team/repo"
+    expected = f"{scheme}://{credentials}[2001:db8::1]{port}/{path}.git"
+    repository = parse_repository_url(url, case_sensitive=case_sensitive)
+    assert repository.host == "2001:db8::1"
+    assert repository.source_path == f"2001:db8::1/{path}"
+    assert repository.clone_url == expected
+    with (
+        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.git_mirror.subprocess.run", side_effect=clone) as run,
+    ):
+        first = import_repository(url, tmp_path, "git", case_sensitive=case_sensitive)
+        assert run.call_args.args[0][-2] == expected
+    with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
+        assert (
+            import_repository(url, tmp_path, "git", case_sensitive=case_sensitive).archive_path
+            == first.archive_path
+        )
+
+
 @pytest.mark.parametrize("first_override", [False, True])
 @pytest.mark.parametrize("archive_type", ["git", "fossil"])
 def test_source_conflicts_before_archive_reuse(

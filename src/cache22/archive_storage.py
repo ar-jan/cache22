@@ -140,8 +140,12 @@ class RepositoryStorage:
             ):
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
             stored = metadata["source_path"]
+            stored_host, _, stored_path = stored.partition("/")
+            url_host = f"[{stored_host}]" if ":" in stored_host else stored_host
             try:
-                valid = parse_repository_url("https://" + stored + ".git", case_sensitive=True)
+                valid = parse_repository_url(
+                    f"https://{url_host}/{stored_path}.git", case_sensitive=True
+                )
             except ValueError as exc:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}") from exc
             if valid.source_path != stored:

@@ -51,10 +51,13 @@ def parse_repository_url(url: str, *, case_sensitive: bool = False) -> Repositor
         credentials, separator, authority = parsed.netloc.rpartition("@")
         if not separator:
             authority = parsed.netloc
-        port = authority[len(authority.split(":", 1)[0]) :]
-        clone_url = (
-            f"{parsed.scheme.lower()}://{credentials + '@' if separator else ''}{host}{port}/{path}"
-        )
+        if authority.startswith("["):
+            port = authority.partition("]")[2]
+            url_host = f"[{host}]"
+        else:
+            port = authority[len(authority.split(":", 1)[0]) :]
+            url_host = host
+        clone_url = f"{parsed.scheme.lower()}://{credentials + '@' if separator else ''}{url_host}{port}/{path}"
     return RepositoryRef(
         repository.host,
         repository.namespace,
