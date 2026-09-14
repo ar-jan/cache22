@@ -41,14 +41,20 @@ cache22 import clean all
 
 ## Details
 
-For `https://Git.Example.ORG/Team/Project.git`, files are stored under `ARCHIVE/git.example.org/team/project/.cache22/`, including `project.git`, the `.clone-complete` marker, and the persistent `.lock` file.
+The entire configured archive directory is managed by Cache22.
+For `https://Git.Example.ORG/Team/Project.git`, files are stored directly under `ARCHIVE/git.example.org/team/project/`, including `project.git`, the `.clone-complete` marker, and the persistent `.lock` file.
 Optional Fossil output and staging data also live there.
-The `.cache22` namespace or repository name is reserved.
-Previous layouts are not migrated or discovered.
+Repository directories are terminal containers. For example, importing both
+`host/team/project` and `host/team/project/child` into the same archive is rejected
+in either order, including simultaneous imports. Subgroup namespaces and sibling
+repositories remain supported.
+Previous layouts are unsupported and are not migrated.
 
 Imports and cleanup fail immediately with a repository-busy error when another Cache22 command holds its lock.
 Cleanup keeps completed archives and lock files.
-`clean all` also visits nested repositories, skips directory symlinks, and stops on a busy repository without rolling back earlier cleanup.
+The retained lock keeps the path reserved as a repository even after its archive data is removed.
+`clean all` visits subgroup namespaces, stops traversal at repository boundaries,
+skips directory symlinks, and stops on a busy repository without rolling back earlier cleanup.
 Targeted operations reject symlinked storage paths.
 Missing archive roots are errors and must be restored before importing or cleaning.
 

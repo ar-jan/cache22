@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-STORAGE_DIR_NAME = ".cache22"
-
 
 def validate_storage_component(component: str) -> None:
     if (
@@ -112,10 +110,6 @@ def _repository_from_path(host: str, raw_path: str) -> RepositoryRef:
         )
 
     normalized_parts = _normalize_repository_parts(parts)
-    if STORAGE_DIR_NAME in normalized_parts:
-        raise ValueError(
-            f"Repository paths must not contain the reserved {STORAGE_DIR_NAME!r} segment"
-        )
     for part in normalized_parts:
         validate_storage_component(part)
     return RepositoryRef(

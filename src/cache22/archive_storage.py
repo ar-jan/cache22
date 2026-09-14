@@ -8,11 +8,11 @@ import shutil
 import stat
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from .archive_layout import ArchivePaths
+from .archive_layout import LOCK_FILE_NAME, ArchivePaths
 from .repository_ref import parse_repository_url, validate_storage_component
 
 LOCK_SIGNATURE = b"cache22-storage-v1\n"
@@ -22,6 +22,15 @@ _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
 class RepositoryBusyError(RuntimeError):
     """Another Cache22 operation holds this repository's lock."""
+
+
+def has_repository_boundary(directory_fd: int) -> bool:
+    """A non-directory lock entry marks a terminal container, even if damaged."""
+    try:
+        marker = os.stat(LOCK_FILE_NAME, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return not stat.S_ISDIR(marker.st_mode)
 
 
 @contextmanager
@@ -36,7 +45,12 @@ def open_archive_directory(
 
     directory_fd = os.open(root, _DIRECTORY_FLAGS)
     try:
-        for part in relative.parts:
+        for depth, part in enumerate(relative.parts):
+            if depth >= 3 and has_repository_boundary(directory_fd):
+                ancestor = root.joinpath(*relative.parts[:depth])
+                raise ValueError(
+                    f"Repository path conflict: {root / relative} is inside repository {ancestor}"
+                )
             try:
                 child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory_fd)
             except FileNotFoundError:
@@ -74,7 +88,7 @@ class RepositoryStorage:
         except FileNotFoundError:
             return None
         if not (stat.S_ISREG(result.st_mode) or stat.S_ISDIR(result.st_mode)):
-            raise ValueError(f"Unsafe archive entry: {self.paths.storage_dir / name}")
+            raise ValueError(f"Unsafe archive entry: {self.paths.repository_dir / name}")
         return result
 
     def validate(self) -> None:
@@ -134,7 +148,7 @@ class RepositoryStorage:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
         if self.has_import_state():
             if stored is None:
-                raise ValueError(f"Archive data has no source binding: {self.paths.storage_dir}")
+                raise ValueError(f"Archive data has no source binding: {self.paths.repository_dir}")
             if stored != source_path:
                 raise ValueError(
                     f"Repository source conflict: stored {stored}; requested {source_path}"
@@ -189,27 +203,40 @@ class RepositoryStorage:
 def repository_operation(
     root: Path, paths: ArchivePaths, *, create: bool = False
 ) -> Iterator[RepositoryStorage | None]:
-    relative = paths.storage_dir.relative_to(root)
-    with open_archive_directory(root, relative, create=create) as directory_fd:
+    relative = paths.repository_dir.relative_to(root)
+    with ExitStack() as stack:
+        # Serialize namespace checks and marker publication, not the import itself.
+        # Lock the existing root inode so no filename is reserved in the namespace.
+        root_fd = os.open(root, _DIRECTORY_FLAGS)
+        try:
+            fcntl.flock(root_fd, fcntl.LOCK_EX)
+            directory_fd = stack.enter_context(
+                open_archive_directory(root, relative, create=create)
+            )
+            lock_fd = (
+                _open_owned_lock(directory_fd, paths, create=create)
+                if directory_fd is not None
+                else None
+            )
+            if lock_fd is not None:
+                stack.callback(os.close, lock_fd)
+                _lock(lock_fd, paths)
+        finally:
+            os.close(root_fd)
         if directory_fd is None:
             yield None
             return
-        lock_fd = _open_owned_lock(directory_fd, paths, create=create)
         if lock_fd is None:
             yield None
             return
-        try:
-            _lock(lock_fd, paths)
-            if os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
-                if create:
-                    raise ValueError(f"Unrecognized archive storage: {paths.storage_dir}")
-                yield None
-                return
-            storage = RepositoryStorage(paths, directory_fd)
-            storage.validate()
-            yield storage
-        finally:
-            os.close(lock_fd)
+        if os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
+            if create:
+                raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
+            yield None
+            return
+        storage = RepositoryStorage(paths, directory_fd)
+        storage.validate()
+        yield storage
 
 
 def _lock(fd: int, paths: ArchivePaths) -> None:
@@ -231,11 +258,9 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             return None
         entries = os.listdir(directory_fd)
         if entries:
-            # A competing initializer may have just published its marker.
-            if paths.lock_file.name in entries:
-                return _open_owned_lock(directory_fd, paths, create=create)
             raise ValueError(
-                f"Refusing to initialize nonempty archive storage: {paths.storage_dir}"
+                f"Repository path conflict: {paths.repository_dir} is a nonempty "
+                "namespace or uninitialized directory"
             )
         temporary = f"../.cache22-lock-init-{uuid.uuid4().hex}"
         fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
@@ -243,18 +268,13 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             os.write(fd, LOCK_SIGNATURE)
             os.fsync(fd)
             _lock(fd, paths)
-            try:
-                os.link(
-                    temporary,
-                    paths.lock_file.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-            except FileExistsError:
-                os.close(fd)
-                fd = -1
-                return _open_owned_lock(directory_fd, paths, create=create)
+            os.link(
+                temporary,
+                paths.lock_file.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
             result = fd
             fd = -1
             return result
@@ -262,14 +282,19 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             if fd != -1:
                 os.close(fd)
             os.unlink(temporary, dir_fd=directory_fd)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    mode = os.fstat(fd).st_mode
+    if not stat.S_ISREG(mode):
         os.close(fd)
         if create:
+            if stat.S_ISDIR(mode):
+                raise ValueError(
+                    f"Repository path conflict: {paths.repository_dir} is a namespace directory"
+                )
             raise ValueError(f"Unsafe archive lock: {paths.lock_file}")
         return None
     if os.pread(fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
         os.close(fd)
         if create:
-            raise ValueError(f"Unrecognized archive storage: {paths.storage_dir}")
+            raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
         return None
     return fd

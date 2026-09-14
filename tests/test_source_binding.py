@@ -155,9 +155,9 @@ def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: st
     valid = archive_paths_for_repository(tmp_path, parse_repository_url("https://host/team/zvalid"))
     with repository_operation(tmp_path, valid, create=True):
         valid.temp_dir.mkdir()
-    before = sorted(p.name for p in paths.storage_dir.iterdir())
+    before = sorted(p.name for p in paths.repository_dir.iterdir())
     assert clean_all_import_state((tmp_path,)) == (valid.temp_dir,)
-    assert sorted(p.name for p in paths.storage_dir.iterdir()) == before
+    assert sorted(p.name for p in paths.repository_dir.iterdir()) == before
     assert paths.temp_dir.is_dir()
 
 
@@ -172,7 +172,7 @@ def test_import_does_not_claim_nonempty_unowned_storage(tmp_path: Path) -> None:
     paths.temp_dir.mkdir(parents=True)
     with pytest.raises(ValueError, match="nonempty"):
         import_repository(URL, tmp_path, "git")
-    assert list(paths.storage_dir.iterdir()) == [paths.temp_dir]
+    assert list(paths.repository_dir.iterdir()) == [paths.temp_dir]
 
 
 def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:

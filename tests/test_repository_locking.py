@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from cache22.archive_layout import archive_paths_for_repository
-from cache22.archive_storage import RepositoryBusyError, repository_operation
+from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
+from cache22.archive_storage import RepositoryBusyError, _open_owned_lock, repository_operation
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
@@ -39,6 +39,58 @@ def _hold_lock(root: Path, entered: Event, release: Event) -> None:
     with repository_operation(root, paths, create=True):
         entered.set()
         release.wait(15)
+
+
+def _pause_registration(root: Path, entered: Event, release: Event) -> None:
+    paths = archive_paths_for_repository(root, parse_repository_url(URL))
+
+    def initialize(directory_fd: int, paths: ArchivePaths, *, create: bool) -> int | None:
+        entered.set()
+        if not release.wait(15):
+            raise RuntimeError("Timed out waiting to register repository")
+        return _open_owned_lock(directory_fd, paths, create=create)
+
+    with (
+        patch("cache22.archive_storage._open_owned_lock", side_effect=initialize),
+        repository_operation(root, paths, create=True),
+    ):
+        pass
+
+
+def _import_conflicting_child(root: Path, entered: Event, finished: Event) -> None:
+    entered.set()
+    with (
+        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        pytest.raises(ValueError, match="Repository path conflict"),
+    ):
+        import_repository(URL + "/child", root, "git")
+    finished.set()
+
+
+def test_concurrent_child_import_cannot_enter_unregistered_parent(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    entered, release = context.Event(), context.Event()
+    attempted, finished = context.Event(), context.Event()
+    parent = context.Process(target=_pause_registration, args=(tmp_path, entered, release))
+    child = context.Process(target=_import_conflicting_child, args=(tmp_path, attempted, finished))
+    parent.start()
+    try:
+        assert entered.wait(10)
+        child.start()
+        assert attempted.wait(10)
+        assert not finished.wait(0.2)
+    finally:
+        release.set()
+        for process in (parent, child):
+            if process.pid is not None:
+                process.join(10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(5)
+    assert parent.exitcode == child.exitcode == 0
+    assert finished.is_set()
+    paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
+    assert list(paths.repository_dir.iterdir()) == [paths.lock_file]
 
 
 def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from cache22.archive_layout import archive_paths_for_repository
+from cache22.archive_storage import repository_operation
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
@@ -19,8 +20,6 @@ from cache22.repository_ref import parse_repository_url
         "git@..:team/project",
         "git@host\\other:team/project",
         "git@host\x00:team/project",
-        "https://host/team/.CACHE22.git",
-        "https://host/team/.cache22/project",
         "https://host/team/back\\slash",
     ],
 )
@@ -32,12 +31,15 @@ def test_unsafe_repository_urls_fail_before_filesystem_changes(tmp_path: Path, u
     assert list(tmp_path.iterdir()) == []
 
 
-def test_cleanup_preserves_reserved_looking_names_and_finds_nested_repositories(
+def test_cleanup_finds_subgroups_and_artifact_named_namespaces(
     tmp_path: Path,
 ) -> None:
     urls = [
         "https://host/team/.cache22-import",
-        "https://host/team/.cache22-import/child",
+        "https://host/other/.cache22-import/child",
+        "https://host/team/.cache22/project",
+        "https://host/team/.lock/project",
+        "https://host/team/source.json/project",
         "https://host/team/team.git/project",
     ]
     archives = [archive_paths_for_repository(tmp_path, parse_repository_url(url)) for url in urls]
@@ -56,6 +58,52 @@ def test_cleanup_preserves_reserved_looking_names_and_finds_nested_repositories(
         assert paths.lock_file.is_file()
 
 
+@pytest.mark.parametrize(
+    "child", ["child", "project.git/child", "source.json/child", ".lock/child"]
+)
+@pytest.mark.parametrize("child_first", [False, True])
+def test_import_rejects_repository_prefix_conflicts(
+    tmp_path: Path, child: str, child_first: bool
+) -> None:
+    parent_url = "https://host/Team/Project"
+    child_url = f"https://host/team/project/{child}"
+    first, second = (child_url, parent_url) if child_first else (parent_url, child_url)
+    paths = archive_paths_for_repository(tmp_path, parse_repository_url(first))
+    with repository_operation(tmp_path, paths, create=True):
+        paths.mirror_repository.mkdir()
+        (paths.mirror_repository / "HEAD").write_text("keep")
+        paths.clone_complete_marker.write_text("complete\n")
+    before = sorted(tmp_path.rglob("*"))
+    with (
+        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        pytest.raises(ValueError, match="Repository path conflict"),
+    ):
+        import_repository(second, tmp_path, "git", case_sensitive=True)
+    assert sorted(tmp_path.rglob("*")) == before
+    assert (paths.mirror_repository / "HEAD").read_text() == "keep"
+    assert clean_all_import_state((tmp_path,)) == ()
+    if not child_first:
+        with pytest.raises(ValueError, match="Repository path conflict"):
+            clean_repository_import_state(second, (tmp_path,))
+
+
+def test_cleanup_never_discovers_repositories_inside_complete_mirrors(tmp_path: Path) -> None:
+    paths = archive_paths_for_repository(
+        tmp_path, parse_repository_url("https://host/team/project")
+    )
+    with repository_operation(tmp_path, paths, create=True):
+        paths.mirror_repository.mkdir()
+        paths.clone_complete_marker.write_text("complete\n")
+    nested = paths.mirror_repository / "objects"
+    nested.mkdir()
+    (nested / ".lock").write_text("cache22-storage-v1\n")
+    stage = nested / ".cache22-import"
+    stage.mkdir()
+    (stage / "keep").write_text("keep")
+    assert clean_all_import_state((tmp_path,)) == ()
+    assert (stage / "keep").read_text() == "keep"
+
+
 @pytest.mark.parametrize("link_target", ["namespace", "storage", "mirror", "stage", "lock"])
 def test_targeted_operations_reject_symlinks_without_changing_external_data(
     tmp_path: Path, link_target: str
@@ -70,7 +118,7 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
     paths = archive_paths_for_repository(root, parse_repository_url(url))
     target = {
         "namespace": root / "host",
-        "storage": paths.storage_dir,
+        "storage": paths.repository_dir,
         "mirror": paths.mirror_repository,
         "stage": paths.temp_dir,
         "lock": paths.lock_file,

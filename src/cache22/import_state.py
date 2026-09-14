@@ -7,9 +7,14 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
-from .archive_storage import RepositoryStorage, open_archive_directory, repository_operation
+from .archive_storage import (
+    RepositoryStorage,
+    has_repository_boundary,
+    open_archive_directory,
+    repository_operation,
+)
 from .config import list_archive_dirs, normalize_archive_dir
-from .repository_ref import STORAGE_DIR_NAME, parse_repository_url, validate_storage_component
+from .repository_ref import parse_repository_url, validate_storage_component
 
 
 def clean_repository_import_state(
@@ -62,7 +67,7 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
                     reverse=True,
                 )
 
-            if STORAGE_DIR_NAME in children and len(relative.parts) >= 3:
+            if len(relative.parts) >= 3 and has_repository_boundary(directory_fd):
                 paths = archive_paths_for_directory(root / relative)
                 marker = paths.lock_file
                 try:
@@ -76,11 +81,12 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
                 ):
                     if storage is not None:
                         removed_paths.extend(_clean_repository_storage(storage))
+                # Repository artifacts are never namespace directories, including
+                # when the marker is malformed or cleanup leaves a complete mirror.
+                continue
 
             directories_to_visit.extend(
-                relative / name
-                for name in children
-                if name != STORAGE_DIR_NAME and _valid_component(name)
+                relative / name for name in children if _valid_component(name)
             )
 
     return removed_paths
