@@ -115,7 +115,13 @@ def _verify_mirror(mirror: Path, source_path: str) -> None:
     git = find_git_executable()
     validate_git_mirror_config(git, mirror, source_path)
     env = git_repository_environment()
-    env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
+    env.update(
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_COUNT="0",
+        GIT_NO_REPLACE_OBJECTS="1",
+        GIT_NO_LAZY_FETCH="1",
+    )
 
     def run(*args: str) -> str:
         result = subprocess.run(
