@@ -1,6 +1,8 @@
 # cache22
 
-Cache22 currently supports Linux and macOS on local POSIX filesystems.
+This is a playground for experimenting with curating and archiving source code on local filesystems.
+It's also meant as an exercise for trying out AI-assisted development workflows.
+Cache22 currently works on local POSIX filesystems (Linux and macOS).
 
 ## Installation
 
