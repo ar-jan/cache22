@@ -97,9 +97,11 @@ def test_rejects_relative_archive_dirs(tmp_path: Path, monkeypatch: pytest.Monke
 def test_requires_search_permission(tmp_path: Path) -> None:
     archive_dir = tmp_path
 
-    with patch("cache22.config.os.access", return_value=False) as access:
-        with pytest.raises(ValueError, match="not writable and searchable"):
-            normalize_archive_dir(archive_dir)
+    with (
+        patch("cache22.config.os.access", return_value=False) as access,
+        pytest.raises(ValueError, match="not writable and searchable"),
+    ):
+        normalize_archive_dir(archive_dir)
 
     access.assert_called_once_with(archive_dir, os.W_OK | os.X_OK)
 
@@ -166,9 +168,11 @@ def test_save_reports_unwritable_config_path(
     archive_dir.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    with patch("pathlib.Path.open", side_effect=OSError("disk full")):
-        with pytest.raises(ConfigError, match="Config file could not be written"):
-            save_config(Config(archive_dirs=[archive_dir]))
+    with (
+        patch("pathlib.Path.open", side_effect=OSError("disk full")),
+        pytest.raises(ConfigError, match="Config file could not be written"),
+    ):
+        save_config(Config(archive_dirs=[archive_dir]))
 
 
 def test_list_reports_invalid_config_without_traceback(

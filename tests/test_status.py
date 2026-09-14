@@ -19,9 +19,11 @@ def test_status_fossil_reports_version() -> None:
         stderr="",
     )
 
-    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
-        with patch("cache22.system_tools.subprocess.run", return_value=completed) as run:
-            result = runner.invoke(app, ["status", "fossil"])
+    with (
+        patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)),
+        patch("cache22.system_tools.subprocess.run", return_value=completed) as run,
+    ):
+        result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 0
     assert f"path: {fossil_path.resolve()}" in result.output
@@ -54,9 +56,11 @@ def test_status_fossil_reports_version_failure_without_traceback() -> None:
         cmd=[str(fossil_path), "version"],
     )
 
-    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
-        with patch("cache22.system_tools.subprocess.run", side_effect=error):
-            result = runner.invoke(app, ["status", "fossil"])
+    with (
+        patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)),
+        patch("cache22.system_tools.subprocess.run", side_effect=error),
+    ):
+        result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 1
     assert "fossil version command failed with exit code 2" in result.output
@@ -67,9 +71,11 @@ def test_status_fossil_reports_spawn_failure_without_traceback() -> None:
     runner = CliRunner()
     fossil_path = Path("/tmp/fossil")
 
-    with patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)):
-        with patch("cache22.system_tools.subprocess.run", side_effect=OSError("spawn failed")):
-            result = runner.invoke(app, ["status", "fossil"])
+    with (
+        patch("cache22.system_tools.shutil.which", return_value=str(fossil_path)),
+        patch("cache22.system_tools.subprocess.run", side_effect=OSError("spawn failed")),
+    ):
+        result = runner.invoke(app, ["status", "fossil"])
 
     assert result.exit_code == 1
     assert "fossil version command could not be run: spawn failed" in result.output

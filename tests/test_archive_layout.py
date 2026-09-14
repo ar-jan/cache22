@@ -42,11 +42,13 @@ def test_archive_paths_for_repository_include_alternative_git_host(
     tmp_path: Path,
 ) -> None:
     repository = parse_repository_url("https://git.example.org/Team/Subgroup/Cache22")
+    lowercase = parse_repository_url("git@git.example.org:team/subgroup/cache22.git")
 
     paths = archive_paths_for_repository(tmp_path, repository)
 
-    assert paths.repository_dir == tmp_path / "git.example.org" / "Team" / "Subgroup" / "Cache22"
-    assert paths.mirror_repository == paths.repository_dir / "Cache22.git"
-    assert paths.fossil_repository == paths.repository_dir / "Cache22.fossil"
+    assert paths == archive_paths_for_repository(tmp_path, lowercase)
+    assert paths.repository_dir == tmp_path / "git.example.org" / "team" / "subgroup" / "cache22"
+    assert paths.mirror_repository == paths.repository_dir / "cache22.git"
+    assert paths.fossil_repository == paths.repository_dir / "cache22.fossil"
     assert paths.git_marks == paths.repository_dir / "git.marks"
     assert paths.fossil_marks == paths.repository_dir / "fossil.marks"

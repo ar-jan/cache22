@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
-
-_CASEFOLDED_REPOSITORY_HOSTS = frozenset({"github.com", "gitlab.com"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +9,7 @@ class RepositoryRef:
     host: str
     namespace: tuple[str, ...]
     name: str
+    display_path: str = field(compare=False)
 
 
 def parse_repository_url(url: str) -> RepositoryRef:
@@ -66,11 +65,12 @@ def _repository_from_path(host: str, raw_path: str) -> RepositoryRef:
             f"{repository_path}"
         )
 
-    normalized_parts = _normalize_repository_parts(host, parts)
+    normalized_parts = _normalize_repository_parts(parts)
     return RepositoryRef(
         host=host,
         namespace=tuple(normalized_parts[:-1]),
         name=normalized_parts[-1],
+        display_path="/".join((host, *parts)),
     )
 
 
@@ -88,8 +88,5 @@ def _path_parts(
     return parts
 
 
-def _normalize_repository_parts(host: str, parts: list[str]) -> list[str]:
-    if host in _CASEFOLDED_REPOSITORY_HOSTS:
-        return [part.casefold() for part in parts]
-
-    return parts
+def _normalize_repository_parts(parts: list[str]) -> list[str]:
+    return [part.casefold() for part in parts]
