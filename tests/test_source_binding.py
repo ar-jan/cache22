@@ -74,11 +74,15 @@ def test_ipv6_clone_url_and_archive_reuse(
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=case_sensitive)
         assert run.call_args.args[0][-2] == expected
-    with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
+    with (
+        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.git_mirror._fetch_git_mirror") as fetch,
+    ):
         assert (
             import_repository(url, tmp_path, "git", case_sensitive=case_sensitive).archive_path
             == first.archive_path
         )
+        assert fetch.call_args.kwargs["url"] == expected
 
 
 @pytest.mark.parametrize("first_override", [False, True])
@@ -99,13 +103,20 @@ def test_source_conflicts_before_archive_reuse(
     if archive_type == "fossil":
         paths.fossil_repository.write_text("completed fossil")
     before = paths.source_file.read_bytes()
-    with patch("cache22.import_service.find_git_executable", side_effect=AssertionError):
-        with pytest.raises(ValueError, match="stored .*requested"):
-            import_repository(URL, tmp_path, archive_type, case_sensitive=not first_override)
-        path = "Team/Repo" if first_override else "team/repo"
+    with (
+        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        pytest.raises(ValueError, match="stored .*requested"),
+    ):
+        import_repository(URL, tmp_path, archive_type, case_sensitive=not first_override)
+    path = "Team/Repo" if first_override else "team/repo"
+    with (
+        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.git_mirror._fetch_git_mirror") as fetch,
+    ):
         reused = import_repository(
             f"User@host:/{path}", tmp_path, archive_type, case_sensitive=True
         )
+    assert fetch.call_count == int(archive_type == "git")
     assert reused.archive_path == (
         paths.fossil_repository if archive_type == "fossil" else result.archive_path
     )
@@ -192,7 +203,7 @@ def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: st
 def test_cli_passes_case_sensitive_option(tmp_path: Path) -> None:
     with patch("cache22.cli.import_repository", return_value=ImportResult(tmp_path)) as call:
         assert CliRunner().invoke(app, ["import", "repo", URL, "--case-sensitive"]).exit_code == 0
-    call.assert_called_once_with(URL, case_sensitive=True)
+    call.assert_called_once_with(URL, case_sensitive=True, adopt=False)
 
 
 def test_import_does_not_claim_nonempty_unowned_storage(tmp_path: Path) -> None:
@@ -210,7 +221,8 @@ def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:
         patch("cache22.git_mirror.subprocess.run", side_effect=clone),
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=True)
-    assert (
-        import_repository(url, tmp_path, "git", case_sensitive=True).archive_path
-        == first.archive_path
-    )
+    with patch("cache22.git_mirror._fetch_git_mirror"):
+        assert (
+            import_repository(url, tmp_path, "git", case_sensitive=True).archive_path
+            == first.archive_path
+        )

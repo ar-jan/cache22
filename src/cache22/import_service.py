@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from .adoption import prepare_git_import
 from .archive_layout import ArchivePaths, archive_paths_for_repository
 from .archive_storage import RepositoryStorage, repository_operation
 from .config import (
@@ -37,18 +38,43 @@ def import_repository(
     archive_type: ArchiveType | None = None,
     *,
     case_sensitive: bool = False,
+    adopt: bool = False,
 ) -> ImportResult:
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
     resolved_archive_type = _resolve_archive_type(archive_type)
+    if adopt and resolved_archive_type != "git":
+        raise ValueError("--adopt is only supported in Git archive mode")
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
-    with repository_operation(resolved_archive_dir, paths, create=True) as storage:
+    adopted = False
+
+    def prepare(storage: RepositoryStorage) -> None:
+        nonlocal adopted
+        adopted = prepare_git_import(
+            storage,
+            archive_dir=resolved_archive_dir,
+            source_path=repository.source_path,
+            adopt=adopt,
+        )
+
+    with repository_operation(
+        resolved_archive_dir,
+        paths,
+        create=True,
+        prepare=prepare if resolved_archive_type == "git" else None,
+    ) as storage:
         assert storage is not None
         storage.bind_source(repository.source_path)
         try:
-            return _import_locked_repository(
+            result = _import_locked_repository(
                 repository.clone_url, paths, resolved_archive_type, storage
             )
+            if adopted:
+                return ImportResult(
+                    result.archive_path,
+                    (f"INFO: adopted Git mirror: {paths.mirror_repository}", *result.info_messages),
+                )
+            return result
         finally:
             storage.release_unused_source()
 
@@ -56,12 +82,11 @@ def import_repository(
 def _import_locked_repository(
     url: str, paths: ArchivePaths, resolved_archive_type: ArchiveType, storage: RepositoryStorage
 ) -> ImportResult:
-    requested_archive = _existing_requested_archive_path(paths, resolved_archive_type)
     info_messages: list[str] = []
 
-    if requested_archive is not None:
-        info_messages.append(f"INFO: archive already exists: {requested_archive}")
-        return ImportResult(requested_archive, tuple(info_messages))
+    if resolved_archive_type == "fossil" and paths.fossil_repository.exists():
+        info_messages.append(f"INFO: archive already exists: {paths.fossil_repository}")
+        return ImportResult(paths.fossil_repository, tuple(info_messages))
 
     git_executable = find_git_executable()
 
@@ -70,6 +95,7 @@ def _import_locked_repository(
             git_executable=git_executable,
             url=url,
             storage=storage,
+            update=resolved_archive_type == "git",
         )
         if existing_mirror_message is not None:
             info_messages.append(existing_mirror_message)
@@ -101,18 +127,6 @@ def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
         return archive_type
 
     return default_archive_type()
-
-
-def _existing_requested_archive_path(paths: ArchivePaths, archive_type: ArchiveType) -> Path | None:
-    if archive_type == "git":
-        if paths.clone_complete_marker.exists() and paths.mirror_repository.exists():
-            return paths.mirror_repository
-        return None
-
-    if paths.fossil_repository.exists():
-        return paths.fossil_repository
-
-    return None
 
 
 def _run_fossil_import_pipeline(

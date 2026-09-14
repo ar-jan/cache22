@@ -9,7 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
-from cache22.archive_storage import RepositoryBusyError, _open_owned_lock, repository_operation
+from cache22.archive_storage import (
+    RepositoryBusyError,
+    RepositoryStorage,
+    _open_owned_lock,
+    repository_operation,
+)
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
@@ -39,6 +44,18 @@ def _hold_lock(root: Path, entered: Event, release: Event) -> None:
     with repository_operation(root, paths, create=True):
         entered.set()
         release.wait(15)
+
+
+def _hold_unowned_reservation(root: Path, entered: Event, release: Event) -> None:
+    paths = archive_paths_for_repository(root, parse_repository_url(URL))
+
+    def prepare(storage: RepositoryStorage) -> None:
+        entered.set()
+        release.wait(15)
+        raise RuntimeError("Unverified fixture must not be initialized")
+
+    with repository_operation(root, paths, create=True, prepare=prepare):
+        pass
 
 
 def _pause_registration(root: Path, entered: Event, release: Event) -> None:
@@ -122,7 +139,8 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     assert process.exitcode == 0
     assert paths.clone_complete_marker.is_file()
     lock_inode = paths.lock_file.stat().st_ino
-    assert import_repository(URL, tmp_path, "git").archive_path == paths.mirror_repository
+    with patch("cache22.git_mirror._fetch_git_mirror"):
+        assert import_repository(URL, tmp_path, "git").archive_path == paths.mirror_repository
     assert clean_repository_import_state(URL, (tmp_path,)) == ()
     assert paths.lock_file.stat().st_ino == lock_inode
     assert (paths.mirror_repository / "HEAD").read_text() == "winner"
@@ -147,3 +165,39 @@ def test_process_exit_releases_lock_without_deleting_lock_file(tmp_path: Path) -
     assert not process.is_alive()
     assert clean_repository_import_state(URL, (tmp_path,)) == ()
     assert paths.lock_file.stat().st_ino == inode
+
+
+def test_active_descendant_prevents_ancestor_reservation(tmp_path: Path) -> None:
+    parent = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
+    child = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "/child"))
+    with repository_operation(tmp_path, child, create=True):
+        with pytest.raises(RepositoryBusyError):
+            import_repository(URL, tmp_path, "git", adopt=True)
+        assert not parent.lock_file.exists()
+
+
+def test_process_exit_releases_unowned_reservation_without_initializing(tmp_path: Path) -> None:
+    paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
+    paths.mirror_repository.mkdir(parents=True)
+    sentinel = paths.mirror_repository / "keep"
+    sentinel.write_text("unverified data")
+    context = multiprocessing.get_context("spawn")
+    entered, release = context.Event(), context.Event()
+    process = context.Process(target=_hold_unowned_reservation, args=(tmp_path, entered, release))
+    process.start()
+    try:
+        assert entered.wait(10)
+        with pytest.raises(RepositoryBusyError):
+            clean_repository_import_state(URL, (tmp_path,))
+        sibling = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "-sibling"))
+        with repository_operation(tmp_path, sibling, create=True):
+            pass
+    finally:
+        process.terminate()
+        process.join(5)
+    assert not process.is_alive()
+    assert clean_repository_import_state(URL, (tmp_path,)) == ()
+    assert not paths.lock_file.exists()
+    assert not paths.source_file.exists()
+    assert not paths.clone_complete_marker.exists()
+    assert sentinel.read_text() == "unverified data"

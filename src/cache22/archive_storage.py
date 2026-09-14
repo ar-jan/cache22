@@ -7,7 +7,7 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,16 +35,17 @@ def has_repository_boundary(directory_fd: int) -> bool:
 
 @contextmanager
 def open_archive_directory(
-    root: Path, relative: Path, *, create: bool = False
+    root: Path, relative: Path, *, create: bool = False, exclusive: bool = False
 ) -> Iterator[int | None]:
-    """Open directories beneath a resolved archive root without following symlinks."""
+    """Reserve ancestors shared and the target shared/exclusive, without following symlinks."""
     if relative.is_absolute():
         raise ValueError(f"Archive path must be relative: {relative}")
     for part in relative.parts:
         validate_storage_component(part)
 
-    directory_fd = os.open(root, _DIRECTORY_FLAGS)
-    try:
+    with ExitStack() as stack:
+        directory_fd = os.open(root, _DIRECTORY_FLAGS)
+        stack.callback(os.close, directory_fd)
         for depth, part in enumerate(relative.parts):
             if depth >= 3 and has_repository_boundary(directory_fd):
                 ancestor = root.joinpath(*relative.parts[:depth])
@@ -60,11 +61,25 @@ def open_archive_directory(
                 with suppress(FileExistsError):
                     os.mkdir(part, dir_fd=directory_fd)
                 child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory_fd)
-            os.close(directory_fd)
+            stack.callback(os.close, child_fd)
+            child_path = root.joinpath(*relative.parts[: depth + 1])
+            final = depth == len(relative.parts) - 1
+            if not final and depth >= 2 and has_repository_boundary(child_fd):
+                raise ValueError(
+                    f"Repository path conflict: {root / relative} is inside repository {child_path}"
+                )
+            _lock_directory(child_fd, child_path, exclusive=exclusive and final)
             directory_fd = child_fd
         yield directory_fd
-    finally:
-        os.close(directory_fd)
+
+
+def _lock_directory(fd: int, path: Path, *, exclusive: bool) -> None:
+    try:
+        fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EAGAIN, errno.EACCES}:
+            raise RepositoryBusyError(f"Repository is busy: {path}") from exc
+        raise
 
 
 @dataclass(frozen=True)
@@ -126,7 +141,7 @@ class RepositoryStorage:
             )
         )
 
-    def bind_source(self, source_path: str) -> None:
+    def read_source(self) -> str | None:
         name = self.paths.source_file.name
         stored = None
         if self.entry(name) is not None:
@@ -150,17 +165,27 @@ class RepositoryStorage:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}") from exc
             if valid.source_path != stored:
                 raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
+        return stored
+
+    def check_source(self, source_path: str, *, allow_unbound: bool = False) -> str | None:
+        stored = self.read_source()
         if self.has_import_state():
-            if stored is None:
+            if stored is None and not allow_unbound:
                 raise ValueError(f"Archive data has no source binding: {self.paths.repository_dir}")
-            if stored != source_path:
+            if stored is not None and stored != source_path:
                 raise ValueError(
                     f"Repository source conflict: stored {stored}; requested {source_path}"
                 )
+        return stored
+
+    def bind_source(self, source_path: str, *, allow_unbound: bool = False) -> None:
+        stored = self.check_source(source_path, allow_unbound=allow_unbound)
         if stored != source_path:
             if not self.has_import_state():
                 self.release_unused_source()
-            temporary = f".source-{uuid.uuid4().hex}"
+            # Keep incomplete publications outside the terminal container, so an
+            # interrupted initialization can be verified and retried.
+            temporary = f"../.cache22-source-init-{uuid.uuid4().hex}"
             fd = os.open(
                 temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self.directory_fd
             )
@@ -171,8 +196,12 @@ class RepositoryStorage:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(
-                    temporary, name, src_dir_fd=self.directory_fd, dst_dir_fd=self.directory_fd
+                    temporary,
+                    self.paths.source_file.name,
+                    src_dir_fd=self.directory_fd,
+                    dst_dir_fd=self.directory_fd,
                 )
+                os.fsync(self.directory_fd)
             finally:
                 with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=self.directory_fd)
@@ -188,8 +217,9 @@ class RepositoryStorage:
 
     def write_clone_marker(self) -> None:
         name = self.paths.clone_complete_marker.name
+        temporary = f"../.cache22-clone-init-{uuid.uuid4().hex}"
         fd = os.open(
-            name,
+            temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
             dir_fd=self.directory_fd,
@@ -197,50 +227,83 @@ class RepositoryStorage:
         try:
             with os.fdopen(fd, "w") as handle:
                 handle.write("complete\n")
-        except OSError:
-            with suppress(OSError):
-                os.unlink(name, dir_fd=self.directory_fd)
-            raise
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=self.directory_fd,
+                dst_dir_fd=self.directory_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(self.directory_fd)
+        finally:
+            os.unlink(temporary, dir_fd=self.directory_fd)
 
 
 @contextmanager
 def repository_operation(
-    root: Path, paths: ArchivePaths, *, create: bool = False
+    root: Path,
+    paths: ArchivePaths,
+    *,
+    create: bool = False,
+    prepare: Callable[[RepositoryStorage], None] | None = None,
 ) -> Iterator[RepositoryStorage | None]:
+    if prepare is not None and not create:
+        raise ValueError("Storage preparation requires create=True")
     relative = paths.repository_dir.relative_to(root)
     with ExitStack() as stack:
-        # Serialize namespace checks and marker publication, not the import itself.
-        # Lock the existing root inode so no filename is reserved in the namespace.
-        root_fd = os.open(root, _DIRECTORY_FLAGS)
-        try:
-            fcntl.flock(root_fd, fcntl.LOCK_EX)
+        # Directory reservations survive this short root-lock section. They
+        # exclude ancestors/descendants while allowing unrelated work to proceed.
+        with _root_lock(root):
             directory_fd = stack.enter_context(
-                open_archive_directory(root, relative, create=create)
+                open_archive_directory(root, relative, create=create, exclusive=True)
             )
-            lock_fd = (
-                _open_owned_lock(directory_fd, paths, create=create)
-                if directory_fd is not None
-                else None
-            )
+            lock_fd = None
+            deferred_publication = False
+            if directory_fd is not None:
+                storage = RepositoryStorage(paths, directory_fd)
+                deferred_publication = (
+                    prepare is not None
+                    and storage.entry(paths.lock_file.name) is None
+                    and bool(os.listdir(directory_fd))
+                )
+                if not deferred_publication:
+                    lock_fd = _open_owned_lock(directory_fd, paths, create=create)
             if lock_fd is not None:
                 stack.callback(os.close, lock_fd)
                 _lock(lock_fd, paths)
-        finally:
-            os.close(root_fd)
         if directory_fd is None:
             yield None
             return
-        if lock_fd is None:
+        if lock_fd is None and not deferred_publication:
             yield None
             return
-        if os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
+        if lock_fd is not None and os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
             if create:
                 raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
             yield None
             return
         storage = RepositoryStorage(paths, directory_fd)
+        if prepare is not None:
+            # Includes full fsck for adoption; never hold the root lock here.
+            prepare(storage)
+        if deferred_publication:
+            with _root_lock(root):
+                lock_fd = _publish_lock(directory_fd, paths)
+                stack.callback(os.close, lock_fd)
         storage.validate()
         yield storage
+
+
+@contextmanager
+def _root_lock(root: Path) -> Iterator[None]:
+    fd = os.open(root, _DIRECTORY_FLAGS)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _lock(fd: int, paths: ArchivePaths) -> None:
@@ -266,26 +329,7 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
                 f"Repository path conflict: {paths.repository_dir} is a nonempty "
                 "namespace or uninitialized directory"
             )
-        temporary = f"../.cache22-lock-init-{uuid.uuid4().hex}"
-        fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
-        try:
-            os.write(fd, LOCK_SIGNATURE)
-            os.fsync(fd)
-            _lock(fd, paths)
-            os.link(
-                temporary,
-                paths.lock_file.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            result = fd
-            fd = -1
-            return result
-        finally:
-            if fd != -1:
-                os.close(fd)
-            os.unlink(temporary, dir_fd=directory_fd)
+        return _publish_lock(directory_fd, paths)
     mode = os.fstat(fd).st_mode
     if not stat.S_ISREG(mode):
         os.close(fd)
@@ -302,3 +346,27 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
         return None
     return fd
+
+
+def _publish_lock(directory_fd: int, paths: ArchivePaths) -> int:
+    temporary = f"../.cache22-lock-init-{uuid.uuid4().hex}"
+    fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory_fd)
+    try:
+        os.write(fd, LOCK_SIGNATURE)
+        os.fsync(fd)
+        _lock(fd, paths)
+        os.link(
+            temporary,
+            paths.lock_file.name,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(directory_fd)
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd != -1:
+            os.close(fd)
+        os.unlink(temporary, dir_fd=directory_fd)
