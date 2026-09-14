@@ -35,8 +35,10 @@ cache22 import clean all
 ## Development
 
 ```sh
-# Create .venv and install dependencies
+# Create .venv and install Python dependencies
 uv sync --group dev
+# Upgrade Python dependencies
+uv lock --upgrade
 # Install npm dependencies for utils/editor
 npm install
 # Install git hooks for this repo
