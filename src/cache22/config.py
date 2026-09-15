@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
 import tomllib
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -60,7 +62,25 @@ def load_config() -> Config:
     )
 
 
-def save_config(config: Config) -> None:
+@contextmanager
+def _config_transaction() -> Iterator[Config]:
+    """Serialize command read-modify-write operations on the stable directory inode."""
+    directory = config_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            config = load_config()
+            yield config
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ConfigError(f"Config update failed: {directory}: {exc}") from exc
+
+
+def _save_config(config: Config) -> None:
+    """Publish settings while the caller holds the configuration transaction lock."""
     path = config_file()
 
     payload = {
@@ -101,13 +121,11 @@ def normalize_archive_dir(raw_path: str | Path) -> Path:
 
 def add_archive_dir(raw_path: str | Path) -> tuple[Path, bool]:
     archive_dir = normalize_archive_dir(raw_path)
-    config = load_config()
-
-    if archive_dir in config.archive_dirs:
-        return archive_dir, False
-
-    config.archive_dirs.append(archive_dir)
-    save_config(config)
+    with _config_transaction() as config:
+        if archive_dir in config.archive_dirs:
+            return archive_dir, False
+        config.archive_dirs.append(archive_dir)
+        _save_config(config)
     return archive_dir, True
 
 
@@ -121,9 +139,9 @@ def default_archive_type() -> ArchiveType:
 
 def set_archive_type(raw_archive_type: str) -> ArchiveType:
     archive_type = normalize_archive_type(raw_archive_type)
-    config = load_config()
-    config.archive_type = archive_type
-    save_config(config)
+    with _config_transaction() as config:
+        config.archive_type = archive_type
+        _save_config(config)
     return archive_type
 
 

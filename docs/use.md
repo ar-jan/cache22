@@ -69,6 +69,9 @@ mirror's local configuration without following include directives. Unsupported
 settings and worktree configuration are rejected without rewriting them.
 Use user-level Git configuration for authentication and transport customization;
 normal SSH and credential settings from that trusted configuration remain available.
+Local adoption integrity checks disable system/global Git configuration and
+counted environment overrides, replacement objects, and lazy fetching. Network
+operations retain trusted transport settings.
 
 Allowed local settings are:
 
@@ -94,6 +97,10 @@ Failed imports release that binding once cleanup leaves no archive or partial st
 
 By default, imports are treated as Git repositories and stored as Git mirror clones.
 If you switch the archive type to `fossil`, cache22 keeps the Git mirror and also creates a Fossil archive alongside it.
+This experimental path is on hold because it does not guarantee reconstruction
+with original Git object IDs. It reuses an existing mirror without fetching and
+returns an existing Fossil sidecar without refreshing it. A conversion retry
+replaces staging left by the previous attempt.
 
 ```sh
 # Optional: switch the default archival format from git to fossil
@@ -124,7 +131,8 @@ in either order, including simultaneous imports. Subgroup namespaces and sibling
 repositories remain supported.
 Previous layouts are unsupported and are not migrated.
 
-Imports and cleanup fail immediately with a repository-busy error when another Cache22 command holds its lock.
+Imports and cleanup report a repository-busy error on repository or namespace
+reservation contention. Acquiring the brief archive-root lock can wait.
 Verification reserves the candidate directory and its namespace ancestors using
 inode locks. It creates no reservation files and does not hold the archive-wide
 root lock during the integrity check. Sibling imports and targeted cleanup can
@@ -132,10 +140,30 @@ continue while verification runs; conflicting reservations fail immediately.
 Reservations release on process exit, including interrupted adoption before any
 Cache22 metadata has been published.
 Cleanup keeps completed archives and lock files.
+It only cleans recognized Cache22 storage; unowned mirrors are left untouched.
+A completion marker must contain exactly `complete\n` for imports to reuse the
+archive. A malformed marker causes an import error without changing the mirror.
+Cleanup preserves a mirror beside such a marker, but can remove an orphan marker
+when no mirror exists.
 The retained lock keeps the path reserved as a repository even after its archive data is removed.
 `clean all` visits subgroup namespaces, stops traversal at repository boundaries,
 skips directory symlinks, and stops on a busy repository without rolling back earlier cleanup.
 Targeted operations reject symlinked storage paths.
 Missing archive roots are errors and must be restored before importing or cleaning.
 
-Configuration updates use atomic replacement so a failed write preserves the previous configuration.
+Direct CLI imports use the first configured archive root; both cleanup commands
+search all configured roots. Explicit root/type overrides are available through
+the Python service, not import CLI options.
+
+Repository inputs reject ASCII control characters and DEL before normalization,
+and reject literal `?` and `#` in HTTPS, SSH, and scp-style forms. Surrounding
+ordinary spaces are trimmed.
+
+Configuration writers lock the configuration-directory inode across loading,
+changing, and atomically replacing settings, so concurrent commands preserve
+each other's changes. Readers see complete files without taking the lock.
+A failed write preserves the previous configuration; locks release on failure
+or process exit.
+
+Exit codes are 0 for success, 1 for operational or configuration errors, and 2
+for CLI usage errors.

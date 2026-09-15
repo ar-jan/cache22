@@ -35,6 +35,7 @@ def prepare_git_import(
     owned = storage.entry(paths.lock_file.name) is not None
     try:
         storage.validate()
+        storage.validate_clone_marker()
     except ValueError as exc:
         if not owned:
             raise ValueError(f"Repository path conflict: {paths.repository_dir}: {exc}") from exc
@@ -102,12 +103,6 @@ def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
             f"Cannot adopt {paths.repository_dir}: unexpected entries: "
             f"{', '.join(sorted(unexpected))}"
         )
-    if (
-        storage.entry(paths.clone_complete_marker.name) is not None
-        and paths.clone_complete_marker.read_bytes() != b"complete\n"
-    ):
-        raise ValueError(f"Malformed clone completion marker: {paths.clone_complete_marker}")
-
     validate_git_mirror_layout(paths.mirror_repository)
 
 

@@ -64,6 +64,7 @@ def import_repository(
         prepare=prepare if resolved_archive_type == "git" else None,
     ) as storage:
         assert storage is not None
+        storage.validate_clone_marker()
         storage.bind_source(repository.source_path)
         try:
             result = _import_locked_repository(

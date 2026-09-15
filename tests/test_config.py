@@ -3,23 +3,26 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
+from cache22 import config as config_module
 from cache22.cli import app
 from cache22.config import (
     Config,
     ConfigError,
+    _save_config,
     add_archive_dir,
     default_archive_type,
     list_archive_dirs,
     load_config,
     normalize_archive_dir,
-    save_config,
     set_archive_type,
 )
 
@@ -175,7 +178,7 @@ def test_save_reports_unwritable_config_path(
         patch("cache22.config.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")),
         pytest.raises(ConfigError, match="Config file could not be written"),
     ):
-        save_config(Config(archive_dirs=[archive_dir]))
+        _save_config(Config(archive_dirs=[archive_dir]))
 
 
 @pytest.mark.parametrize("failure", ["write", "fsync", "replace"])
@@ -184,7 +187,7 @@ def test_failed_save_preserves_previous_config(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     original = Config([tmp_path / "archive"], "fossil")
-    save_config(original)
+    _save_config(original)
     path = tmp_path / "cache22" / "config.toml"
     previous_bytes = path.read_bytes()
     real_temporary_file = tempfile.NamedTemporaryFile
@@ -206,7 +209,7 @@ def test_failed_save_preserves_previous_config(
         patch(target, side_effect=effect),
         pytest.raises(ConfigError, match="Config file could not be written"),
     ):
-        save_config(Config(original.archive_dirs, "git"))
+        _save_config(Config(original.archive_dirs, "git"))
 
     assert path.read_bytes() == previous_bytes
     assert load_config() == original
@@ -237,7 +240,7 @@ def test_add_reports_write_failure_without_traceback(
     archive_dir.mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    with patch("cache22.config.save_config", side_effect=OSError("disk full")):
+    with patch("cache22.config._save_config", side_effect=OSError("disk full")):
         result = runner.invoke(app, ["config", "archive", "add", str(archive_dir)])
 
     assert result.exit_code == 1
@@ -289,3 +292,67 @@ def test_list_reports_unreadable_config_without_traceback(
     assert result.exit_code == 1
     assert "Config file could not be read" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("second_change", ["archive", "archive_type"])
+def test_concurrent_config_commands_preserve_both_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_change: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    publishing, contending, release = Event(), Event(), Event()
+    save = config_module._save_config
+    flock = config_module.fcntl.flock
+
+    def paused_save(config: Config) -> None:
+        if not publishing.is_set():
+            publishing.set()
+            assert release.wait(5)
+        save(config)
+
+    def observed_lock(fd: int, operation: int) -> None:
+        if publishing.is_set():
+            contending.set()
+        flock(fd, operation)
+
+    with (
+        patch("cache22.config._save_config", side_effect=paused_save),
+        patch("cache22.config.fcntl.flock", side_effect=observed_lock),
+        ThreadPoolExecutor(max_workers=2) as pool,
+    ):
+        first_result = pool.submit(add_archive_dir, first)
+        try:
+            assert publishing.wait(5)
+            second_result = (
+                pool.submit(add_archive_dir, second)
+                if second_change == "archive"
+                else pool.submit(set_archive_type, "fossil")
+            )
+            assert contending.wait(5)
+        finally:
+            release.set()
+        assert first_result.result(timeout=5) == (first, True)
+        second_result.result(timeout=5)
+
+    config = load_config()
+    assert config.archive_dirs == ([first, second] if second_change == "archive" else [first])
+    assert config.archive_type == ("git" if second_change == "archive" else "fossil")
+
+
+def test_failed_config_transaction_releases_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    with (
+        patch("cache22.config._save_config", side_effect=OSError("disk full")),
+        pytest.raises(ConfigError, match="disk full"),
+    ):
+        add_archive_dir(tmp_path)
+    fd = os.open(tmp_path / "cache22", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        config_module.fcntl.flock(fd, config_module.fcntl.LOCK_EX | config_module.fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+    assert add_archive_dir(tmp_path) == (tmp_path, True)
