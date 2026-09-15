@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
@@ -28,7 +30,10 @@ def test_clean_repository_import_state_removes_fossil_stage_and_incomplete_clone
     assert not paths.mirror_repository.exists()
 
 
-def test_clean_repository_import_state_removes_stray_clone_marker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contents", ["complete\n", "unfinished\n"])
+def test_clean_repository_import_state_removes_stray_clone_marker(
+    tmp_path: Path, contents: str
+) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     url = "https://gitlab.com/group/subgroup/cache22.git"
@@ -36,7 +41,7 @@ def test_clean_repository_import_state_removes_stray_clone_marker(tmp_path: Path
     paths = archive_paths_for_repository(archive_dir, repository)
     paths.repository_dir.mkdir(parents=True)
     paths.lock_file.write_text("cache22-storage-v1\n")
-    paths.clone_complete_marker.write_text("complete\n")
+    paths.clone_complete_marker.write_text(contents)
 
     removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
 

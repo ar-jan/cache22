@@ -21,12 +21,29 @@ from cache22.repository_ref import parse_repository_url
         "git@host\\other:team/project",
         "git@host\x00:team/project",
         "https://host/team/back\\slash",
+        "https://host/te\nam/project",
+        "ssh://git@host/te\tam/project",
+        "git@host:team/project\r",
+        "https://host/team/project\x7f",
     ],
 )
 def test_unsafe_repository_urls_fail_before_filesystem_changes(tmp_path: Path, url: str) -> None:
     with pytest.raises(ValueError, match="Unsafe|reserved"):
         import_repository(url, tmp_path, "git")
     with pytest.raises(ValueError, match="Unsafe|reserved"):
+        clean_repository_import_state(url, (tmp_path,))
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("prefix", ["https://host/", "ssh://git@host/", "git@host:"])
+@pytest.mark.parametrize("suffix", ["?", "#", "?query=value", "#fragment"])
+def test_query_and_fragment_delimiters_fail_before_storage_changes(
+    tmp_path: Path, prefix: str, suffix: str
+) -> None:
+    url = f"{prefix}team/project{suffix}"
+    with pytest.raises(ValueError, match="query or fragment"):
+        import_repository(url, tmp_path, "git")
+    with pytest.raises(ValueError, match="query or fragment"):
         clean_repository_import_state(url, (tmp_path,))
     assert list(tmp_path.iterdir()) == []
 

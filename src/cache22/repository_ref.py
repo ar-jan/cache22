@@ -24,6 +24,10 @@ class RepositoryRef:
 
 
 def parse_repository_url(url: str, *, case_sensitive: bool = False) -> RepositoryRef:
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        raise ValueError("Unsafe repository URL: control characters are not supported")
+    if "?" in url or "#" in url:
+        raise ValueError("Repository URL must not include query or fragment delimiters")
     raw_url = url.strip()
     if not raw_url:
         raise ValueError("Repository URL must not be empty")

@@ -774,3 +774,23 @@ def test_ordinary_update_does_not_repeat_full_object_verification(mirror: Mirror
     with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Do not repeat fsck")):
         import_repository(URL, mirror.root, "git")
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
+
+
+@pytest.mark.parametrize("contents", [b"", b"unfinished\n", b"complete", b"complete\nextra"])
+@pytest.mark.parametrize("archive_type", ["git", "fossil"])
+def test_malformed_completion_marker_blocks_reuse_without_changes(
+    mirror: Mirror, contents: bytes, archive_type: str
+) -> None:
+    import_repository(URL, mirror.root, "git", adopt=True)
+    if archive_type == "fossil":
+        mirror.paths.fossil_repository.write_bytes(b"existing sidecar")
+    mirror.paths.clone_complete_marker.write_bytes(contents)
+    before = snapshot(mirror.paths.repository_dir)
+    with (
+        patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
+        pytest.raises(ValueError, match="Malformed clone completion marker"),
+    ):
+        import_repository(URL, mirror.root, "git" if archive_type == "git" else "fossil")
+    assert snapshot(mirror.paths.repository_dir) == before
+    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert snapshot(mirror.paths.repository_dir) == before

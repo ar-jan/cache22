@@ -120,6 +120,21 @@ class RepositoryStorage:
             if result is not None and stat.S_ISDIR(result.st_mode) != directory:
                 raise ValueError(f"Unexpected archive entry type: {path}")
 
+    def validate_clone_marker(self) -> None:
+        name = self.paths.clone_complete_marker.name
+        if self.entry(name) is None:
+            return
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.directory_fd)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError(
+                    f"Unsafe clone completion marker: {self.paths.clone_complete_marker}"
+                )
+            if handle.read(len(b"complete\n") + 1) != b"complete\n":
+                raise ValueError(
+                    f"Malformed clone completion marker: {self.paths.clone_complete_marker}"
+                )
+
     def remove(self, name: str) -> bool:
         result = self.entry(name)
         if result is None:
