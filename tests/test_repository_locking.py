@@ -8,8 +8,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("mock_inventory_git")
-
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
 from cache22.archive_storage import (
     RepositoryBusyError,
@@ -20,6 +18,8 @@ from cache22.archive_storage import (
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
+
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 
 URL = "https://host/team/project"
 

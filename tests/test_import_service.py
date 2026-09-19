@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("mock_inventory_git")
-
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.import_service import import_repository
 from cache22.repository_ref import parse_repository_url
+
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 
 
 class _FakePipe:

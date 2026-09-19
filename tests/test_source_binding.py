@@ -6,8 +6,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 from typer.testing import CliRunner
 
 from cache22.archive_layout import archive_paths_for_repository
@@ -17,6 +15,8 @@ from cache22.config import ArchiveType
 from cache22.import_service import ImportResult, import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
+
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 
 URL = "https://HOST/Team/Repo.GIT"
 
@@ -159,13 +159,19 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "metadata", ["{}", "{", '{"source_path": 3}', '{"source_path":"HOST/team/repo"}']
+    ("metadata", "message"),
+    [
+        ("{}", "Malformed source metadata"),
+        ("{", "Expecting property name enclosed in double quotes"),
+        ('{"source_path": 3}', "Malformed source metadata"),
+        ('{"source_path":"HOST/team/repo"}', "Malformed source metadata"),
+    ],
 )
-def test_malformed_binding_is_never_replaced(tmp_path: Path, metadata: str) -> None:
+def test_malformed_binding_is_never_replaced(tmp_path: Path, metadata: str, message: str) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     with repository_operation(tmp_path, paths, create=True):
         paths.source_file.write_text(metadata)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         import_repository(URL, tmp_path, "git")
     assert paths.source_file.read_text() == metadata
 

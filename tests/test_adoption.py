@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -127,26 +128,28 @@ def test_adoption_registers_without_recloning_then_import_updates(
 
 
 @pytest.mark.parametrize(
-    "problem",
+    ("problem", "message"),
     [
-        "origin",
-        "multiple_origins",
-        "refspec",
-        "bare",
-        "corruption",
-        "partial",
-        "included_partial",
-        "shallow",
-        "alternates",
-        "symlink",
-        "namespace",
-        "metadata",
-        "binding",
-        "marker",
-        "stage",
+        ("origin", "Repository source conflict: origin"),
+        ("multiple_origins", "Duplicate repository configuration key: remote.origin.url"),
+        ("refspec", "Origin must be configured as a full Git mirror"),
+        ("bare", "Adoption and updates require a bare Git mirror"),
+        ("corruption", "(fsck)"),
+        ("partial", "Unsupported repository configuration key: remote.origin.promisor"),
+        ("included_partial", "Unsupported repository configuration key: include.path"),
+        ("shallow", "Expected a complete, self-contained Git mirror"),
+        ("alternates", "Expected a complete, self-contained Git mirror"),
+        ("symlink", "Unsafe Git mirror entry"),
+        ("namespace", "nested repository boundary"),
+        ("metadata", "Malformed source metadata"),
+        ("binding", "Repository source conflict: stored"),
+        ("marker", "Malformed clone completion marker"),
+        ("stage", "unexpected entries: .cache22-import"),
     ],
 )
-def test_invalid_adoption_never_changes_existing_data(mirror: Mirror, problem: str) -> None:
+def test_invalid_adoption_never_changes_existing_data(
+    mirror: Mirror, problem: str, message: str
+) -> None:
     paths = mirror.paths
     repo = paths.mirror_repository
     if problem == "origin":
@@ -186,7 +189,7 @@ def test_invalid_adoption_never_changes_existing_data(mirror: Mirror, problem: s
     elif problem == "stage":
         paths.temp_dir.mkdir()
     before = snapshot(paths.repository_dir)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=re.escape(message)):
         import_repository(URL, mirror.root, "git", adopt=True)
     assert snapshot(paths.repository_dir) == before
     assert not paths.lock_file.exists()

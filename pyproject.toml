@@ -27,6 +27,12 @@ line-length = 100
 indent-width = 4
 
 [tool.ruff.lint]
+extend-select = [
+    "E4", "E7", "E9", "F",  # Preserve the previous default checks
+    "B",                    # Full flake8-bugbear checks
+    "PT011",                # Avoid overly broad pytest.raises
+    "PT012",                # Avoid multiple statements inside pytest.raises
+]
 
 [tool.ruff.format]
 quote-style = "double"

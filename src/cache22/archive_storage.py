@@ -357,7 +357,7 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             raise ValueError(
                 f"Repository path conflict: {paths.repository_dir} is a nonempty "
                 "namespace or uninitialized directory"
-            )
+            ) from None
         return _publish_lock(directory_fd, paths)
     mode = os.fstat(fd).st_mode
     if not stat.S_ISREG(mode):
