@@ -49,7 +49,7 @@ def git_repository_command(git: Path, mirror: Path, *args: str) -> list[str]:
     return [str(git), "-c", "core.hooksPath=/dev/null", "--git-dir", str(mirror), *args]
 
 
-def validate_git_mirror_config(git: Path, mirror: Path, source_path: str) -> str:
+def validate_git_mirror_config(git: Path, mirror: Path, source_path: str | None = None) -> str:
     """Read only the local config, without includes or repository-aware commands."""
     worktree_config = mirror / "config.worktree"
     if worktree_config.exists() or worktree_config.is_symlink():
@@ -114,7 +114,7 @@ def validate_git_mirror_config(git: Path, mirror: Path, source_path: str) -> str
         origin = parse_repository_url(origin_url, case_sensitive=True)
     except ValueError as exc:
         raise ValueError("Invalid repository configuration value: remote.origin.url") from exc
-    if origin.source_path != source_path:
+    if source_path is not None and origin.source_path != source_path:
         raise ValueError(
             f"Repository source conflict: origin {origin.source_path}; requested {source_path}"
         )

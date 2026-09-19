@@ -251,8 +251,14 @@ def jobs(selector: str | None = None, as_json: bool = typer.Option(False, "--jso
 
 @repo_app.command("audit")
 @command
-def audit_repositories(fix: bool = False, as_json: bool = typer.Option(False, "--json")) -> None:
-    issues = audit(fix=fix)
+def audit_repositories(
+    fix: bool = False,
+    adopt: bool = typer.Option(
+        False, "--adopt", help="Verify and adopt discovered Git mirrors offline; implies --fix."
+    ),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    issues = audit(fix=fix, adopt=adopt)
     output(issues, as_json)
     if any(not issue["fixed"] for issue in issues):
         raise typer.Exit(1)

@@ -1,12 +1,14 @@
-"""Explicit inventory discovery and reconciliation; never adopts or deletes archives."""
+"""Offline inventory discovery, reconciliation, and explicitly requested adoption."""
 
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from .adoption import prepare_git_import
 from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
 from .archive_storage import (
     RepositoryStorage,
@@ -38,8 +40,36 @@ def register_storage(index: Index, root: Path, storage: RepositoryStorage) -> di
     return index.add(ref, root)
 
 
-def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, Any]]:
+def _prepare_adoption(
+    storage: RepositoryStorage, root: Path, record: dict[str, Any] | None
+) -> bool:
+    paths = storage.paths
+    storage.validate()
+    storage.validate_clone_marker()
+    if storage.entry(paths.mirror_repository.name) is None:
+        return False
+    source = storage.read_source()
+    if (
+        storage.entry(paths.lock_file.name) is not None
+        and source is not None
+        and storage.entry(paths.clone_complete_marker.name) is not None
+    ):
+        return False
+    validate_git_mirror_layout(paths.mirror_repository)
+    origin = validate_git_mirror_config(find_git_executable(), paths.mirror_repository)
+    ref = parse_repository_url(origin, case_sensitive=True)
+    if archive_paths_for_repository(root, ref) != paths:
+        raise ValueError("Mirror is not at its canonical path")
+    if record is not None and record["source_path"] != ref.source_path:
+        raise ValueError("Repository source conflict with inventory")
+    return prepare_git_import(storage, archive_dir=root, source_path=ref.source_path, adopt=True)
+
+
+def audit(
+    *, index: Index | None = None, fix: bool = False, adopt: bool = False
+) -> list[dict[str, Any]]:
     index = index or Index()
+    fix = fix or adopt
     issues: list[dict[str, Any]] = []
     seen: set[str] = set()
     with index.connect() as db:
@@ -71,16 +101,16 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                         and f"{relative.name}.git" in children
                         and not boundary
                     )
-                if unowned:
+                if unowned and not adopt:
                     issues.append(
                         {
                             "path": str(path),
-                            "problem": "Unowned mirror; explicit adoption required",
+                            "problem": "Unowned mirror; explicit adoption required (--adopt)",
                             "fixed": False,
                         }
                     )
                     continue
-                if not boundary:
+                if not boundary and not unowned:
                     for child in reversed(children):
                         try:
                             validate_storage_component(child)
@@ -89,15 +119,29 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                         pending.append(relative / child)
                     continue
                 paths = archive_paths_for_directory(path)
-                with repository_operation(root, paths) as storage:
+                key = relative.as_posix()
+                record = records.get(key)
+                if record is not None and record["archive_root"] != str(root):
+                    raise ValueError(
+                        f"Duplicate managed copy; selected root is {record['archive_root']}"
+                    )
+                seen.add(key)
+                adopted = False
+
+                def prepare(
+                    storage: RepositoryStorage,
+                    root: Path = root,
+                    record: dict[str, Any] | None = record,
+                ) -> None:
+                    nonlocal adopted
+                    adopted = _prepare_adoption(storage, root, record)
+
+                with repository_operation(
+                    root, paths, prepare=prepare if adopt else None
+                ) as storage:
                     if storage is None:
                         raise ValueError("Unrecognized ownership marker")
-                    key = relative.as_posix()
-                    record = records.get(key)
-                    if record is not None and record["archive_root"] != str(root):
-                        raise ValueError(
-                            f"Duplicate managed copy; selected root is {record['archive_root']}"
-                        )
+                    registered = record is None
                     if record is None:
                         # Validate before adding; no index-only audit side effects.
                         source = storage.read_source()
@@ -125,14 +169,6 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                             continue
                         record = index.add(ref, root)
                         records[key] = record
-                        issues.append(
-                            {
-                                "path": str(path),
-                                "problem": "Managed mirror was not indexed",
-                                "fixed": True,
-                            }
-                        )
-                    seen.add(key)
                     fields = local_fields(
                         storage,
                         record["source_path"],
@@ -150,7 +186,7 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                                 "fixed": False,
                             }
                         )
-                    elif changed:
+                    elif changed and not fix:
                         issues.append(
                             {
                                 "path": str(path),
@@ -173,7 +209,24 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                             local_observed_at=index.now(),
                             reconciliation_required=False,
                         )
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                        if (adopted or registered or changed) and fields[
+                            "local_state"
+                        ] != "incomplete":
+                            problem = (
+                                "Adopted Git mirror"
+                                if adopted
+                                else "Managed mirror was not indexed"
+                                if registered
+                                else "Local inventory differs from disk"
+                            )
+                            issues.append({"path": str(path), "problem": problem, "fixed": True})
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                sqlite3.Error,
+                subprocess.SubprocessError,
+            ) as exc:
                 issues.append({"path": str(path), "problem": str(exc), "fixed": False})
     for key, record in records.items():
         if key in seen or not Path(record["archive_root"]).is_dir():
@@ -213,6 +266,12 @@ def audit(*, index: Index | None = None, fix: bool = False) -> list[dict[str, An
                         local_observed_at=index.now(),
                         reconciliation_required=False,
                     )
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            sqlite3.Error,
+            subprocess.SubprocessError,
+        ) as exc:
             issues.append({"path": record["repository_dir"], "problem": str(exc), "fixed": False})
     return issues

@@ -267,8 +267,7 @@ def repository_operation(
     create: bool = False,
     prepare: Callable[[RepositoryStorage], None] | None = None,
 ) -> Iterator[RepositoryStorage | None]:
-    if prepare is not None and not create:
-        raise ValueError("Storage preparation requires create=True")
+    # Preparation can adopt existing storage without creating missing directories.
     relative = paths.repository_dir.relative_to(root)
     with ExitStack() as stack:
         # Directory reservations survive this short root-lock section. They

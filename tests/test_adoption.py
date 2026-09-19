@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -21,8 +22,11 @@ from cache22.adoption import AdoptionRequiredError
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
 from cache22.archive_storage import LOCK_SIGNATURE, RepositoryBusyError, repository_operation
 from cache22.cli import app
+from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
+from cache22.index import Index
+from cache22.repo_audit import audit
 from cache22.repository_ref import parse_repository_url
 
 URL = "https://host/team/project"
@@ -797,3 +801,164 @@ def test_malformed_completion_marker_blocks_reuse_without_changes(
     assert snapshot(mirror.paths.repository_dir) == before
     assert clean_repository_import_state(URL, (mirror.root,)) == ()
     assert snapshot(mirror.paths.repository_dir) == before
+
+
+@pytest.fixture
+def audit_mirror(mirror: Mirror, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Mirror:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    add_archive_dir(mirror.root)
+    return mirror
+
+
+def test_audit_adopts_all_mirrors_offline(audit_mirror: Mirror) -> None:
+    mirror = audit_mirror
+    nested_url = "ssh://git@host/Team/Subgroup/Other.git"
+    nested = archive_paths_for_repository(mirror.root, parse_repository_url(nested_url))
+    shutil.copytree(mirror.paths.mirror_repository, nested.mirror_repository)
+    git(nested.mirror_repository, "config", "remote.origin.url", nested_url)
+    empty = archive_paths_for_repository(
+        mirror.root, parse_repository_url("https://host/team/empty")
+    )
+    empty.repository_dir.mkdir(parents=True)
+    git(mirror.source, "init", "--bare", str(empty.mirror_repository))
+    git(empty.mirror_repository, "config", "remote.origin.url", "https://host/team/empty")
+    git(empty.mirror_repository, "config", "remote.origin.mirror", "true")
+    git(empty.mirror_repository, "config", "remote.origin.fetch", "+refs/*:refs/*")
+    before = snapshot(mirror.paths.mirror_repository)
+    run = subprocess.run
+
+    def offline(args, **kwargs):
+        assert not {"fetch", "clone", "ls-remote"}.intersection(args)
+        return run(args, **kwargs)
+
+    with patch("subprocess.run", side_effect=offline):
+        result = CliRunner().invoke(app, ["repo", "audit", "--adopt", "--json"])
+    assert result.exit_code == 0, result.output
+    issues = json.loads(result.stdout)
+    assert len(issues) == 3
+    assert all(issue["fixed"] and issue["problem"] == "Adopted Git mirror" for issue in issues)
+    index = Index()
+    assert len(index.list()) == 3
+    for record in index.list():
+        assert record["local_state"] == "ready"
+        assert record["remote_status"] == "unknown"
+        assert record["last_fetched_at"] is None and record["last_checked_at"] is None
+        assert not record["scheduled"] and not record["queued"]
+    assert index.get(nested_url)["source_path"] == "host/Team/Subgroup/Other"
+    assert index.get(nested_url)["source_url"] == nested_url
+    assert snapshot(mirror.paths.mirror_repository) == before
+    with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Already adopted")):
+        assert audit(adopt=True, fix=True) == []
+
+
+@pytest.mark.parametrize("fix", [False, True])
+def test_audit_requires_explicit_adoption(audit_mirror: Mirror, fix: bool) -> None:
+    before = snapshot(audit_mirror.paths.repository_dir)
+    issues = audit(fix=fix)
+    assert len(issues) == 1 and not issues[0]["fixed"]
+    assert "--adopt" in issues[0]["problem"]
+    assert Index().list() == []
+    assert snapshot(audit_mirror.paths.repository_dir) == before
+
+
+@pytest.mark.parametrize(
+    "markers", [(), ("lock",), ("complete",), ("lock", "source"), ("lock", "complete")]
+)
+def test_audit_recovers_partial_adoption(audit_mirror: Mirror, markers: tuple[str, ...]) -> None:
+    paths = audit_mirror.paths
+    if "lock" in markers:
+        paths.lock_file.write_bytes(LOCK_SIGNATURE)
+    if "complete" in markers:
+        paths.clone_complete_marker.write_text("complete\n")
+    if "source" in markers:
+        paths.source_file.write_text(json.dumps({"source_path": "host/team/project"}))
+    index = Index()
+    record = index.add(parse_repository_url(URL), audit_mirror.root)
+    index.update(record["id"], reconciliation_required=True)
+    assert all(issue["fixed"] for issue in audit(index=index, adopt=True))
+    assert index.get(URL)["local_state"] == "ready"
+    assert not index.get(URL)["reconciliation_required"]
+    assert audit() == []
+
+
+@pytest.mark.parametrize("problem", ["origin", "marker", "busy", "source"])
+def test_audit_adoption_continues_after_failure(audit_mirror: Mirror, problem: str) -> None:
+    mirror = audit_mirror
+    sibling_url = "https://host/team/sibling"
+    sibling = archive_paths_for_repository(mirror.root, parse_repository_url(sibling_url))
+    shutil.copytree(mirror.paths.mirror_repository, sibling.mirror_repository)
+    git(sibling.mirror_repository, "config", "remote.origin.url", sibling_url)
+    if problem == "origin":
+        git(mirror.paths.mirror_repository, "config", "remote.origin.url", sibling_url)
+    elif problem == "marker":
+        mirror.paths.clone_complete_marker.write_text("broken\n")
+    elif problem == "source":
+        Index().add(
+            parse_repository_url("https://host/Team/Project", case_sensitive=True), mirror.root
+        )
+    before = snapshot(mirror.paths.repository_dir)
+    directory_fd = os.open(mirror.paths.repository_dir, os.O_RDONLY)
+    try:
+        if problem == "busy":
+            fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = CliRunner().invoke(app, ["repo", "audit", "--adopt", "--json"])
+    finally:
+        os.close(directory_fd)
+    assert result.exit_code == 1, result.output
+    issues = json.loads(result.stdout)
+    assert any(not issue["fixed"] for issue in issues)
+    assert any(issue["fixed"] and issue["path"] == str(sibling.repository_dir) for issue in issues)
+    assert snapshot(mirror.paths.repository_dir) == before
+    assert Index().get(sibling_url)["local_state"] == "ready"
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_audit_adoption_duplicate_roots(
+    audit_mirror: Mirror, tmp_path: Path, selected: bool
+) -> None:
+    mirror = audit_mirror
+    duplicate = tmp_path / "duplicate"
+    shutil.copytree(mirror.root, duplicate)
+    add_archive_dir(duplicate)
+    index = Index()
+    winner = duplicate if selected else mirror.root
+    loser = mirror.root if selected else duplicate
+    if selected:
+        index.add(parse_repository_url(URL), winner)
+    before = snapshot(loser)
+    issues = audit(index=index, adopt=True)
+    assert any("Duplicate" in issue["problem"] and not issue["fixed"] for issue in issues)
+    assert index.get(URL)["archive_root"] == str(winner)
+    assert index.get(URL)["local_state"] == "ready"
+    assert snapshot(loser) == before
+
+
+def test_audit_adoption_inventory_failure_is_retryable(audit_mirror: Mirror) -> None:
+    index = Index()
+    with patch.object(index, "update", side_effect=sqlite3.OperationalError("disk full")):
+        issues = audit(index=index, adopt=True)
+    assert issues and all(not issue["fixed"] for issue in issues)
+    assert audit_mirror.paths.lock_file.read_bytes() == LOCK_SIGNATURE
+    with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Already verified")):
+        assert all(issue["fixed"] for issue in audit(index=index, adopt=True))
+    assert index.get(URL)["local_state"] == "ready"
+    assert audit(index=index) == []
+
+
+def test_audit_does_not_recreate_disappeared_candidate(
+    audit_mirror: Mirror, tmp_path: Path
+) -> None:
+    mirror = audit_mirror
+    moved = tmp_path / "moved"
+    before = snapshot(mirror.paths.repository_dir)
+
+    def disappear(*args, **kwargs):
+        mirror.paths.repository_dir.rename(moved)
+        return repository_operation(*args, **kwargs)
+
+    with patch("cache22.repo_audit.repository_operation", side_effect=disappear):
+        issues = audit(adopt=True)
+    assert len(issues) == 1 and not issues[0]["fixed"]
+    assert not mirror.paths.repository_dir.exists()
+    assert snapshot(moved) == before
+    assert Index().list() == []
