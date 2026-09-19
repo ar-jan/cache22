@@ -25,7 +25,9 @@ URL = "https://host/team/project"
 
 
 def _paused_import(root: Path, entered: Event, release: Event) -> None:
-    def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def clone(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         destination = Path(args[-1])
         destination.mkdir()
         (destination / "HEAD").write_text("winner")

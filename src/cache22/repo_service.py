@@ -1,16 +1,16 @@
-"""Noninteractive services shared by the CLI and future GUI."""
+"""Noninteractive services shared by the CLI and Datasette manager."""
 
 from __future__ import annotations
 
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
 from . import operation
 from .archive_layout import archive_paths_for_repository
 from .archive_storage import RepositoryBusyError, RepositoryStorage, repository_operation
-from .config import default_archive_dir, normalize_archive_dir
 from .git_observation import local_fields, remote_fields, remote_snapshot
 from .index import Index
 from .job_queue import Queue
@@ -21,24 +21,16 @@ def add_repository(
     url: str, root: Path | None = None, *, case_sensitive: bool = False, index: Index | None = None
 ) -> dict[str, Any]:
     index = index or Index()
-    ref = parse_repository_url(url, case_sensitive=case_sensitive)
-    if root is None:
-        with index.connect() as db:
-            row = db.execute(
-                "SELECT archive_root FROM repositories WHERE repo_key=?",
-                ("/".join((ref.host, *ref.namespace, ref.name)),),
-            ).fetchone()
-        if row:
-            return index.add(ref, Path(row["archive_root"]))
-    return index.add(
-        ref, normalize_archive_dir(root if root is not None else default_archive_dir())
-    )
+    from .manager_service import registration_target
+
+    ref, target = registration_target(index, url, root, case_sensitive)
+    return index.add(ref, target)
 
 
 def category_for(exc: BaseException) -> str:
     if isinstance(exc, RepositoryBusyError):
         return "busy"
-    if isinstance(exc, operation.ClaimLostError):
+    if isinstance(exc, (operation.ClaimLostError, operation.OperationInterrupted)):
         return "interrupted"
     if isinstance(exc, (FileNotFoundError, PermissionError)):
         return "unavailable"
@@ -51,10 +43,11 @@ def category_for(exc: BaseException) -> str:
 
 def error_text(exc: BaseException, url: str) -> str:
     # Do not copy credential-bearing clone URLs into persisted diagnostics.
-    return str(exc).replace(url, "<source URL>")[:4000]
+    return operation.sanitize(str(exc), url)
 
 
 def publish_local(index: Index, record: dict[str, Any], storage: RepositoryStorage | None) -> None:
+    operation.progress("index publication")
     operation.guard()
     fields = local_fields(
         storage,
@@ -67,6 +60,7 @@ def publish_local(index: Index, record: dict[str, Any], storage: RepositoryStora
 
 
 def publish_remote(index: Index, record: dict[str, Any]) -> None:
+    operation.progress("remote observation")
     index.update(record["id"], last_check_attempt_at=index.now())
     try:
         snapshot = remote_snapshot(record["source_url"])
@@ -135,13 +129,15 @@ def execute_job(
     adopt: bool = False,
     archive_type: str = "git",
     source_url: str | None = None,
+    cancel: threading.Event | None = None,
 ) -> Any:
     queue = Queue(index)
     record = index.get(job["repository_id"])
     kind = job["kind"]
     result: Any = None
     try:
-        with queue.running(job, check_timeout if kind == "check" else fetch_timeout):
+        with queue.running(job, check_timeout if kind == "check" else fetch_timeout, cancel):
+            operation.progress("validation")
             index.update(record["id"], **{f"last_{kind}_attempt_at": index.now()})
             if kind == "check":
                 check_locked(index, record)
@@ -160,6 +156,9 @@ def execute_job(
                     index=index,
                     record=record,
                 )
+    except operation.OperationInterrupted, KeyboardInterrupt:
+        queue.interrupt(job)
+        raise
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
         category = category_for(exc)
         message = error_text(exc, record["source_url"])
@@ -185,24 +184,21 @@ def execute_job(
 
 
 def run_worker(
-    *, index: Index | None = None, check_timeout: float = 120, fetch_timeout: float = 7200
+    *,
+    index: Index | None = None,
+    check_timeout: float = 120,
+    fetch_timeout: float = 7200,
+    stop: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
-    if min(check_timeout, fetch_timeout) <= 0:
-        raise ValueError("Timeouts must be positive")
-    index = index or Index()
-    queue = Queue(index)
-    queue.materialize()
+    from .worker import run_continuous
+
     outcomes: list[dict[str, Any]] = []
-    while (job := queue.claim()) is not None:
-        try:
-            execute_job(index, job, check_timeout=check_timeout, fetch_timeout=fetch_timeout)
-            outcomes.append({"job_id": job["id"], "outcome": "succeeded"})
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            outcomes.append(
-                {
-                    "job_id": job["id"],
-                    "outcome": "failed",
-                    "error": error_text(exc, index.get(job["repository_id"])["source_url"]),
-                }
-            )
+    run_continuous(
+        index=index,
+        stop=stop,
+        check_timeout=check_timeout,
+        fetch_timeout=fetch_timeout,
+        report=outcomes.append,
+        once=True,
+    )
     return outcomes

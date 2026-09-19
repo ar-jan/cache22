@@ -50,7 +50,9 @@ def test_fetch_spelling_and_identity(url: str, default: str, override: str) -> N
     assert preserved.source_path == preserved.display_path == "host/Team/Repo"
 
 
-def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+def clone(
+    args: list[str], *, check: bool, observe_progress: bool = False
+) -> subprocess.CompletedProcess[str]:
     Path(args[-1]).mkdir()
     return subprocess.CompletedProcess(args, 0)
 
@@ -128,7 +130,7 @@ def test_source_conflicts_before_archive_reuse(
 def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
 
-    def failed(args: list[str], *, check: bool) -> None:
+    def failed(args: list[str], *, check: bool, observe_progress: bool = False) -> None:
         Path(args[-1]).mkdir()
         paths.git_marks.write_text("orphan")
         raise subprocess.CalledProcessError(1, args)

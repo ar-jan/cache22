@@ -61,7 +61,9 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
     paths = archive_paths_for_repository(archive_dir, repository)
     clone_calls: list[list[str]] = []
 
-    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         assert check is True
         clone_calls.append(args)
         Path(args[-1]).mkdir(parents=True, exist_ok=True)
@@ -84,6 +86,7 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
             "/usr/bin/git",
             "clone",
             "--mirror",
+            "--progress",
             "--",
             "https://gitlab.com/group/subgroup/cache22.git",
             str(paths.mirror_repository),
@@ -102,7 +105,9 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
     popen_calls: list[_FakeProcess] = []
     clone_calls: list[list[str]] = []
 
-    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         assert check is True
         clone_calls.append(args)
         Path(args[-1]).mkdir(parents=True, exist_ok=True)
@@ -147,14 +152,15 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
 
     assert result.archive_path == paths.fossil_repository
     assert result.info_messages == ()
-    assert clone_calls[0][:5] == [
+    assert clone_calls[0][:6] == [
         "/usr/bin/git",
         "clone",
         "--mirror",
+        "--progress",
         "--",
         "https://gitlab.com/group/subgroup/cache22.git",
     ]
-    assert clone_calls[0][5] == str(paths.mirror_repository)
+    assert clone_calls[0][-1] == str(paths.mirror_repository)
     assert len(popen_calls) == 2
     assert popen_calls[0].args[:4] == [
         "/usr/bin/git",
@@ -200,7 +206,9 @@ def test_import_repository_reuses_completed_final_git_mirror_for_fossil(
     paths.clone_complete_marker.write_text("complete\n")
     popen_calls: list[_FakeProcess] = []
 
-    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         raise AssertionError(f"clone should not run again: {args}")
 
     def fake_popen(
@@ -292,7 +300,9 @@ def test_import_repository_keeps_success_when_stage_cleanup_fails(
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
 
-    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         assert check is True
         Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
@@ -350,7 +360,9 @@ def test_import_repository_preserves_fossil_stage_after_pipeline_failure(
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
 
-    def fake_run(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         Path(args[-1]).mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args=args, returncode=0)
 
@@ -413,7 +425,9 @@ def test_failed_clone_releases_lock_and_removes_only_incomplete_output(tmp_path:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(url))
     calls = 0
 
-    def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def clone(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         nonlocal calls
         calls += 1
         Path(args[-1]).mkdir()

@@ -1,0 +1,17 @@
+.c22-nav, .c22-pager { display:flex; flex-wrap:wrap; align-items:center; gap:1rem; margin:1rem 0; }
+.c22-panel { padding:1rem; margin:1rem 0; border:1px solid #bbb; border-radius:0.4rem; background:#f7f8fa; }
+.c22-panel label { display:inline-block; margin:0.4rem 0.7rem 0.4rem 0; }
+.c22-panel textarea { display:block; width:100%; box-sizing:border-box; font:inherit; }
+.c22-panel button, .c22-panel select, .c22-panel input { margin:0.2rem; }
+.c22-scroll { overflow-x:auto; }
+.c22-table { border-collapse:collapse; width:100%; }
+.c22-table th, .c22-table td { padding:0.6rem; border-bottom:1px solid #ddd; text-align:left; vertical-align:top; }
+.c22-table td { max-width:35rem; overflow-wrap:anywhere; white-space:pre-wrap; }
+.c22-error { color:#a01020; }
+#c22-detail { display:grid; grid-template-columns:minmax(10rem, 16rem) 1fr; gap:0.4rem 1rem; }
+#c22-detail dt { font-weight:bold; }
+#c22-detail dd { margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.c22-table progress { display:block; max-width:12rem; }
+.c22-select { min-width:1.1rem; min-height:1.1rem; }
+:focus-visible { outline:3px solid #4263eb; outline-offset:2px; }
+@media(max-width:600px) { #c22-detail { grid-template-columns:1fr; } .c22-panel { padding:0.6rem; } }

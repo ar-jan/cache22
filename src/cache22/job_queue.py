@@ -84,6 +84,10 @@ class Queue:
             ).fetchall():
                 self.enqueue_in(db, row["repository_id"], "check", origin="scheduled")
             db.execute(
+                "DELETE FROM workers WHERE COALESCE(stopped_at,heartbeat_at)<?",
+                (self.index.now() - 30 * 86400,),
+            )
+            db.execute(
                 "DELETE FROM jobs WHERE state IN ('succeeded','failed','cancelled') AND finished_at<?",
                 (self.index.now() - 30 * 86400,),
             )
@@ -92,42 +96,50 @@ class Queue:
         for row in db.execute(
             "SELECT * FROM jobs WHERE state='running' AND lease_until<=?", (self.index.now(),)
         ).fetchall():
+            self._interrupt_in(db, row, "Worker claim expired")
+
+    def interrupt(self, job: dict[str, Any], message: str = "Operation interrupted") -> None:
+        with self.index.transaction() as db:
+            self.validate(db, job)
+            self._interrupt_in(db, job, message)
+
+    def _interrupt_in(self, db: sqlite3.Connection, row: Any, message: str) -> None:
+        db.execute(
+            "UPDATE repositories SET reconciliation_required=1 WHERE id=?",
+            (row["repository_id"],),
+        )
+        db.execute(
+            "UPDATE job_attempts SET finished_at=?,outcome='interrupted',error_category='interrupted',error=? WHERE job_id=? AND finished_at IS NULL",
+            (self.index.now(), message, row["id"]),
+        )
+        # Merge any successor request into the recovered operation.
+        pending = db.execute(
+            "SELECT * FROM jobs WHERE repository_id=? AND state='pending'",
+            (row["repository_id"],),
+        ).fetchone()
+        kind, origin = row["kind"], row["origin"]
+        if pending:
+            kind = "fetch" if "fetch" in (kind, pending["kind"]) else "check"
+            origin = "manual" if "manual" in (origin, pending["origin"]) else "scheduled"
             db.execute(
-                "UPDATE repositories SET reconciliation_required=1 WHERE id=?",
-                (row["repository_id"],),
+                "UPDATE jobs SET state='cancelled',finished_at=? WHERE id=?",
+                (self.index.now(), pending["id"]),
             )
-            db.execute(
-                "UPDATE job_attempts SET finished_at=?,outcome='interrupted',error_category='interrupted',error='Worker claim expired' WHERE job_id=? AND finished_at IS NULL",
-                (self.index.now(), row["id"]),
-            )
-            # Merge any successor request into the recovered operation.
-            pending = db.execute(
-                "SELECT * FROM jobs WHERE repository_id=? AND state='pending'",
+        db.execute(
+            "UPDATE jobs SET state='pending',kind=?,origin=?,claim_token=NULL,lease_until=NULL,due_at=? WHERE id=?",
+            (kind, origin, self.index.now(), row["id"]),
+        )
+        if (
+            origin == "scheduled"
+            and not db.execute(
+                "SELECT 1 FROM schedules WHERE repository_id=? AND enabled=1",
                 (row["repository_id"],),
             ).fetchone()
-            kind, origin = row["kind"], row["origin"]
-            if pending:
-                kind = "fetch" if "fetch" in (kind, pending["kind"]) else "check"
-                origin = "manual" if "manual" in (origin, pending["origin"]) else "scheduled"
-                db.execute(
-                    "UPDATE jobs SET state='cancelled',finished_at=? WHERE id=?",
-                    (self.index.now(), pending["id"]),
-                )
+        ):
             db.execute(
-                "UPDATE jobs SET state='pending',kind=?,origin=?,claim_token=NULL,lease_until=NULL,due_at=? WHERE id=?",
-                (kind, origin, self.index.now(), row["id"]),
+                "UPDATE jobs SET state='cancelled',finished_at=? WHERE id=?",
+                (self.index.now(), row["id"]),
             )
-            if (
-                origin == "scheduled"
-                and not db.execute(
-                    "SELECT 1 FROM schedules WHERE repository_id=? AND enabled=1",
-                    (row["repository_id"],),
-                ).fetchone()
-            ):
-                db.execute(
-                    "UPDATE jobs SET state='cancelled',finished_at=? WHERE id=?",
-                    (self.index.now(), row["id"]),
-                )
 
     def claim(self, job_id: int | None = None) -> dict[str, Any] | None:
         with self.index.transaction() as db:
@@ -148,11 +160,11 @@ class Queue:
                 "UPDATE jobs SET state='running',claim_token=?,lease_until=? WHERE id=?",
                 (token, self.index.now() + LEASE_SECONDS, row["id"]),
             )
-            db.execute(
+            attempt = db.execute(
                 "INSERT INTO job_attempts(job_id,started_at) VALUES(?,?)",
                 (row["id"], self.index.now()),
             )
-            return dict(row, state="running", claim_token=token)
+            return dict(row, state="running", claim_token=token, attempt_id=attempt.lastrowid)
 
     def validate(self, db: sqlite3.Connection, job: dict[str, Any]) -> None:
         if not db.execute(
@@ -164,7 +176,9 @@ class Queue:
             )
 
     @contextmanager
-    def running(self, job: dict[str, Any], timeout: float) -> Iterator[None]:
+    def running(
+        self, job: dict[str, Any], timeout: float, cancel: threading.Event | None = None
+    ) -> Iterator[None]:
         if timeout <= 0:
             raise ValueError("Operation timeout must be positive")
         stop = threading.Event()
@@ -184,14 +198,50 @@ class Queue:
                     return
 
         def validate() -> None:
+            if cancel is not None and cancel.is_set():
+                raise operation.OperationInterrupted("Worker stopping")
             if lost.is_set():
                 raise operation.ClaimLostError("Worker heartbeat failed")
             with self.index.connect() as db:
                 self.validate(db, job)
 
+        last_write = 0.0
+        last_phase = ""
+
+        def publish(snapshot: dict[str, Any]) -> None:
+            nonlocal last_write, last_phase
+            now = time.monotonic()
+            if snapshot["phase"] == last_phase and now - last_write < 1:
+                return
+            try:
+                with self.index.transaction() as db:
+                    self.validate(db, job)
+                    db.execute(
+                        """INSERT INTO attempt_progress
+                        (attempt_id,phase,observed_at,completed,total,unit,percentage,detail)
+                        VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET
+                        phase=excluded.phase,observed_at=excluded.observed_at,
+                        completed=excluded.completed,total=excluded.total,unit=excluded.unit,
+                        percentage=excluded.percentage,detail=excluded.detail""",
+                        (
+                            job["attempt_id"],
+                            snapshot["phase"],
+                            self.index.now(),
+                            snapshot.get("completed"),
+                            snapshot.get("total"),
+                            snapshot.get("unit"),
+                            snapshot.get("percentage"),
+                            snapshot.get("detail"),
+                        ),
+                    )
+            except sqlite3.Error:
+                # Progress is observational; a busy database must not fail Git.
+                return
+            last_write, last_phase = now, snapshot["phase"]
+
         token = operation.current_operation.set(
             operation.Operation(
-                validate, time.monotonic() + timeout, lambda db: self.validate(db, job)
+                validate, time.monotonic() + timeout, lambda db: self.validate(db, job), publish
             )
         )
         thread = threading.Thread(target=heartbeat, daemon=True)
@@ -305,10 +355,11 @@ class Queue:
                 ),
             )
             job = dict(db.execute("SELECT * FROM jobs WHERE id=?", (cursor.lastrowid,)).fetchone())
-            db.execute(
+            attempt = db.execute(
                 "INSERT INTO job_attempts(job_id,started_at) VALUES(?,?)",
                 (job["id"], self.index.now()),
             )
+            job["attempt_id"] = attempt.lastrowid
             return job
 
     def list(self, repository_id: int | None = None) -> list[dict[str, Any]]:

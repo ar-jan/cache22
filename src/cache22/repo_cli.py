@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import subprocess
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import wraps
@@ -17,8 +17,10 @@ import typer
 from .import_service import import_repository
 from .index import Index
 from .job_queue import Queue
+from .manager_service import duration
 from .repo_audit import audit
 from .repo_service import add_repository, check_repository, run_worker
+from .worker import notify_ready, run_continuous, shutdown_signals
 
 repo_app = typer.Typer(help="Browse the repository index and manage updates.", no_args_is_help=True)
 worker_app = typer.Typer(help="Execute persistent update jobs.", no_args_is_help=True)
@@ -225,20 +227,17 @@ def unqueue(selector: str) -> None:
     Queue(index).unqueue(index.get(selector)["id"])
 
 
-def duration(value: str) -> int:
-    match = re.fullmatch(r"([1-9][0-9]*)(s|m|h|d|w)", value)
-    if not match:
-        raise typer.BadParameter("Use a positive duration such as 30m, 6h, or 1d")
-    return int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match[2]]
-
-
 @repo_app.command("schedule")
 @command
 def schedule(selector: str, every: str | None = None, disable: bool = False) -> None:
     if (every is not None) == disable:
         raise typer.BadParameter("Provide --every DURATION or --disable, exclusively")
     index = Index()
-    Queue(index).schedule(index.get(selector)["id"], duration(every) if every else None)
+    try:
+        interval = duration(every) if every else None
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    Queue(index).schedule(index.get(selector)["id"], interval)
     output(index.get(selector), False)
 
 
@@ -268,13 +267,34 @@ def audit_repositories(
 @command
 def worker(
     once: bool = False,
+    continuous: bool = False,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    if not once:
-        raise typer.BadParameter("Specify --once; continuous execution is not supported")
-    results = run_worker(check_timeout=check_timeout, fetch_timeout=fetch_timeout)
+    if once == continuous:
+        raise typer.BadParameter("Specify exactly one of --once or --continuous")
+    if continuous:
+        stop = threading.Event()
+
+        def report(result: dict[str, Any]) -> None:
+            if as_json:
+                typer.echo(json.dumps(_json_value(result)))
+            else:
+                output(result, False)
+
+        with shutdown_signals(stop):
+            run_continuous(
+                stop=stop,
+                check_timeout=check_timeout,
+                fetch_timeout=fetch_timeout,
+                report=report,
+                ready=notify_ready,
+            )
+        return
+    stop = threading.Event()
+    with shutdown_signals(stop):
+        results = run_worker(check_timeout=check_timeout, fetch_timeout=fetch_timeout, stop=stop)
     output(results, as_json)
     if any(result["outcome"] == "failed" for result in results):
         raise typer.Exit(1)

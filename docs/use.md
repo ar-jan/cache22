@@ -202,9 +202,11 @@ cache22 repo audit
 cache22 repo audit --fix
 ```
 
-Schedule `cache22 worker run --once` with cron or a system timer, for example every
-minute. Cache22 does not install a timer or run a daemon automatically. Each
-invocation drains due work and exits; retries wait for a later invocation.
+Run `cache22 worker run --continuous` for a persistent worker, or schedule
+`cache22 worker run --once` with cron or a system timer, for example every minute.
+Cache22 does not install a timer or service automatically. Run-once drains due
+work and exits; retries wait for a later invocation. Continuous mode keeps waiting
+for future schedules and retries.
 
 The local commit date is the committer timestamp at local HEAD. No remote commit
 date is collected. Remote status compares the last observed remote refs and HEAD
@@ -229,3 +231,24 @@ through their next operation or `repo audit --fix`. Audit never adopts unowned
 storage or deletes archives, and cannot recover old scheduling or fetch/check
 timestamps from disk. Explicit `repo fetch SELECTOR --adopt` uses the same verified
 adoption rules as `import repo --adopt`.
+
+
+## Browser manager
+
+Run `cache22 manager run` and open `http://127.0.0.1:8001/`. Use `--port` to choose
+another port, or `--web-only` when running an independent continuous worker.
+The manager supports inventory filters, explicit bulk selection, registration,
+checks/fetches, schedules, and queue/progress monitoring. Closing a tab does not
+stop jobs. Stopping the combined launcher stops its worker; an external worker
+continues when a web-only manager stops. Use SSH port forwarding for remote use.
+
+Full index data can be inspected through Datasette; generic writes are disabled.
+Only Cache22's forms/API perform mutations through shared services. Keep the
+inventory ID column visible for live row updates and selection.
+
+The manager replaces the earlier greenfield index schema without a version bump.
+Before using an older index, stop all Cache22 processes and discard that index
+and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
+This discards schedules, queued work, registrations, and history, but never archive
+files. `cache22 repo audit --fix` can rediscover managed mirrors. There is no
+migration and no automatic reset during normal startup.

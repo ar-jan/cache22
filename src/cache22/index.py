@@ -55,17 +55,31 @@ CREATE TABLE job_attempts (
  error_category TEXT, error TEXT
 );
 CREATE INDEX attempts_job ON job_attempts(job_id,id);
+CREATE INDEX jobs_history ON jobs(finished_at,id);
+CREATE INDEX jobs_repository_history ON jobs(repository_id,id);
+CREATE TABLE attempt_progress (
+ attempt_id INTEGER PRIMARY KEY REFERENCES job_attempts(id) ON DELETE CASCADE,
+ phase TEXT NOT NULL, observed_at INTEGER NOT NULL,
+ completed INTEGER, total INTEGER, unit TEXT, percentage REAL, detail TEXT
+);
+CREATE TABLE workers (
+ id TEXT PRIMARY KEY, pid INTEGER NOT NULL, started_at INTEGER NOT NULL,
+ heartbeat_at INTEGER NOT NULL, stopped_at INTEGER, current_job_id INTEGER
+);
+CREATE INDEX workers_heartbeat ON workers(heartbeat_at);
 CREATE INDEX schedules_due ON schedules(enabled,next_due_at);
 CREATE INDEX repository_inventory ON repositories(local_state,host,repo_key);
 CREATE VIEW inventory AS SELECT r.*,
+ CAST((check_error IS NOT NULL OR fetch_error IS NOT NULL) AS INTEGER) AS has_error,
  archive_root || '/' || repo_key AS repository_dir,
  CASE WHEN reconciliation_required OR remote_ref_digest IS NULL THEN 'unknown'
  WHEN local_state IN ('absent','missing') THEN 'not_fetched'
  WHEN local_state != 'ready' OR local_ref_digest IS NULL THEN 'unknown'
  WHEN local_ref_digest=remote_ref_digest THEN 'current' ELSE 'updates_available' END AS remote_status,
- EXISTS(SELECT 1 FROM jobs j WHERE j.repository_id=r.id AND j.state='pending') AS queued,
- EXISTS(SELECT 1 FROM jobs j WHERE j.repository_id=r.id AND j.state='running') AS running,
- COALESCE(s.enabled,0) AS scheduled, COALESCE(s.blocked,0) AS schedule_blocked, s.interval_seconds, s.next_due_at
+ CAST(EXISTS(SELECT 1 FROM jobs j WHERE j.repository_id=r.id AND j.state='pending') AS INTEGER) AS queued,
+ CAST(EXISTS(SELECT 1 FROM jobs j WHERE j.repository_id=r.id AND j.state='running') AS INTEGER) AS running,
+ CAST(COALESCE(s.enabled,0) AS INTEGER) AS scheduled,
+ CAST(COALESCE(s.blocked,0) AS INTEGER) AS schedule_blocked, s.interval_seconds, s.next_due_at
  FROM repositories r LEFT JOIN schedules s ON s.repository_id=r.id;
 """
 
@@ -133,36 +147,55 @@ class Index:
     def add(
         self, repository: RepositoryRef, root: Path, *, importing: bool = False
     ) -> dict[str, Any]:
-        key = repository_key(repository)
         with self.transaction() as db:
-            existing = db.execute("SELECT * FROM repositories WHERE repo_key=?", (key,)).fetchone()
-            if existing:
-                if existing["archive_root"] != str(root):
-                    raise ValueError(
-                        f"Repository already assigned to {existing['archive_root']}: {key}"
-                    )
-                if existing["source_path"] != repository.source_path and not importing:
-                    raise ValueError(
-                        f"Repository source conflict: stored {existing['source_path']}; requested {repository.source_path}"
-                    )
-            else:
-                db.execute(
-                    """INSERT INTO repositories
-                    (repo_key,project_name,display_path,host,source_url,source_path,archive_root,created_at,updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (
-                        key,
-                        repository.display_path.rsplit("/", 1)[-1],
-                        repository.display_path,
-                        repository.host,
-                        repository.clone_url,
-                        repository.source_path,
-                        str(root),
-                        self.now(),
-                        self.now(),
-                    ),
-                )
-        return self.get(key)
+            self.add_in(db, repository, root, importing=importing)
+        return self.get(repository_key(repository))
+
+    def add_in(
+        self,
+        db: sqlite3.Connection,
+        repository: RepositoryRef,
+        root: Path,
+        *,
+        importing: bool = False,
+    ) -> int:
+        """Register using the caller's transaction, including source/root validation."""
+        key = repository_key(repository)
+        existing = db.execute("SELECT * FROM repositories WHERE repo_key=?", (key,)).fetchone()
+        if existing:
+            self.validate_binding(existing, repository, root, importing=importing)
+            return existing["id"]
+        cursor = db.execute(
+            """INSERT INTO repositories
+            (repo_key,project_name,display_path,host,source_url,source_path,archive_root,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                key,
+                repository.display_path.rsplit("/", 1)[-1],
+                repository.display_path,
+                repository.host,
+                repository.clone_url,
+                repository.source_path,
+                str(root),
+                self.now(),
+                self.now(),
+            ),
+        )
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
+
+    @staticmethod
+    def validate_binding(
+        existing: Any, repository: RepositoryRef, root: Path, *, importing: bool = False
+    ) -> None:
+        if existing["archive_root"] != str(root):
+            raise ValueError(
+                f"Repository already assigned to {existing['archive_root']}: {repository_key(repository)}"
+            )
+        if existing["source_path"] != repository.source_path and not importing:
+            raise ValueError(
+                f"Repository source conflict: stored {existing['source_path']}; requested {repository.source_path}"
+            )
 
     def get(self, selector: str | int) -> dict[str, Any]:
         if isinstance(selector, str) and (

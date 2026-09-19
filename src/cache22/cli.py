@@ -19,6 +19,7 @@ from .config import (
 )
 from .import_service import ImportResult, import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
+from .manager_cli import manager_app
 from .repo_cli import repo_app, worker_app
 from .system_tools import get_fossil_status
 
@@ -35,6 +36,7 @@ import_clean_app = typer.Typer(help="Clean partial import state.", no_args_is_he
 
 app.add_typer(repo_app, name="repo")
 app.add_typer(worker_app, name="worker")
+app.add_typer(manager_app, name="manager")
 app.add_typer(config_app, name="config")
 config_app.add_typer(archive_app, name="archive")
 config_app.add_typer(archive_type_app, name="archive-type")

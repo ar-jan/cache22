@@ -43,10 +43,20 @@ def ensure_git_mirror(
             f"Clear it with 'cache22 import clean repo {url}' to start over."
         )
 
+    operation.progress("cloning")
     try:
         run_git(
-            [str(git_executable), "clone", "--mirror", "--", url, str(paths.mirror_repository)],
+            [
+                str(git_executable),
+                "clone",
+                "--mirror",
+                "--progress",
+                "--",
+                url,
+                str(paths.mirror_repository),
+            ],
             check=True,
+            observe_progress=True,
         )
     except subprocess.CalledProcessError as exc:
         _clear_incomplete_mirror(storage)
@@ -58,6 +68,7 @@ def ensure_git_mirror(
         # Git clone can turn a detached remote HEAD into a matching local branch.
         # Publish the actual advertised HEAD before declaring the clone complete.
         head = _remote_head(git_executable, paths.mirror_repository, url)
+        operation.progress("HEAD synchronization")
         _synchronize_head(git_executable, paths.mirror_repository, head)
         if _remote_head(git_executable, paths.mirror_repository, url) != head:
             raise ValueError("Remote HEAD changed during cloning; retry the import")
@@ -84,6 +95,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
             "Remote HEAD discovery failed; the initialized mirror was kept. "
             "Retry the import to fetch updates."
         ) from exc
+    operation.progress("fetching")
     refspecs = ["+refs/*:refs/*"]
     if head.target is None and head.oid is not None:
         # A detached HEAD can name a commit unreachable from every advertised ref.
@@ -94,6 +106,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
                 git_executable,
                 mirror,
                 "fetch",
+                "--progress",
                 "--atomic",
                 "--prune",
                 "--no-recurse-submodules",
@@ -106,6 +119,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
             ),
             check=True,
             env=git_repository_environment(),
+            observe_progress=True,
         )
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
@@ -115,6 +129,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
     try:
         if _remote_head(git_executable, mirror, url) != head:
             raise ValueError("Remote HEAD changed during fetching")
+        operation.progress("HEAD synchronization")
         _synchronize_head(git_executable, mirror, head)
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         raise RuntimeError(
@@ -142,6 +157,7 @@ def _read_git(
 
 
 def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
+    operation.progress("remote observation")
     try:
         advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
     except subprocess.CalledProcessError as exc:
