@@ -4,9 +4,9 @@ version = "0.0.1"
 description = "CLI for archiving Git repositories into Fossil"
 requires-python = ">=3.14"
 dependencies = [
-    "datasette>=1.0a26",
+    "datasette>=1.0a40",
     "tomli-w>=1.2.0",
-    "typer>=0.24.1",
+    "typer>=0.27.2",
 ]
 
 [project.scripts]
