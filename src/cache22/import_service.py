@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
+from . import operation
 from .adoption import prepare_git_import
 from .archive_layout import ArchivePaths, archive_paths_for_repository
 from .archive_storage import RepositoryStorage, repository_operation
@@ -22,6 +23,9 @@ from .fossil_archive import (
     promote_staged_archive,
 )
 from .git_mirror import ensure_git_mirror, open_fast_export
+from .index import Index, repository_key
+from .job_queue import Queue
+from .repo_service import execute_job, publish_local, publish_remote
 from .repository_ref import parse_repository_url
 from .system_tools import find_fossil_executable, find_git_executable
 
@@ -30,6 +34,7 @@ from .system_tools import find_fossil_executable, find_git_executable
 class ImportResult:
     archive_path: Path
     info_messages: tuple[str, ...] = ()
+    repository: dict[str, Any] | None = None
 
 
 def import_repository(
@@ -39,6 +44,48 @@ def import_repository(
     *,
     case_sensitive: bool = False,
     adopt: bool = False,
+    index: Index | None = None,
+    timeout: float = 7200,
+) -> ImportResult:
+    if timeout <= 0:
+        raise ValueError("Operation timeout must be positive")
+    repository = parse_repository_url(url, case_sensitive=case_sensitive)
+    index = index or Index()
+    with index.connect() as db:
+        existing = db.execute(
+            "SELECT archive_root FROM repositories WHERE repo_key=?", (repository_key(repository),)
+        ).fetchone()
+    root = (
+        Path(existing["archive_root"])
+        if archive_dir is None and existing
+        else _resolve_archive_dir(archive_dir)
+    )
+    kind = _resolve_archive_type(archive_type)
+    if adopt and kind != "git":
+        raise ValueError("--adopt is only supported in Git archive mode")
+    record = index.add(repository, root, importing=True)
+    job = Queue(index).immediate(record["id"], "fetch")
+    result = execute_job(
+        index,
+        job,
+        fetch_timeout=timeout,
+        adopt=adopt,
+        archive_type=kind,
+        source_url=repository.clone_url,
+    )
+
+    return replace(result, repository=index.get(record["id"]))
+
+
+def _import_repository(
+    url: str,
+    archive_dir: Path | None = None,
+    archive_type: ArchiveType | None = None,
+    *,
+    case_sensitive: bool = False,
+    adopt: bool = False,
+    index: Index,
+    record: dict[str, Any],
 ) -> ImportResult:
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
@@ -46,6 +93,7 @@ def import_repository(
     if adopt and resolved_archive_type != "git":
         raise ValueError("--adopt is only supported in Git archive mode")
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
+    index.update(record["id"], reconciliation_required=True)
     adopted = False
 
     def prepare(storage: RepositoryStorage) -> None:
@@ -64,18 +112,48 @@ def import_repository(
         prepare=prepare if resolved_archive_type == "git" else None,
     ) as storage:
         assert storage is not None
+        operation.guard()
         storage.validate_clone_marker()
         storage.bind_source(repository.source_path)
+        index.update(
+            record["id"], source_path=repository.source_path, source_url=repository.clone_url
+        )
+        record = index.get(record["id"])
+        fetched = resolved_archive_type == "git" or not paths.clone_complete_marker.exists()
         try:
             result = _import_locked_repository(
                 repository.clone_url, paths, resolved_archive_type, storage
             )
+            publish_local(index, record, storage)
+            if resolved_archive_type == "git" and index.get(record["id"])["local_state"] != "ready":
+                raise ValueError("Imported mirror could not be validated for the inventory")
+            if fetched and index.get(record["id"])["local_state"] == "ready":
+                # A remote observation is separate from successful local materialization.
+                index.update(
+                    record["id"],
+                    last_fetched_at=index.now(),
+                    fetch_outcome="succeeded",
+                    fetch_error=None,
+                    fetch_error_category=None,
+                    fetch_error_at=None,
+                )
+                try:
+                    publish_remote(index, record)
+                except operation.TransportError:
+                    pass
             if adopted:
                 return ImportResult(
                     result.archive_path,
                     (f"INFO: adopted Git mirror: {paths.mirror_repository}", *result.info_messages),
                 )
             return result
+        except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
+            # Observe refs even when a fetch updated them but HEAD publication failed.
+            try:
+                publish_local(index, record, storage)
+            except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
+                pass
+            raise
         finally:
             storage.release_unused_source()
 

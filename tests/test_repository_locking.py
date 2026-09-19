@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
+
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
 from cache22.archive_storage import (
     RepositoryBusyError,
@@ -34,7 +36,11 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
+        patch("cache22.repo_service.local_fields", return_value={"local_state": "ready"}),
+        patch("cache22.import_service.publish_remote"),
+        patch("cache22.git_mirror._remote_head", return_value=None),
+        patch("cache22.git_mirror._synchronize_head"),
     ):
         import_repository(URL, root, "git")
 

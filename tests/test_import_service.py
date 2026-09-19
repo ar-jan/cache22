@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
+
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.import_service import import_repository
 from cache22.repository_ref import parse_repository_url
@@ -67,7 +69,7 @@ def test_import_repository_clones_git_mirror_without_fossil(tmp_path: Path) -> N
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=fake_run),
+        patch("cache22.git_mirror.run_git", side_effect=fake_run),
     ):
         result = import_repository(
             "https://gitlab.com/Group/Subgroup/Cache22.git",
@@ -133,7 +135,7 @@ def test_import_repository_runs_clone_and_pipeline_for_fossil(tmp_path: Path) ->
             "cache22.import_service.find_fossil_executable",
             return_value=Path("/usr/bin/fossil"),
         ),
-        patch("cache22.git_mirror.subprocess.run", side_effect=fake_run),
+        patch("cache22.git_mirror.run_git", side_effect=fake_run),
         patch("cache22.git_mirror.subprocess.Popen", side_effect=fake_popen),
         patch("cache22.fossil_archive.subprocess.Popen", side_effect=fake_popen),
     ):
@@ -224,7 +226,7 @@ def test_import_repository_reuses_completed_final_git_mirror_for_fossil(
             "cache22.import_service.find_fossil_executable",
             return_value=Path("/usr/bin/fossil"),
         ),
-        patch("cache22.git_mirror.subprocess.run", side_effect=fake_run),
+        patch("cache22.git_mirror.run_git", side_effect=fake_run),
         patch("cache22.git_mirror.subprocess.Popen", side_effect=fake_popen),
         patch("cache22.fossil_archive.subprocess.Popen", side_effect=fake_popen),
     ):
@@ -317,7 +319,7 @@ def test_import_repository_keeps_success_when_stage_cleanup_fails(
             "cache22.import_service.find_fossil_executable",
             return_value=Path("/usr/bin/fossil"),
         ),
-        patch("cache22.git_mirror.subprocess.run", side_effect=fake_run),
+        patch("cache22.git_mirror.run_git", side_effect=fake_run),
         patch("cache22.git_mirror.subprocess.Popen", side_effect=fake_popen),
         patch("cache22.fossil_archive.subprocess.Popen", side_effect=fake_popen),
         patch(
@@ -372,7 +374,7 @@ def test_import_repository_preserves_fossil_stage_after_pipeline_failure(
             "cache22.import_service.find_fossil_executable",
             return_value=Path("/usr/bin/fossil"),
         ),
-        patch("cache22.git_mirror.subprocess.run", side_effect=fake_run),
+        patch("cache22.git_mirror.run_git", side_effect=fake_run),
         patch("cache22.git_mirror.subprocess.Popen", side_effect=fake_popen),
         patch("cache22.fossil_archive.subprocess.Popen", side_effect=fake_popen),
         pytest.raises(RuntimeError, match="Temporary Fossil import state was kept"),
@@ -421,7 +423,7 @@ def test_failed_clone_releases_lock_and_removes_only_incomplete_output(tmp_path:
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         with pytest.raises(RuntimeError, match="git clone --mirror failed"):
             import_repository(url, tmp_path, "git")

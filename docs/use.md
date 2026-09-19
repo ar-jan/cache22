@@ -167,3 +167,65 @@ or process exit.
 
 Exit codes are 0 for success, 1 for operational or configuration errors, and 2
 for CLI usage errors.
+
+## Repository index and scheduled updates
+
+The index is stored at `$XDG_DATA_HOME/cache22/index.sqlite3` (default:
+`~/.local/share/cache22/index.sqlite3`). Keep this database on local storage.
+It covers all archive roots and remains browsable when drives are disconnected.
+
+```sh
+# Register without downloading; the first configured archive root is the default
+cache22 repo add https://github.com/ar-jan/cache22.git
+
+# Read inventory without scanning archives or contacting remotes
+cache22 repo list
+cache22 repo list --remote-status updates_available --json
+cache22 repo show github.com/ar-jan/cache22
+
+# Check refs, then fetch explicitly
+cache22 repo check github.com/ar-jan/cache22
+cache22 repo fetch github.com/ar-jan/cache22
+
+# Queue one download, or enable recurring check-then-fetch updates
+cache22 repo queue github.com/ar-jan/cache22
+cache22 repo schedule github.com/ar-jan/cache22 --every 6h
+cache22 worker run --once
+cache22 repo jobs github.com/ar-jan/cache22 --json
+
+# Disable automatic updates or cancel pending work independently
+cache22 repo schedule github.com/ar-jan/cache22 --disable
+cache22 repo unqueue github.com/ar-jan/cache22
+
+# Discover existing managed mirrors and refresh local observations
+cache22 repo audit
+cache22 repo audit --fix
+```
+
+Schedule `cache22 worker run --once` with cron or a system timer, for example every
+minute. Cache22 does not install a timer or run a daemon automatically. Each
+invocation drains due work and exits; retries wait for a later invocation.
+
+The local commit date is the committer timestamp at local HEAD. No remote commit
+date is collected. Remote status compares the last observed remote refs and HEAD
+with the local mirror: `unknown`, `not_fetched`, `current`, or `updates_available`.
+Force pushes, deleted refs, tags, and non-default branches all participate. Status
+is an observation, not a live guarantee; check its timestamp and diagnostics.
+
+`repo add --fetch` downloads immediately; `--queue` queues a one-off fetch.
+Schedules are disabled until explicitly enabled. A successful scheduled check
+fetches only if needed. Structural errors block a schedule until corrected by a
+successful manual operation or re-enabled. Transport failures retry after 1, 5,
+30, and 120 minutes; unavailable roots and busy repositories defer for one minute.
+
+Check/fetch accept multiple exact keys or URLs, or explicit `--all`. Default
+operation timeouts are 120 seconds for checks and 7200 seconds for fetching;
+use `--timeout` on check/fetch, or `--check-timeout`/`--fetch-timeout` on the worker.
+JSON output uses UTC ISO 8601 timestamps; unknown values are null. List pagination
+uses `--limit` and `--offset` (default limit 100).
+
+Direct imports and cleanup also maintain the index. Existing mirrors are discovered
+through their next operation or `repo audit --fix`. Audit never adopts unowned
+storage or deletes archives, and cannot recover old scheduling or fetch/check
+timestamps from disk. Explicit `repo fetch SELECTOR --adopt` uses the same verified
+adoption rules as `import repo --adopt`.

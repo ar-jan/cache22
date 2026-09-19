@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
+from . import operation
 from .archive_layout import ArchivePaths
 from .archive_storage import RepositoryStorage
 from .git_config import (
@@ -14,6 +15,7 @@ from .git_config import (
     validate_git_mirror_config,
 )
 from .git_layout import validate_git_mirror_layout
+from .operation import run as run_git
 from .repository_ref import parse_repository_url
 
 
@@ -42,17 +44,25 @@ def ensure_git_mirror(
         )
 
     try:
-        subprocess.run(
+        run_git(
             [str(git_executable), "clone", "--mirror", "--", url, str(paths.mirror_repository)],
             check=True,
         )
     except subprocess.CalledProcessError as exc:
         _clear_incomplete_mirror(storage)
-        raise RuntimeError(f"git clone --mirror failed with exit code {exc.returncode}") from exc
+        raise operation.TransportError(
+            f"git clone --mirror failed with exit code {exc.returncode}"
+        ) from exc
 
     try:
+        # Git clone can turn a detached remote HEAD into a matching local branch.
+        # Publish the actual advertised HEAD before declaring the clone complete.
+        head = _remote_head(git_executable, paths.mirror_repository, url)
+        _synchronize_head(git_executable, paths.mirror_repository, head)
+        if _remote_head(git_executable, paths.mirror_repository, url) != head:
+            raise ValueError("Remote HEAD changed during cloning; retry the import")
         storage.write_clone_marker()
-    except OSError:
+    except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
         _clear_incomplete_mirror(storage)
         raise
 
@@ -67,7 +77,9 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
     )
     try:
         head = _remote_head(git_executable, mirror, url)
-    except (subprocess.CalledProcessError, ValueError) as exc:
+    except subprocess.CalledProcessError as exc:
+        raise operation.TransportError("Remote HEAD discovery failed") from exc
+    except ValueError as exc:
         raise RuntimeError(
             "Remote HEAD discovery failed; the initialized mirror was kept. "
             "Retry the import to fetch updates."
@@ -77,7 +89,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
         # A detached HEAD can name a commit unreachable from every advertised ref.
         refspecs.append("HEAD")
     try:
-        subprocess.run(
+        run_git(
             git_repository_command(
                 git_executable,
                 mirror,
@@ -96,7 +108,7 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
             env=git_repository_environment(),
         )
     except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
+        raise operation.TransportError(
             f"git fetch failed with exit code {exc.returncode}; "
             "the initialized mirror was kept. Retry the import to fetch updates."
         ) from exc
@@ -120,7 +132,7 @@ class _RemoteHead:
 def _read_git(
     git: Path, mirror: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return run_git(
         git_repository_command(git, mirror, *args),
         check=check,
         capture_output=True,
@@ -130,7 +142,10 @@ def _read_git(
 
 
 def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
-    advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
+    try:
+        advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
+    except subprocess.CalledProcessError as exc:
+        raise operation.TransportError("Remote HEAD discovery failed; retry the import") from exc
     target = oid = None
     for line in advertisement.splitlines():
         value, _, name = line.partition("\t")

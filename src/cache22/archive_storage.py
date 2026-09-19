@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, suppress
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .archive_layout import LOCK_FILE_NAME, ArchivePaths
+from .operation import current_operation, guard, inherited_lock
 from .repository_ref import parse_repository_url, validate_storage_component
 
 LOCK_SIGNATURE = b"cache22-storage-v1\n"
@@ -62,6 +64,7 @@ def open_archive_directory(
                     os.mkdir(part, dir_fd=directory_fd)
                 child_fd = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory_fd)
             stack.callback(os.close, child_fd)
+            stack.enter_context(inherited_lock(child_fd))
             child_path = root.joinpath(*relative.parts[: depth + 1])
             final = depth == len(relative.parts) - 1
             if not final and depth >= 2 and has_repository_boundary(child_fd):
@@ -288,6 +291,7 @@ def repository_operation(
             if lock_fd is not None:
                 stack.callback(os.close, lock_fd)
                 _lock(lock_fd, paths)
+                stack.enter_context(inherited_lock(lock_fd))
         if directory_fd is None:
             yield None
             return
@@ -307,6 +311,7 @@ def repository_operation(
             with _root_lock(root):
                 lock_fd = _publish_lock(directory_fd, paths)
                 stack.callback(os.close, lock_fd)
+                stack.enter_context(inherited_lock(lock_fd))
         storage.validate()
         yield storage
 
@@ -315,7 +320,16 @@ def repository_operation(
 def _root_lock(root: Path) -> Iterator[None]:
     fd = os.open(root, _DIRECTORY_FLAGS)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if current_operation.get() is None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            while True:
+                guard()
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.05)
         yield
     finally:
         os.close(fd)

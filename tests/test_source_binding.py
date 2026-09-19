@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 from typer.testing import CliRunner
 
 from cache22.archive_layout import archive_paths_for_repository
@@ -70,7 +72,7 @@ def test_ipv6_clone_url_and_archive_reuse(
     assert repository.clone_url == expected
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone) as run,
+        patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=case_sensitive)
         assert run.call_args.args[0][-2] == expected
@@ -92,7 +94,7 @@ def test_source_conflicts_before_archive_reuse(
 ) -> None:
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone) as run,
+        patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
         result = import_repository(URL, tmp_path, "git", case_sensitive=first_override)
         assert (
@@ -133,7 +135,7 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=failed),
+        patch("cache22.git_mirror.run_git", side_effect=failed),
         pytest.raises(RuntimeError),
     ):
         import_repository(URL, tmp_path, "git", case_sensitive=True)
@@ -149,7 +151,7 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
     assert not paths.source_file.exists()
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         import_repository(URL, tmp_path, "git")
     assert json.loads(paths.source_file.read_text()) == {"source_path": "host/team/repo"}
@@ -218,7 +220,7 @@ def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:
     url = "https://host/Team/Repo.git.git"
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=True)
     with patch("cache22.git_mirror._fetch_git_mirror"):
