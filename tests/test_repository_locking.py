@@ -19,11 +19,15 @@ from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
 
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
+
 URL = "https://host/team/project"
 
 
 def _paused_import(root: Path, entered: Event, release: Event) -> None:
-    def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def clone(
+        args: list[str], *, check: bool, observe_progress: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         destination = Path(args[-1])
         destination.mkdir()
         (destination / "HEAD").write_text("winner")
@@ -34,7 +38,11 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
+        patch("cache22.repo_service.local_fields", return_value={"local_state": "ready"}),
+        patch("cache22.import_service.publish_remote"),
+        patch("cache22.git_mirror._remote_head", return_value=None),
+        patch("cache22.git_mirror._synchronize_head"),
     ):
         import_repository(URL, root, "git")
 

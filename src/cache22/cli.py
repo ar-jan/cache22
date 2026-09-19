@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 from collections.abc import Callable
 from functools import wraps
@@ -18,6 +19,8 @@ from .config import (
 )
 from .import_service import ImportResult, import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
+from .manager_cli import manager_app
+from .repo_cli import repo_app, worker_app
 from .system_tools import get_fossil_status
 
 app = typer.Typer(
@@ -31,6 +34,9 @@ status_app = typer.Typer(help="Inspect external tool availability.", no_args_is_
 import_app = typer.Typer(help="Import repositories into the archive.", no_args_is_help=True)
 import_clean_app = typer.Typer(help="Clean partial import state.", no_args_is_help=True)
 
+app.add_typer(repo_app, name="repo")
+app.add_typer(worker_app, name="worker")
+app.add_typer(manager_app, name="manager")
 app.add_typer(config_app, name="config")
 config_app.add_typer(archive_app, name="archive")
 config_app.add_typer(archive_type_app, name="archive-type")
@@ -44,7 +50,7 @@ def _user_command[**P](command: Callable[P, None]) -> Callable[P, None]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
         try:
             command(*args, **kwargs)
-        except (ConfigError, OSError, RuntimeError, ValueError) as exc:
+        except (ConfigError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             _exit_with_error(exc)
 
     return wrapper

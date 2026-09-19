@@ -14,6 +14,9 @@ from .archive_storage import (
     repository_operation,
 )
 from .config import list_archive_dirs, normalize_archive_dir
+from .index import Index
+from .repo_audit import register_storage
+from .repo_service import publish_local
 from .repository_ref import parse_repository_url, validate_storage_component
 
 
@@ -94,6 +97,23 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
 
 def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
     paths = storage.paths
+    index = Index()
+    with index.connect() as db:
+        row = db.execute(
+            "SELECT id FROM inventory WHERE repository_dir=?", (str(paths.repository_dir),)
+        ).fetchone()
+    record = index.get(row["id"]) if row else None
+    if record is None and storage.entry(paths.clone_complete_marker.name) is not None:
+        source = storage.read_source()
+        if source is not None:
+            components = source.split("/")
+            root = paths.repository_dir.parents[len(components) - 1]
+            try:
+                record = register_storage(index, root, storage)
+            except ValueError:
+                pass
+    if record is not None:
+        index.update(record["id"], reconciliation_required=True)
     removed_paths: list[Path] = []
     if storage.remove(paths.temp_dir.name):
         removed_paths.append(paths.temp_dir)
@@ -108,6 +128,8 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
         removed_paths.append(paths.clone_complete_marker)
 
     removed_paths.extend(storage.release_unused_source())
+    if record is not None:
+        publish_local(index, record, storage)
     return removed_paths
 
 

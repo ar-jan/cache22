@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from .archive_storage import RepositoryStorage
@@ -11,6 +10,7 @@ from .git_config import (
     validate_git_mirror_config,
 )
 from .git_layout import validate_git_mirror_layout
+from .operation import run as run_git
 from .system_tools import find_git_executable
 
 
@@ -119,7 +119,7 @@ def _verify_mirror(mirror: Path, source_path: str) -> None:
     )
 
     def run(*args: str) -> str:
-        result = subprocess.run(
+        result = run_git(
             git_repository_command(git, mirror, *args),
             check=False,
             capture_output=True,

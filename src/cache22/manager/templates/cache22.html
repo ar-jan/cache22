@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Cache22 · {{ page|capitalize }}{% endblock %}
+{% block content %}
+<nav class="c22-nav" aria-label="Cache22">
+  <a href="{{ inventory_url }}">Inventory</a>
+  <a href="/-/cache22/add">Add repositories</a>
+  <a href="/-/cache22/queue">Queue and workers</a>
+  <a href="/index">Browse index</a>
+</nav>
+<main id="c22-page" data-page="{{ page }}" {% if repository_id %}data-id="{{ repository_id }}"{% endif %}>
+<h1>{{ {"add": "Add repositories", "queue": "Queue and workers", "repository": "Repository details"}[page] }}</h1>
+<p id="c22-connection" role="status"></p>
+{% if page == "add" %}
+<form id="c22-add" class="c22-panel">
+  <label for="c22-urls">Clone URLs — one per nonblank line</label>
+  <textarea id="c22-urls" name="urls" rows="9" required spellcheck="false" placeholder="https://github.com/owner/project.git"></textarea>
+  <label>Archive root
+    <select name="root"><option value="">Keep existing binding; otherwise use default root</option>
+    {% for root in roots %}<option value="{{ root }}">{{ root }}</option>{% endfor %}</select>
+  </label>
+  {% if not roots %}<p>Configure an archive root with <code>cache22 config archive add PATH</code> before adding new repositories.</p>{% endif %}
+  <label><input type="checkbox" name="case_sensitive"> Preserve remote path case</label>
+  <label>After registration <select name="fetch"><option value="false">Register only</option><option value="true">Register and fetch</option></select></label>
+  <p>Fetching is queued. Recurring scheduling is a separate action.</p>
+  <button type="button" id="c22-preview">Preview</button><button type="submit">Register</button>
+</form>
+{% elif page == "queue" %}
+<section class="c22-panel"><h2>Worker availability</h2><div id="c22-workers"></div></section>
+<form id="c22-queue-filter"><label>Show
+  <select id="c22-section"><option value="running">Running</option><option value="runnable">Runnable</option><option value="deferred">Deferred / retrying</option><option value="history">Recent history</option></select>
+</label></form>
+<p id="c22-counts"></p><div id="c22-jobs" class="c22-scroll"></div>
+<div class="c22-pager"><button id="c22-prev" type="button">Previous</button><span id="c22-page-number"></span><button id="c22-next" type="button">Next</button></div>
+<p>Due times indicate eligibility, not execution deadlines. Priorities and concurrent workers affect execution order. History is retained for 30 days.</p>
+{% else %}
+<div id="c22-actions" class="c22-panel"></div>
+<dl id="c22-detail"></dl>
+<h2>Attempts</h2><div id="c22-attempts" class="c22-scroll"></div>
+<div class="c22-pager"><button id="c22-prev" type="button">Previous</button><span id="c22-page-number"></span><button id="c22-next" type="button">Next</button></div>
+{% endif %}
+<div id="c22-results" aria-live="polite"></div>
+</main>
+{% endblock %}

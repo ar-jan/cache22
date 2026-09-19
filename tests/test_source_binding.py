@@ -16,6 +16,8 @@ from cache22.import_service import ImportResult, import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
 
+pytestmark = pytest.mark.usefixtures("mock_inventory_git")
+
 URL = "https://HOST/Team/Repo.GIT"
 
 
@@ -48,7 +50,9 @@ def test_fetch_spelling_and_identity(url: str, default: str, override: str) -> N
     assert preserved.source_path == preserved.display_path == "host/Team/Repo"
 
 
-def clone(args: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+def clone(
+    args: list[str], *, check: bool, observe_progress: bool = False
+) -> subprocess.CompletedProcess[str]:
     Path(args[-1]).mkdir()
     return subprocess.CompletedProcess(args, 0)
 
@@ -70,7 +74,7 @@ def test_ipv6_clone_url_and_archive_reuse(
     assert repository.clone_url == expected
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone) as run,
+        patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=case_sensitive)
         assert run.call_args.args[0][-2] == expected
@@ -92,7 +96,7 @@ def test_source_conflicts_before_archive_reuse(
 ) -> None:
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone) as run,
+        patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
         result = import_repository(URL, tmp_path, "git", case_sensitive=first_override)
         assert (
@@ -126,14 +130,14 @@ def test_source_conflicts_before_archive_reuse(
 def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
 
-    def failed(args: list[str], *, check: bool) -> None:
+    def failed(args: list[str], *, check: bool, observe_progress: bool = False) -> None:
         Path(args[-1]).mkdir()
         paths.git_marks.write_text("orphan")
         raise subprocess.CalledProcessError(1, args)
 
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=failed),
+        patch("cache22.git_mirror.run_git", side_effect=failed),
         pytest.raises(RuntimeError),
     ):
         import_repository(URL, tmp_path, "git", case_sensitive=True)
@@ -149,7 +153,7 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
     assert not paths.source_file.exists()
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         import_repository(URL, tmp_path, "git")
     assert json.loads(paths.source_file.read_text()) == {"source_path": "host/team/repo"}
@@ -157,13 +161,19 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "metadata", ["{}", "{", '{"source_path": 3}', '{"source_path":"HOST/team/repo"}']
+    ("metadata", "message"),
+    [
+        ("{}", "Malformed source metadata"),
+        ("{", "Expecting property name enclosed in double quotes"),
+        ('{"source_path": 3}', "Malformed source metadata"),
+        ('{"source_path":"HOST/team/repo"}', "Malformed source metadata"),
+    ],
 )
-def test_malformed_binding_is_never_replaced(tmp_path: Path, metadata: str) -> None:
+def test_malformed_binding_is_never_replaced(tmp_path: Path, metadata: str, message: str) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     with repository_operation(tmp_path, paths, create=True):
         paths.source_file.write_text(metadata)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=message):
         import_repository(URL, tmp_path, "git")
     assert paths.source_file.read_text() == metadata
 
@@ -218,7 +228,7 @@ def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:
     url = "https://host/Team/Repo.git.git"
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
-        patch("cache22.git_mirror.subprocess.run", side_effect=clone),
+        patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         first = import_repository(url, tmp_path, "git", case_sensitive=True)
     with patch("cache22.git_mirror._fetch_git_mirror"):
