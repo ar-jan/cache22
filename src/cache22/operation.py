@@ -37,6 +37,21 @@ def sanitize(value: str, *sources: str) -> str:
     return "".join(c for c in value if c == "\n" or (ord(c) >= 32 and ord(c) != 127))[:4000]
 
 
+def failure_message(summary: str, error: subprocess.CalledProcessError, *sources: str) -> str:
+    """Keep the final diagnostic after progress chatter, within the persisted error limit."""
+    stderr = error.stderr
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if not stderr:
+        return summary
+    # Sanitize before taking the tail so truncation cannot split a credential-bearing URL.
+    # Work line-by-line to avoid sanitize()'s prefix limit discarding the final error.
+    detail = "\n".join(sanitize(line, *sources) for line in stderr.splitlines()).strip()
+    if not detail:
+        return summary
+    return summary + "\n" + detail[-(4000 - len(summary) - 1) :]
+
+
 @dataclass
 class Operation:
     guard: Callable[[], None]

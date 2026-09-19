@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from cache22 import operation, repo_service
+from cache22 import git_mirror, operation, repo_service
 from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
@@ -94,6 +95,56 @@ def test_inventory_dates_and_persistent_unfetched_changes(repository: Repository
         assert record["remote_head_oid"] == second
         assert record["last_checked_at"] == now
     assert r.fetch()["remote_status"] == "current"
+
+
+@pytest.mark.parametrize("stage", ["clone", "fetch", "ls-remote"])
+def test_git_failure_details_reach_cli_and_history(
+    repository: Repository, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    r = repository
+    if stage != "clone":
+        r.commit("initial")
+        r.fetch()
+    run = operation.run
+    secret_url = "https://user:secret@example.test/team/project/"
+    diagnostic = "SSL certificate problem: unable to get local issuer certificate"
+    stderr = (
+        b"Receiving objects: 50% (5/10)\r" * 3000
+        + f"\x1b[31mfatal: unable to access '{secret_url}': {diagnostic}\x1b[0m\n".encode()
+        + (b"transport detail: \xff\n" if stage != "ls-remote" else b"")
+    )
+
+    def fail_transport(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        if stage in args:
+            return run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os; os.write(2, {stderr!r}); raise SystemExit(128)",
+                ],
+                check=True,
+                observe_progress=kwargs.get("observe_progress", False),
+                capture_output=True,
+                text=stage != "clone",
+            )
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(git_mirror, "run_git", fail_transport)
+    monkeypatch.setattr(operation, "run", fail_transport)
+    command = "check" if stage == "ls-remote" else "fetch"
+    result = CliRunner().invoke(app, ["repo", command, URL])
+    assert result.exit_code == 1, result.output
+    job = Queue(r.index).list(r.id)[0]
+    assert job["state"] == "pending" and job["error_category"] == "transport"
+    for message in (
+        result.output,
+        job["error"],
+        job["attempts"][0]["error"],
+        r.index.get(r.id)[f"{command}_error"],
+    ):
+        assert diagnostic in message
+        assert "secret" not in message and "\x1b" not in message
+    assert len(job["error"]) <= 4000
 
 
 def test_ref_deletions_force_updates_and_peeled_tags(repository: Repository) -> None:

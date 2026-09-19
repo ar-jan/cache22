@@ -61,7 +61,9 @@ def ensure_git_mirror(
     except subprocess.CalledProcessError as exc:
         _clear_incomplete_mirror(storage)
         raise operation.TransportError(
-            f"git clone --mirror failed with exit code {exc.returncode}"
+            operation.failure_message(
+                f"git clone --mirror failed with exit code {exc.returncode}", exc, url
+            )
         ) from exc
 
     try:
@@ -89,7 +91,9 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
     try:
         head = _remote_head(git_executable, mirror, url)
     except subprocess.CalledProcessError as exc:
-        raise operation.TransportError("Remote HEAD discovery failed") from exc
+        raise operation.TransportError(
+            operation.failure_message("Remote HEAD discovery failed", exc, url)
+        ) from exc
     except ValueError as exc:
         raise RuntimeError(
             "Remote HEAD discovery failed; the initialized mirror was kept. "
@@ -123,8 +127,12 @@ def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) ->
         )
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
-            f"git fetch failed with exit code {exc.returncode}; "
-            "the initialized mirror was kept. Retry the import to fetch updates."
+            operation.failure_message(
+                f"git fetch failed with exit code {exc.returncode}; "
+                "the initialized mirror was kept. Retry the import to fetch updates.",
+                exc,
+                url,
+            )
         ) from exc
     try:
         if _remote_head(git_executable, mirror, url) != head:
@@ -161,7 +169,9 @@ def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
     try:
         advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
     except subprocess.CalledProcessError as exc:
-        raise operation.TransportError("Remote HEAD discovery failed; retry the import") from exc
+        raise operation.TransportError(
+            operation.failure_message("Remote HEAD discovery failed; retry the import", exc, url)
+        ) from exc
     target = oid = None
     for line in advertisement.splitlines():
         value, _, name = line.partition("\t")

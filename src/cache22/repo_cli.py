@@ -74,6 +74,8 @@ def output(value: Any, as_json: bool) -> None:
                         )
                     )
                 )
+                if item.get("operation_error"):
+                    typer.echo(f"{item['repo_key']}: {item['operation_error']}", err=True)
             else:
                 typer.echo(json.dumps(item, ensure_ascii=False))
     else:

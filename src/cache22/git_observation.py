@@ -57,7 +57,9 @@ def remote_snapshot(url: str) -> RefSnapshot:
             env=git_repository_environment(),
         )
     except subprocess.CalledProcessError as exc:
-        raise operation.TransportError(f"Remote check failed (Git exit {exc.returncode})") from exc
+        raise operation.TransportError(
+            operation.failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
+        ) from exc
     refs: dict[str, str] = {}
     target = head = None
     for line in result.stdout.splitlines():
