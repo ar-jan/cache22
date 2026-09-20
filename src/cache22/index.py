@@ -96,9 +96,23 @@ def repository_key(repository: RepositoryRef) -> str:
 
 
 class Index:
-    def __init__(self, path: Path | None = None, *, clock: Callable[[], float] = time.time):
+    def __init__(
+        self,
+        path: Path | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
+        read_only: bool = False,
+    ):
         self.path = path if path is not None else index_path()
         self.clock = clock
+        self.read_only = read_only
+        if read_only:
+            self.path = self.path.expanduser().resolve()
+            with self.connect() as db:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version != 1:
+                    raise ValueError(f"Unsupported repository index version: {version}")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -125,7 +139,12 @@ class Index:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        db = sqlite3.connect(
+            self.path.as_uri() + "?mode=ro" if self.read_only else self.path,
+            uri=self.read_only,
+            timeout=5,
+            isolation_level=None,
+        )
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         try:

@@ -233,6 +233,28 @@ timestamps from disk. Explicit `repo fetch SELECTOR --adopt` uses the same verif
 adoption rules as `import repo --adopt`.
 
 
+## Inspecting queue errors and status
+
+```sh
+cache22 manager errors
+cache22 manager queue --section deferred
+cache22 manager errors --db /path/to/index.sqlite3 --json
+```
+
+`manager errors` shows the latest failed or interrupted completed attempt per
+problem job, including retries. Its diagnostic stays visible while another attempt
+runs; succeeded and cancelled jobs are excluded. A separate successful job does
+not hide an older failed job. Terminal history is retained for 30 days.
+
+`manager queue` shows queue counts, worker availability, and job progress. Choose
+`--section running|runnable|deferred|history` (default: `running`).
+
+Both commands read the default index without requiring a running manager or
+access to archives. `--db PATH` selects another existing database read-only;
+missing databases are errors and are never created. Use `--json` for structured
+output and `--limit N --offset N` for pagination (default limit 100, maximum 500).
+Listing errors or unavailable workers still exits 0; inspection failures exit 1.
+
 ## Browser manager
 
 Run `cache22 manager run` and open `http://127.0.0.1:8001/`. Use `--port` to choose
