@@ -197,6 +197,36 @@ def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0
     }
 
 
+def error_snapshot(index: Index, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    """Latest completed problem per unfinished or failed job, including active retries."""
+    _page(limit, offset)
+    now = index.now()
+    with index.connect() as db:
+        db.execute("BEGIN")
+        rows = [
+            dict(row)
+            for row in db.execute(
+                """SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,
+                j.due_at,j.retry_count,a.id AS attempt_id,a.finished_at AS error_at,
+                a.outcome,a.error_category,a.error,
+                (SELECT count(*) FROM job_attempts n
+                 WHERE n.job_id=j.id AND n.id<=a.id) AS attempt_number
+                FROM jobs j JOIN repositories r ON r.id=j.repository_id
+                JOIN job_attempts a ON a.id=(SELECT max(id) FROM job_attempts
+                    WHERE job_id=j.id AND finished_at IS NOT NULL)
+                WHERE j.state IN ('pending','running','failed')
+                    AND a.outcome IN ('failed','interrupted')
+                ORDER BY a.finished_at DESC,a.id DESC LIMIT ? OFFSET ?""",
+                (limit + 1, offset),
+            )
+        ]
+    return {
+        "observed_at": now,
+        "errors": rows[:limit],
+        "next_offset": offset + limit if len(rows) > limit else None,
+    }
+
+
 def queue_snapshot(
     index: Index,
     *,
