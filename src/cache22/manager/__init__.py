@@ -29,6 +29,8 @@ SUMMARY_COLUMNS = (
     "host",
     "archive_root",
     "local_state",
+    "storage_format",
+    "archive_path",
     "remote_status",
     "local_head_committed_at",
     "last_checked_at",

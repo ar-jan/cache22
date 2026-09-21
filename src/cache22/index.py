@@ -18,6 +18,8 @@ CREATE TABLE repositories (
  id INTEGER PRIMARY KEY, repo_key TEXT NOT NULL UNIQUE,
  project_name TEXT NOT NULL, display_path TEXT NOT NULL, host TEXT NOT NULL,
  source_url TEXT NOT NULL, source_path TEXT NOT NULL, archive_root TEXT NOT NULL,
+ storage_format TEXT NOT NULL DEFAULT 'git' CHECK(storage_format IN ('git','bundle')),
+ archive_file TEXT,
  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
  local_state TEXT NOT NULL DEFAULT 'unknown'
    CHECK(local_state IN ('unknown','absent','ready','missing','incomplete')),
@@ -28,7 +30,9 @@ CREATE TABLE repositories (
  last_fetch_attempt_at INTEGER, last_fetched_at INTEGER,
  check_outcome TEXT, fetch_outcome TEXT,
  check_error_category TEXT, check_error TEXT, check_error_at INTEGER,
- fetch_error_category TEXT, fetch_error TEXT, fetch_error_at INTEGER
+ fetch_error_category TEXT, fetch_error TEXT, fetch_error_at INTEGER,
+ last_convert_attempt_at INTEGER, last_converted_at INTEGER, convert_outcome TEXT,
+ convert_error_category TEXT, convert_error TEXT, convert_error_at INTEGER
 );
 CREATE TABLE schedules (
  repository_id INTEGER PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
@@ -38,7 +42,7 @@ CREATE TABLE schedules (
 );
 CREATE TABLE jobs (
  id INTEGER PRIMARY KEY, repository_id INTEGER NOT NULL REFERENCES repositories(id),
- kind TEXT NOT NULL CHECK(kind IN ('check','fetch')),
+ kind TEXT NOT NULL CHECK(kind IN ('check','fetch','convert')),
  origin TEXT NOT NULL CHECK(origin IN ('manual','scheduled')),
  state TEXT NOT NULL DEFAULT 'pending'
    CHECK(state IN ('pending','running','succeeded','failed','cancelled')),
@@ -46,7 +50,6 @@ CREATE TABLE jobs (
  retry_count INTEGER NOT NULL DEFAULT 0, claim_token TEXT, lease_until INTEGER,
  error_category TEXT, error TEXT
 );
-CREATE UNIQUE INDEX pending_repository ON jobs(repository_id) WHERE state='pending';
 CREATE UNIQUE INDEX running_repository ON jobs(repository_id) WHERE state='running';
 CREATE INDEX runnable_jobs ON jobs(state,due_at,origin,id);
 CREATE TABLE job_attempts (
@@ -70,8 +73,9 @@ CREATE INDEX workers_heartbeat ON workers(heartbeat_at);
 CREATE INDEX schedules_due ON schedules(enabled,next_due_at);
 CREATE INDEX repository_inventory ON repositories(local_state,host,repo_key);
 CREATE VIEW inventory AS SELECT r.*,
- CAST((check_error IS NOT NULL OR fetch_error IS NOT NULL) AS INTEGER) AS has_error,
+ CAST((check_error IS NOT NULL OR fetch_error IS NOT NULL OR convert_error IS NOT NULL) AS INTEGER) AS has_error,
  archive_root || '/' || repo_key AS repository_dir,
+ archive_root || '/' || repo_key || '/' || archive_file AS archive_path,
  CASE WHEN reconciliation_required OR remote_ref_digest IS NULL THEN 'unknown'
  WHEN local_state IN ('absent','missing') THEN 'not_fetched'
  WHEN local_state != 'ready' OR local_ref_digest IS NULL THEN 'unknown'
@@ -95,6 +99,14 @@ def repository_key(repository: RepositoryRef) -> str:
     return "/".join((repository.host, *repository.namespace, repository.name))
 
 
+def _version_error(version: int) -> str:
+    return (
+        f"Unsupported repository index version: {version}; expected 2. "
+        "Stop Cache22 processes, back up and remove the old index and its WAL/SHM sidecars, "
+        "then run 'cache22 repo audit --fix'. Schedules and job history are not migrated."
+    )
+
+
 class Index:
     def __init__(
         self,
@@ -110,8 +122,8 @@ class Index:
             self.path = self.path.expanduser().resolve()
             with self.connect() as db:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version != 1:
-                    raise ValueError(f"Unsupported repository index version: {version}")
+                if version != 2:
+                    raise ValueError(_version_error(version))
             return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -129,9 +141,9 @@ class Index:
                 for statement in SCHEMA.split(";"):
                     if statement.strip():
                         db.execute(statement)
-                db.execute("PRAGMA user_version=1")
-            elif version != 1:
-                raise ValueError(f"Unsupported repository index version: {version}")
+                db.execute("PRAGMA user_version=2")
+            elif version != 2:
+                raise ValueError(_version_error(version))
             db.commit()
 
     def now(self) -> int:
@@ -186,8 +198,8 @@ class Index:
             return existing["id"]
         cursor = db.execute(
             """INSERT INTO repositories
-            (repo_key,project_name,display_path,host,source_url,source_path,archive_root,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (repo_key,project_name,display_path,host,source_url,source_path,archive_root,created_at,updated_at,archive_file)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 key,
                 repository.display_path.rsplit("/", 1)[-1],
@@ -198,6 +210,7 @@ class Index:
                 str(root),
                 self.now(),
                 self.now(),
+                repository.name + ".git",
             ),
         )
         assert cursor.lastrowid is not None
@@ -231,9 +244,6 @@ class Index:
     @staticmethod
     def _record(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
-        result["mirror_path"] = (
-            result["repository_dir"] + "/" + result["repo_key"].rsplit("/", 1)[-1] + ".git"
-        )
         for field in (
             "queued",
             "running",

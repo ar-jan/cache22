@@ -33,6 +33,13 @@ def prepare_git_import(
     """Verify and initialize under directory reservations and any existing repository lock."""
     paths = storage.paths
     owned = storage.entry(paths.lock_file.name) is not None
+    if storage.entry(paths.bundle_manifest.name) is not None:
+        if not owned or adopt:
+            raise ValueError("Bundle adoption is not supported")
+        from .git_bundle import read_bundle
+
+        read_bundle(storage, source_path)
+        return False
     try:
         storage.validate()
         storage.validate_clone_marker()

@@ -103,7 +103,16 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
             "SELECT id FROM inventory WHERE repository_dir=?", (str(paths.repository_dir),)
         ).fetchone()
     record = index.get(row["id"]) if row else None
-    if record is None and storage.entry(paths.clone_complete_marker.name) is not None:
+    if (
+        record is not None
+        and record["storage_format"] == "bundle"
+        and storage.entry(paths.bundle_manifest.name) is None
+    ):
+        raise ValueError("Selected bundle manifest is missing; preserving all archive data")
+    if record is None and (
+        storage.entry(paths.clone_complete_marker.name) is not None
+        or storage.entry(paths.bundle_manifest.name) is not None
+    ):
         source = storage.read_source()
         if source is not None:
             components = source.split("/")
@@ -115,6 +124,14 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
     if record is not None:
         index.update(record["id"], reconciliation_required=True)
     removed_paths: list[Path] = []
+    from .git_bundle import cleanup, generation_names
+
+    bundled = storage.entry(paths.bundle_manifest.name) is not None
+    if bundled or generation_names(storage) or storage.entry(paths.bundle_staging.name) is not None:
+        source = storage.read_source()
+        if source is None:
+            raise ValueError("Bundle storage has no source binding; preserving it")
+        removed_paths.extend(cleanup(storage, source))
     if storage.remove(paths.temp_dir.name):
         removed_paths.append(paths.temp_dir)
 
@@ -123,7 +140,7 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
     if mirror_exists and not marker_exists:
         storage.remove(paths.mirror_repository.name)
         removed_paths.append(paths.mirror_repository)
-    if marker_exists and not mirror_exists:
+    if marker_exists and not mirror_exists and not bundled:
         storage.remove(paths.clone_complete_marker.name)
         removed_paths.append(paths.clone_complete_marker)
 

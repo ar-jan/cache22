@@ -70,7 +70,8 @@ def output(value: Any, as_json: bool) -> None:
                             "remote_status",
                             "local_head_committed_at",
                             "last_checked_at",
-                            "mirror_path",
+                            "storage_format",
+                            "archive_path",
                         )
                     )
                 )
@@ -215,6 +216,22 @@ def fetch(
     _batch(selectors or [], all_repositories, True, adopt, timeout, as_json)
 
 
+@repo_app.command("convert")
+@command
+def convert(
+    selector: str,
+    to: str = typer.Option(..., "--to"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Queue offline conversion of a managed repository to a standalone bundle."""
+    if to != "bundle":
+        raise typer.BadParameter("Only --to bundle is supported")
+    index = Index()
+    record = index.get(selector)
+    job_id = Queue(index).enqueue(record["id"], "convert")
+    output({"repository_id": record["id"], "job_id": job_id, "status": "queued"}, as_json)
+
+
 @repo_app.command("queue")
 @command
 def enqueue(selector: str, check: bool = False) -> None:
@@ -272,6 +289,7 @@ def worker(
     continuous: bool = False,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
     if once == continuous:
@@ -290,13 +308,19 @@ def worker(
                 stop=stop,
                 check_timeout=check_timeout,
                 fetch_timeout=fetch_timeout,
+                convert_timeout=convert_timeout,
                 report=report,
                 ready=notify_ready,
             )
         return
     stop = threading.Event()
     with shutdown_signals(stop):
-        results = run_worker(check_timeout=check_timeout, fetch_timeout=fetch_timeout, stop=stop)
+        results = run_worker(
+            check_timeout=check_timeout,
+            fetch_timeout=fetch_timeout,
+            convert_timeout=convert_timeout,
+            stop=stop,
+        )
     output(results, as_json)
     if any(result["outcome"] == "failed" for result in results):
         raise typer.Exit(1)

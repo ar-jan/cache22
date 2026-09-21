@@ -118,6 +118,8 @@ class RepositoryStorage:
             (self.paths.source_file, False),
             (self.paths.git_marks, False),
             (self.paths.fossil_marks, False),
+            (self.paths.bundle_manifest, False),
+            (self.paths.bundle_staging, True),
         ):
             result = self.entry(path.name)
             if result is not None and stat.S_ISDIR(result.st_mode) != directory:
@@ -149,6 +151,8 @@ class RepositoryStorage:
         return True
 
     def has_import_state(self) -> bool:
+        from .git_bundle import generation_names
+
         return any(
             self.entry(path.name) is not None
             for path in (
@@ -156,8 +160,10 @@ class RepositoryStorage:
                 self.paths.fossil_repository,
                 self.paths.temp_dir,
                 self.paths.clone_complete_marker,
+                self.paths.bundle_manifest,
+                self.paths.bundle_staging,
             )
-        )
+        ) or bool(generation_names(self))
 
     def read_source(self) -> str | None:
         name = self.paths.source_file.name

@@ -149,9 +149,10 @@ def run(
         return _run_streaming(
             args, check=check, capture_output=capture_output, text=text, env=env, **kwargs
         )
+    input_data = kwargs.pop("input", None)
     with subprocess.Popen(
         args,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture_output else None,
         stderr=subprocess.PIPE if capture_output else None,
         text=text,
@@ -163,9 +164,10 @@ def run(
         try:
             while True:
                 try:
-                    stdout, stderr = process.communicate(timeout=0.2)
+                    stdout, stderr = process.communicate(input=input_data, timeout=0.2)
                     break
                 except subprocess.TimeoutExpired:
+                    input_data = None
                     guard()
             guard()
         except BaseException:

@@ -46,11 +46,12 @@ def run_continuous(
     stop: threading.Event | None = None,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
     report: Callable[[dict[str, Any]], None] = lambda result: None,
     ready: Callable[[], None] = lambda: None,
     once: bool = False,
 ) -> None:
-    if min(check_timeout, fetch_timeout) <= 0:
+    if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
         raise ValueError("Timeouts must be positive")
     index = index or Index()
     stop = stop or threading.Event()
@@ -99,6 +100,7 @@ def run_continuous(
                     job,
                     check_timeout=check_timeout,
                     fetch_timeout=fetch_timeout,
+                    convert_timeout=convert_timeout,
                     cancel=stop,
                 )
                 report({"job_id": job["id"], "outcome": "succeeded"})

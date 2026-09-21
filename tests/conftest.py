@@ -19,7 +19,11 @@ def mock_inventory_git(monkeypatch: pytest.MonkeyPatch) -> None:
     from cache22.archive_storage import RepositoryStorage
 
     def fields(
-        storage: RepositoryStorage | None, source_path: str, *, previously_ready: bool = False
+        storage: RepositoryStorage | None,
+        source_path: str,
+        *,
+        previously_ready: bool = False,
+        expected_format: str = "git",
     ) -> dict[str, str]:
         if storage is None:
             return {"local_state": "absent"}

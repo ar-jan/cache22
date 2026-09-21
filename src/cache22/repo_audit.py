@@ -29,15 +29,23 @@ def register_storage(index: Index, root: Path, storage: RepositoryStorage) -> di
     source = storage.read_source()
     if source is None:
         raise ValueError("Managed mirror has no source binding")
-    storage.validate_clone_marker()
-    validate_git_mirror_layout(storage.paths.mirror_repository)
-    origin = validate_git_mirror_config(
-        find_git_executable(), storage.paths.mirror_repository, source
-    )
+    origin = storage_origin(storage, source)
     ref = parse_repository_url(origin, case_sensitive=True)
     if archive_paths_for_repository(root, ref) != storage.paths:
         raise ValueError("Mirror is not at its canonical path")
     return index.add(ref, root)
+
+
+def storage_origin(storage: RepositoryStorage, source: str) -> str:
+    if storage.entry(storage.paths.bundle_manifest.name) is not None:
+        from .git_bundle import read_bundle
+
+        return read_bundle(storage, source).source_url
+    storage.validate_clone_marker()
+    validate_git_mirror_layout(storage.paths.mirror_repository)
+    return validate_git_mirror_config(
+        find_git_executable(), storage.paths.mirror_repository, source
+    )
 
 
 def _prepare_adoption(
@@ -45,6 +53,8 @@ def _prepare_adoption(
 ) -> bool:
     paths = storage.paths
     storage.validate()
+    if storage.entry(paths.bundle_manifest.name) is not None:
+        return False
     storage.validate_clone_marker()
     if storage.entry(paths.mirror_repository.name) is None:
         return False
@@ -147,11 +157,7 @@ def audit(
                         source = storage.read_source()
                         if source is None:
                             raise ValueError("Managed storage has no source binding")
-                        storage.validate_clone_marker()
-                        validate_git_mirror_layout(paths.mirror_repository)
-                        origin = validate_git_mirror_config(
-                            find_git_executable(), paths.mirror_repository, source
-                        )
+                        origin = storage_origin(storage, source)
                         ref = parse_repository_url(origin, case_sensitive=True)
                         if repository_key(ref) != key:
                             raise ValueError("Mirror is not at its canonical path")
@@ -173,6 +179,7 @@ def audit(
                         storage,
                         record["source_path"],
                         previously_ready=record["local_state"] in {"ready", "missing"},
+                        expected_format=record["storage_format"],
                     )
                     changed = (
                         any(record[k] != v for k, v in fields.items())
@@ -199,6 +206,28 @@ def audit(
                             {
                                 "path": str(paths.temp_dir),
                                 "problem": "Interrupted import staging remains",
+                                "fixed": False,
+                            }
+                        )
+                    from .git_bundle import generation_names
+
+                    generations = generation_names(storage)
+                    active = fields.get("archive_file")
+                    leftovers = [
+                        paths.repository_dir / name for name in generations if name != active
+                    ]
+                    if storage.entry(paths.bundle_staging.name) is not None:
+                        leftovers.append(paths.bundle_staging)
+                    if (
+                        fields.get("storage_format") == "bundle"
+                        and storage.entry(paths.mirror_repository.name) is not None
+                    ):
+                        leftovers.append(paths.mirror_repository)
+                    for leftover in leftovers:
+                        issues.append(
+                            {
+                                "path": str(leftover),
+                                "problem": "Bundle staging or retired storage remains; run import clean",
                                 "fixed": False,
                             }
                         )
@@ -247,6 +276,7 @@ def audit(
                     storage,
                     record["source_path"],
                     previously_ready=record["local_state"] in {"ready", "missing"},
+                    expected_format=record["storage_format"],
                 )
                 if (
                     any(record[k] != v for k, v in fields.items())
