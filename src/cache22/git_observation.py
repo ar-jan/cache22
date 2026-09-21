@@ -7,11 +7,13 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import operation
 from .archive_storage import RepositoryStorage
 from .git_config import (
+    git_local_environment,
     git_repository_command,
     git_repository_environment,
     validate_git_mirror_config,
@@ -90,7 +92,11 @@ def remote_snapshot(url: str) -> RefSnapshot:
 
 
 def local_fields(
-    storage: RepositoryStorage | None, source_path: str, *, previously_ready: bool = False
+    storage: RepositoryStorage | None,
+    source_path: str,
+    *,
+    previously_ready: bool = False,
+    expected_format: str = "git",
 ) -> dict[str, Any]:
     empty: dict[str, Any] = {
         "local_head_ref": None,
@@ -101,9 +107,20 @@ def local_fields(
     if storage is None:
         return dict(empty, local_state="missing" if previously_ready else "absent")
     paths = storage.paths
+    from .git_bundle import bundle_fields, generation_names
+
+    if storage.entry(paths.bundle_manifest.name) is not None:
+        try:
+            return bundle_fields(storage, source_path)
+        except ValueError, OSError, subprocess.SubprocessError:
+            return dict(empty, local_state="incomplete", storage_format="bundle")
+    if expected_format == "bundle":
+        return dict(empty, local_state="incomplete")
     mirror_exists = storage.entry(paths.mirror_repository.name) is not None
     marker_exists = storage.entry(paths.clone_complete_marker.name) is not None
     if not mirror_exists and not marker_exists:
+        if generation_names(storage) or storage.entry(paths.bundle_staging.name) is not None:
+            return dict(empty, local_state="incomplete")
         return dict(empty, local_state="missing" if previously_ready else "absent")
     if not mirror_exists or not marker_exists:
         return dict(empty, local_state="incomplete")
@@ -116,11 +133,21 @@ def local_fields(
     except ValueError:
         return dict(empty, local_state="incomplete")
 
+    snapshot, date, _ = mirror_snapshot(paths.mirror_repository)
+    return dict(
+        snapshot_fields(snapshot, date),
+        storage_format="git",
+        archive_file=paths.mirror_repository.name,
+    )
+
+
+def mirror_snapshot(mirror: Path) -> tuple[RefSnapshot, int | None, str]:
+    git = find_git_executable()
+
     def read(*args: str, check: bool = True) -> subprocess.CompletedProcess[Any]:
-        env = git_repository_environment()
-        env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
+        env = git_local_environment()
         return operation.run(
-            git_repository_command(git, paths.mirror_repository, *args),
+            git_repository_command(git, mirror, *args),
             check=check,
             capture_output=True,
             text=True,
@@ -141,10 +168,14 @@ def local_fields(
     oid = resolved.stdout.strip() if resolved.returncode == 0 else None
     date = int(read("show", "-s", "--format=%ct", oid, "--").stdout.strip()) if oid else None
     snapshot = RefSnapshot(refs, target, oid)
+    return snapshot, date, read("rev-parse", "--show-object-format").stdout.strip()
+
+
+def snapshot_fields(snapshot: RefSnapshot, date: int | None) -> dict[str, Any]:
     return {
         "local_state": "ready",
-        "local_head_ref": target,
-        "local_head_oid": oid,
+        "local_head_ref": snapshot.head_ref,
+        "local_head_oid": snapshot.head_oid,
         "local_head_committed_at": date,
         "local_ref_digest": snapshot.digest,
     }

@@ -49,6 +49,20 @@ def git_repository_command(git: Path, mirror: Path, *args: str) -> list[str]:
     return [str(git), "-c", "core.hooksPath=/dev/null", "--git-dir", str(mirror), *args]
 
 
+def git_local_environment() -> dict[str, str]:
+    env = git_repository_environment()
+    env.pop("GIT_CONFIG_PARAMETERS", None)
+    env.pop("GIT_CONFIG", None)
+    env.update(
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_COUNT="0",
+        GIT_NO_REPLACE_OBJECTS="1",
+        GIT_NO_LAZY_FETCH="1",
+    )
+    return env
+
+
 def validate_git_mirror_config(git: Path, mirror: Path, source_path: str | None = None) -> str:
     """Read only the local config, without includes or repository-aware commands."""
     worktree_config = mirror / "config.worktree"

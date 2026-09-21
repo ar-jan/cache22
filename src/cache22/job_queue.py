@@ -14,9 +14,12 @@ from . import operation
 from .archive_storage import RepositoryBusyError
 from .index import Index
 
-Kind = Literal["check", "fetch"]
+Kind = Literal["check", "fetch", "convert"]
 RETRIES = (60, 300, 1800, 7200)
 LEASE_SECONDS = 120
+BLOCKING_JOB_SQL = """SELECT min(prior.id) FROM jobs prior
+WHERE prior.repository_id=j.repository_id
+AND (prior.state='running' OR (prior.id<j.id AND prior.state='pending'))"""
 
 
 class Queue:
@@ -26,14 +29,25 @@ class Queue:
     def enqueue_in(
         self, db: sqlite3.Connection, repository_id: int, kind: Kind, *, origin: str = "manual"
     ) -> int:
+        if kind == "convert" and origin != "manual":
+            raise ValueError("Conversion must be explicitly requested")
         pending = db.execute(
-            "SELECT * FROM jobs WHERE repository_id=? AND state='pending'", (repository_id,)
+            "SELECT * FROM jobs WHERE repository_id=? AND state IN ('pending','running') ORDER BY id DESC LIMIT 1",
+            (repository_id,),
         ).fetchone()
-        if pending:
+        if (
+            pending
+            and pending["state"] == "pending"
+            and ((kind == "convert") == (pending["kind"] == "convert"))
+        ):
             db.execute(
                 "UPDATE jobs SET kind=?,origin=?,due_at=? WHERE id=?",
                 (
-                    "fetch" if "fetch" in (kind, pending["kind"]) else "check",
+                    "convert"
+                    if kind == "convert"
+                    else "fetch"
+                    if "fetch" in (kind, pending["kind"])
+                    else "check",
                     "manual" if "manual" in (origin, pending["origin"]) else "scheduled",
                     min(self.index.now(), pending["due_at"]),
                     pending["id"],
@@ -112,19 +126,7 @@ class Queue:
             "UPDATE job_attempts SET finished_at=?,outcome='interrupted',error_category='interrupted',error=? WHERE job_id=? AND finished_at IS NULL",
             (self.index.now(), message, row["id"]),
         )
-        # Merge any successor request into the recovered operation.
-        pending = db.execute(
-            "SELECT * FROM jobs WHERE repository_id=? AND state='pending'",
-            (row["repository_id"],),
-        ).fetchone()
         kind, origin = row["kind"], row["origin"]
-        if pending:
-            kind = "fetch" if "fetch" in (kind, pending["kind"]) else "check"
-            origin = "manual" if "manual" in (origin, pending["origin"]) else "scheduled"
-            db.execute(
-                "UPDATE jobs SET state='cancelled',finished_at=? WHERE id=?",
-                (self.index.now(), pending["id"]),
-            )
         db.execute(
             "UPDATE jobs SET state='pending',kind=?,origin=?,claim_token=NULL,lease_until=NULL,due_at=? WHERE id=?",
             (kind, origin, self.index.now(), row["id"]),
@@ -144,8 +146,8 @@ class Queue:
     def claim(self, job_id: int | None = None) -> dict[str, Any] | None:
         with self.index.transaction() as db:
             self._recover(db)
-            query = """SELECT * FROM jobs j WHERE state='pending' AND due_at<=?
-                AND NOT EXISTS(SELECT 1 FROM jobs running WHERE running.repository_id=j.repository_id AND running.state='running')"""
+            query = f"""SELECT * FROM jobs j WHERE state='pending' AND due_at<=?
+                AND ({BLOCKING_JOB_SQL}) IS NULL"""
             parameters: list[Any] = [self.index.now()]
             if job_id is not None:
                 query += " AND id=?"
@@ -274,21 +276,6 @@ class Queue:
             ).fetchone()
             if state == "pending" and job["origin"] == "scheduled" and not scheduled:
                 state = "cancelled"
-            if state == "pending":
-                pending = db.execute(
-                    "SELECT * FROM jobs WHERE repository_id=? AND state='pending'",
-                    (job["repository_id"],),
-                ).fetchone()
-                if pending:
-                    # Keep the existing request, including its manual priority.
-                    db.execute(
-                        "UPDATE jobs SET kind=? WHERE id=?",
-                        (
-                            "fetch" if "fetch" in (job["kind"], pending["kind"]) else "check",
-                            pending["id"],
-                        ),
-                    )
-                    state = "failed"
             db.execute(
                 """UPDATE jobs SET state=?,due_at=?,retry_count=?,finished_at=?,claim_token=NULL,
                 lease_until=NULL,error_category=?,error=? WHERE id=?""",
@@ -306,6 +293,8 @@ class Queue:
                 "UPDATE job_attempts SET finished_at=?,outcome=?,error_category=?,error=? WHERE job_id=? AND finished_at IS NULL",
                 (now, "succeeded" if error is None else "failed", category, error, job["id"]),
             )
+            if job["kind"] == "convert":
+                return
             if category == "structural":
                 db.execute(
                     "UPDATE schedules SET blocked=1 WHERE repository_id=?", (job["repository_id"],)
@@ -335,7 +324,8 @@ class Queue:
         with self.index.transaction() as db:
             self._recover(db)
             if db.execute(
-                "SELECT 1 FROM jobs WHERE repository_id=? AND state='running'", (repository_id,)
+                "SELECT 1 FROM jobs WHERE repository_id=? AND (state='running' OR (kind='convert' AND state='pending'))",
+                (repository_id,),
             ).fetchone():
                 raise RepositoryBusyError("Repository is busy")
             db.execute(

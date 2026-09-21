@@ -83,7 +83,10 @@ def ensure_git_mirror(
 
 
 def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) -> None:
-    mirror = paths.mirror_repository
+    fetch_git_repository(git_executable=git_executable, url=url, mirror=paths.mirror_repository)
+
+
+def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> None:
     validate_git_mirror_layout(mirror)
     validate_git_mirror_config(
         git_executable, mirror, parse_repository_url(url, case_sensitive=True).source_path

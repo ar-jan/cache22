@@ -26,6 +26,57 @@ Symlinks, redirected storage, and shallow or partial-clone state are rejected
 without modifying the mirror. These checks inspect filesystem entries; full Git
 object verification runs only during explicit adoption.
 
+### Standalone Git bundles
+
+Mirrors remain the default. To store an existing managed repository as a single
+self-contained Git bundle, queue an offline conversion:
+
+```sh
+cache22 repo convert github.com/ar-jan/cache22 --to bundle
+cache22 worker run --once
+```
+
+The command returns a job ID; it does not wait for conversion. The browser manager
+also offers **Convert to bundle** on repository and bulk actions. Conversion runs
+after earlier work for that repository, so it can follow an initial queued fetch.
+An already bundled repository is verified without rewriting its bundle.
+
+After conversion, `repo check`, `repo fetch`, direct imports, and scheduled updates
+continue to work. Checks compare bundle refs and saved HEAD metadata with the
+remote without restoring objects. Fetches restore temporary bare Git storage,
+fetch incrementally, and publish a newly verified standalone bundle. Network
+transfers are incremental, but local storage is restored and the bundle rewritten.
+Allow space for the old bundle, working repository, replacement, and independent
+verification copy. No persistent mirror remains after successful cleanup.
+
+Inventory reports `storage_format` and `archive_path`. The container retains
+`.lock`, `source.json`, `bundle.json`, and one `project.<uuid>.bundle` generation.
+The manifest preserves the original source URL, exact HEAD state, and commit date.
+Keep it with the bundle: cloning a bundle alone cannot reliably recover the
+original symbolic HEAD target. For manual restoration, clone the selected bundle
+with `git clone --mirror FILE DEST`, set origin to the manifest's `source_url`,
+then set HEAD with `git symbolic-ref HEAD REF` or
+`git update-ref --no-deref HEAD OID` for a detached HEAD.
+
+Publication is atomic. A failed fetch or verification preserves the selected
+archive. Interrupted cleanup may leave retired generations, a retained mirror,
+or `.cache22-bundle` staging; `import clean repo URL` cleans recognized state and
+verifies the selected bundle before retiring old archives. `repo audit --fix`
+rebuilds bundle inventory offline. Invalid active metadata preserves data for
+inspection; restore a missing manifest rather than attempting adoption.
+
+Empty mirrors cannot be converted. If an update becomes empty, it fails while
+preserving the previous bundle. Only history reachable from current refs and HEAD
+is retained; removed or force-pushed history can disappear on the next rewrite.
+Conversion back to a mirror and external bundle adoption are not supported.
+An implicit Fossil default does not change a bundled repository's representation;
+explicit Fossil operations on it are rejected. Existing Fossil sidecars are preserved.
+
+Conversion has its own diagnostics and does not advance fetch/check timestamps
+or change the update schedule. The worker's `--convert-timeout` defaults to 7200
+seconds. Queue and progress views show conversion alongside checks and fetches.
+Synchronous operations report busy rather than overtake pending conversion.
+
 ### Adopting an existing mirror
 
 If a mirror already exists at the expected path, for example
@@ -268,9 +319,9 @@ Full index data can be inspected through Datasette; generic writes are disabled.
 Only Cache22's forms/API perform mutations through shared services. Keep the
 inventory ID column visible for live row updates and selection.
 
-The manager replaces the earlier greenfield index schema without a version bump.
-Before using an older index, stop all Cache22 processes and discard that index
+The index uses schema version 2; older versions are rejected without migration.
+Before using an older index, stop all Cache22 processes, back it up, and discard that index
 and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
 This discards schedules, queued work, registrations, and history, but never archive
-files. `cache22 repo audit --fix` can rediscover managed mirrors. There is no
+files. `cache22 repo audit --fix` can rediscover managed mirrors and bundles. There is no
 migration and no automatic reset during normal startup.

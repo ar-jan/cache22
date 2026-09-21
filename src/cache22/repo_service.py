@@ -53,6 +53,7 @@ def publish_local(index: Index, record: dict[str, Any], storage: RepositoryStora
         storage,
         record["source_path"],
         previously_ready=record["local_state"] in {"ready", "missing"},
+        expected_format=record["storage_format"],
     )
     index.update(
         record["id"], **fields, local_observed_at=index.now(), reconciliation_required=False
@@ -115,7 +116,7 @@ def check_locked(index: Index, record: dict[str, Any]) -> None:
         publish_local(index, record, storage)
         if index.get(record["id"])["local_state"] == "incomplete":
             raise ValueError(
-                "Mirror is incomplete; explicit cleanup or verified adoption is required"
+                "Archive is incomplete; explicit cleanup or verified adoption is required"
             )
         publish_remote(index, record)
 
@@ -126,8 +127,10 @@ def execute_job(
     *,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
     adopt: bool = False,
     archive_type: str = "git",
+    archive_type_explicit: bool = True,
     source_url: str | None = None,
     cancel: threading.Event | None = None,
 ) -> Any:
@@ -136,11 +139,22 @@ def execute_job(
     kind = job["kind"]
     result: Any = None
     try:
-        with queue.running(job, check_timeout if kind == "check" else fetch_timeout, cancel):
+        timeout = {"check": check_timeout, "fetch": fetch_timeout, "convert": convert_timeout}[kind]
+        with queue.running(job, timeout, cancel):
             operation.progress("validation")
             index.update(record["id"], **{f"last_{kind}_attempt_at": index.now()})
             if kind == "check":
                 check_locked(index, record)
+            elif kind == "convert":
+                result = convert_locked(index, record)
+                index.update(
+                    record["id"],
+                    last_converted_at=index.now(),
+                    convert_outcome="succeeded",
+                    convert_error=None,
+                    convert_error_category=None,
+                    convert_error_at=None,
+                )
             else:
                 from .config import normalize_archive_type
                 from .import_service import _import_repository
@@ -155,6 +169,7 @@ def execute_job(
                     adopt=adopt,
                     index=index,
                     record=record,
+                    archive_type_explicit=archive_type_explicit,
                 )
     except operation.OperationInterrupted, KeyboardInterrupt:
         queue.interrupt(job)
@@ -188,6 +203,7 @@ def run_worker(
     index: Index | None = None,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
     stop: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     from .worker import run_continuous
@@ -198,7 +214,29 @@ def run_worker(
         stop=stop,
         check_timeout=check_timeout,
         fetch_timeout=fetch_timeout,
+        convert_timeout=convert_timeout,
         report=outcomes.append,
         once=True,
     )
     return outcomes
+
+
+def convert_locked(index: Index, record: dict[str, Any]) -> Path:
+    from .git_bundle import materialize
+
+    root = Path(record["archive_root"])
+    ref = parse_repository_url(record["source_url"], case_sensitive=True)
+    paths = archive_paths_for_repository(root, ref)
+    with repository_operation(root, paths) as storage:
+        if storage is None:
+            raise ValueError("Conversion requires an existing Cache22-managed repository")
+        if (
+            record["storage_format"] == "bundle"
+            and storage.entry(paths.bundle_manifest.name) is None
+        ):
+            raise ValueError("Selected bundle manifest is missing; restore it before conversion")
+        index.update(record["id"], reconciliation_required=True)
+        result = materialize(
+            storage, record["source_path"], publish=lambda: publish_local(index, record, storage)
+        )
+        return result

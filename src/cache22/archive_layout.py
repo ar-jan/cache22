@@ -26,6 +26,8 @@ class ArchivePaths:
     temp_git_marks: Path
     temp_fossil_marks: Path
     clone_complete_marker: Path
+    bundle_manifest: Path
+    bundle_staging: Path
 
 
 def archive_paths_for_repository(archive_dir: Path, repository: RepositoryRef) -> ArchivePaths:
@@ -52,4 +54,6 @@ def archive_paths_for_directory(repository_dir: Path) -> ArchivePaths:
         temp_git_marks=temp_dir / GIT_MARKS_FILE_NAME,
         temp_fossil_marks=temp_dir / FOSSIL_MARKS_FILE_NAME,
         clone_complete_marker=repository_dir / CLONE_COMPLETE_MARKER_NAME,
+        bundle_manifest=repository_dir / "bundle.json",
+        bundle_staging=repository_dir / ".cache22-bundle",
     )

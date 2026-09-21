@@ -71,6 +71,7 @@ def import_repository(
         fetch_timeout=timeout,
         adopt=adopt,
         archive_type=kind,
+        archive_type_explicit=archive_type is not None,
         source_url=repository.clone_url,
     )
 
@@ -86,6 +87,7 @@ def _import_repository(
     adopt: bool = False,
     index: Index,
     record: dict[str, Any],
+    archive_type_explicit: bool = True,
 ) -> ImportResult:
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
@@ -98,6 +100,11 @@ def _import_repository(
 
     def prepare(storage: RepositoryStorage) -> None:
         nonlocal adopted
+        if (
+            record["storage_format"] == "bundle"
+            and storage.entry(paths.bundle_manifest.name) is None
+        ):
+            raise ValueError("Selected bundle manifest is missing; refusing to create a mirror")
         adopted = prepare_git_import(
             storage,
             archive_dir=resolved_archive_dir,
@@ -108,12 +115,23 @@ def _import_repository(
     with repository_operation(
         resolved_archive_dir,
         paths,
-        create=True,
+        create=record["storage_format"] != "bundle",
         prepare=prepare if resolved_archive_type == "git" else None,
     ) as storage:
-        assert storage is not None
+        if storage is None:
+            raise ValueError("Selected bundle storage is missing; restore it before fetching")
         operation.guard()
-        storage.validate_clone_marker()
+        bundled = storage.entry(paths.bundle_manifest.name) is not None
+        if record["storage_format"] == "bundle" and not bundled:
+            raise ValueError("Selected bundle manifest is missing; refusing to create a mirror")
+        if bundled:
+            if adopt:
+                raise ValueError("Bundle adoption is not supported")
+            if archive_type_explicit and resolved_archive_type == "fossil":
+                raise ValueError("Fossil operations are not supported on bundled repositories")
+            resolved_archive_type = "git"
+        if not bundled:
+            storage.validate_clone_marker()
         storage.bind_source(repository.source_path)
         index.update(
             record["id"], source_path=repository.source_path, source_url=repository.clone_url
@@ -121,9 +139,21 @@ def _import_repository(
         record = index.get(record["id"])
         fetched = resolved_archive_type == "git" or not paths.clone_complete_marker.exists()
         try:
-            result = _import_locked_repository(
-                repository.clone_url, paths, resolved_archive_type, storage
-            )
+            if bundled:
+                from .git_bundle import materialize
+
+                result = ImportResult(
+                    materialize(
+                        storage,
+                        repository.source_path,
+                        update_url=repository.clone_url,
+                        publish=lambda: publish_local(index, record, storage),
+                    )
+                )
+            else:
+                result = _import_locked_repository(
+                    repository.clone_url, paths, resolved_archive_type, storage
+                )
             publish_local(index, record, storage)
             if resolved_archive_type == "git" and index.get(record["id"])["local_state"] != "ready":
                 raise ValueError("Imported mirror could not be validated for the inventory")

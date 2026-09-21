@@ -11,7 +11,7 @@ from typing import Any
 
 from .config import default_archive_dir, normalize_archive_dir
 from .index import Index, repository_key
-from .job_queue import Queue
+from .job_queue import BLOCKING_JOB_SQL, Queue
 from .operation import sanitize
 from .repository_ref import RepositoryRef, parse_repository_url
 
@@ -125,7 +125,7 @@ def bulk_command(
 ) -> list[dict[str, Any]]:
     if not ids or len(ids) > MAX_BATCH or any(type(i) is not int or i <= 0 for i in ids):
         raise ValueError(f"Provide between 1 and {MAX_BATCH} positive repository IDs")
-    if action not in {"check", "fetch", "unqueue", "schedule", "disable"}:
+    if action not in {"check", "fetch", "convert", "unqueue", "schedule", "disable"}:
         raise ValueError("Unknown repository action")
     interval = duration(every or "") if action == "schedule" else None
     results = []
@@ -134,9 +134,10 @@ def bulk_command(
         result: dict[str, Any] = {"repository_id": repository_id, "job_id": None}
         try:
             index.get(repository_id)
-            if action in {"check", "fetch"}:
+            if action in {"check", "fetch", "convert"}:
                 result["job_id"] = queue.enqueue(
-                    repository_id, "check" if action == "check" else "fetch"
+                    repository_id,
+                    "convert" if action == "convert" else "check" if action == "check" else "fetch",
                 )
             elif action == "unqueue":
                 queue.unqueue(repository_id)
@@ -238,8 +239,8 @@ def queue_snapshot(
     now = index.now()
     predicates = {
         "running": "j.state='running'",
-        "runnable": "j.state='pending' AND j.due_at<=:now AND NOT EXISTS(SELECT 1 FROM jobs active WHERE active.repository_id=j.repository_id AND active.state='running')",
-        "deferred": "j.state='pending' AND (j.due_at>:now OR EXISTS(SELECT 1 FROM jobs active WHERE active.repository_id=j.repository_id AND active.state='running'))",
+        "runnable": f"j.state='pending' AND j.due_at<=:now AND ({BLOCKING_JOB_SQL}) IS NULL",
+        "deferred": f"j.state='pending' AND (j.due_at>:now OR ({BLOCKING_JOB_SQL}) IS NOT NULL)",
         "history": "j.state IN ('succeeded','failed','cancelled')",
     }
     if section not in predicates:
@@ -256,7 +257,9 @@ def queue_snapshot(
             dict(row)
             for row in db.execute(
                 f"""SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,j.due_at,
-            j.finished_at,j.retry_count,j.error_category,j.error,a.id AS attempt_id,a.started_at,
+            j.finished_at,j.retry_count,j.error_category,j.error,
+            CASE WHEN j.state='pending' THEN ({BLOCKING_JOB_SQL}) END AS blocking_job_id,
+            a.id AS attempt_id,a.started_at,
             a.finished_at AS attempt_finished_at,a.outcome,
             (SELECT count(*) FROM job_attempts n WHERE n.job_id=j.id) AS attempt_number,
             CASE WHEN j.state='running' AND j.lease_until>:now THEN 1 ELSE 0 END AS live,

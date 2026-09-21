@@ -95,6 +95,20 @@ def test_browser_selection_refresh_registration_and_queue(
                     "document.querySelector('#c22-jobs').textContent.includes('repo1')"
                 )
                 assert "No available worker" in page.locator("#c22-workers").inner_text()
+                repository_id = index.get("example.org/team/repo1")["id"]
+                page.goto(base + f"/-/cache22/repository/{repository_id}")
+                page.locator("#c22-actions select").select_option("convert")
+                page.locator("#c22-actions button").click()
+                page.wait_for_function(
+                    "document.querySelector('#c22-results').textContent.includes('accepted')"
+                )
+                assert Queue(index).list(repository_id)[0]["kind"] == "convert"
+                page.goto(base + "/-/cache22/queue")
+                page.locator("#c22-section").select_option("deferred")
+                page.wait_for_function(
+                    "document.querySelector('#c22-jobs').textContent.includes('convert')"
+                )
+                assert "Waiting for job" in page.locator("#c22-jobs").inner_text()
                 page.goto(base + "/-/cache22/add")
                 page.locator("#c22-urls").fill(
                     "https://example.org/team/new\ninvalid\nhttps://example.org/team/new"

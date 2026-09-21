@@ -81,7 +81,7 @@ def test_inventory_dates_and_persistent_unfetched_changes(repository: Repository
     assert record["remote_status"] == "not_fetched"
     assert record["remote_head_oid"] == first
     assert record["local_head_committed_at"] is None
-    assert not Path(record["mirror_path"]).exists()
+    assert not Path(record["archive_path"]).exists()
     assert not any("remote" in key and ("date" in key or "committed" in key) for key in record)
     record = r.fetch()
     assert record["remote_status"] == "current"
@@ -351,7 +351,7 @@ def test_publication_failure_requires_reconciliation(
     record = r.index.get(r.id)
     assert record["reconciliation_required"]
     assert record["last_fetched_at"] is None
-    assert Path(record["mirror_path"]).exists()
+    assert Path(record["archive_path"]).exists()
     monkeypatch.setattr(r.index, "update", update)
     assert all(issue["fixed"] for issue in audit(index=r.index, fix=True))
     assert not r.index.get(r.id)["reconciliation_required"]
@@ -406,7 +406,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
 
     config.config_file().write_text(f'archive_dirs = ["{other_root}"]\n')
     result = import_repository(URL, archive_type="git", index=r.index)
-    assert result.archive_path == Path(r.index.get(r.id)["mirror_path"])
+    assert result.archive_path == Path(r.index.get(r.id)["archive_path"])
 
 
 def test_default_branch_rename_and_cleanup_refresh_inventory(repository: Repository) -> None:
