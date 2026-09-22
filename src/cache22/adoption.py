@@ -89,20 +89,12 @@ def _conflict_message(repository_dir: Path) -> str:
 
 def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
     paths = storage.paths
-    bound = storage.check_source(source_path, allow_unbound=True) is not None
-    managed = storage.entry(paths.lock_file.name) is not None and bound
-    if not managed:
-        for path in (paths.fossil_repository, paths.git_marks, paths.fossil_marks):
-            if storage.entry(path.name) is not None:
-                raise ValueError(f"Git adoption cannot verify Fossil artifacts: {path}")
+    storage.check_source(source_path, allow_unbound=True)
     allowed = {
         paths.mirror_repository.name,
         paths.lock_file.name,
         paths.source_file.name,
         paths.clone_complete_marker.name,
-        paths.fossil_repository.name,
-        paths.git_marks.name,
-        paths.fossil_marks.name,
     }
     unexpected = set(os.listdir(storage.directory_fd)) - allowed
     if unexpected:

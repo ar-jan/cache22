@@ -21,16 +21,14 @@ from .import_service import ImportResult, import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .manager_cli import manager_app
 from .repo_cli import repo_app, worker_app
-from .system_tools import get_fossil_status
 
 app = typer.Typer(
-    help="Archive Git repositories as Git mirrors or Fossil repositories.",
+    help="Archive Git repositories as Git mirrors or bundles.",
     no_args_is_help=True,
 )
 config_app = typer.Typer(help="Manage cache22 configuration.", no_args_is_help=True)
 archive_app = typer.Typer(help="Manage archive directories.", no_args_is_help=True)
 archive_type_app = typer.Typer(help="Manage the default archival format.", no_args_is_help=True)
-status_app = typer.Typer(help="Inspect external tool availability.", no_args_is_help=True)
 import_app = typer.Typer(help="Import repositories into the archive.", no_args_is_help=True)
 import_clean_app = typer.Typer(help="Clean partial import state.", no_args_is_help=True)
 
@@ -40,7 +38,6 @@ app.add_typer(manager_app, name="manager")
 app.add_typer(config_app, name="config")
 config_app.add_typer(archive_app, name="archive")
 config_app.add_typer(archive_type_app, name="archive-type")
-app.add_typer(status_app, name="status")
 app.add_typer(import_app, name="import")
 import_app.add_typer(import_clean_app, name="clean")
 
@@ -88,17 +85,9 @@ def config_archive_type_set(archive_type: str) -> None:
     typer.echo(f"Default archive type: {configured_archive_type}")
 
 
-@status_app.command("fossil")
-@_user_command
-def status_fossil() -> None:
-    status = get_fossil_status()
-    typer.echo(f"path: {status.executable}")
-    typer.echo(f"version: {status.version}")
-
-
 @import_app.command(
     "repo",
-    help="Import or update a Git mirror, or create a Fossil archive.",
+    help="Import or update an archived Git repository.",
 )
 @_user_command
 def import_repo(

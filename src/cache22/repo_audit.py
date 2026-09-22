@@ -201,14 +201,6 @@ def audit(
                                 "fixed": fix,
                             }
                         )
-                    if storage.entry(paths.temp_dir.name) is not None:
-                        issues.append(
-                            {
-                                "path": str(paths.temp_dir),
-                                "problem": "Interrupted import staging remains",
-                                "fixed": False,
-                            }
-                        )
                     from .git_bundle import generation_names
 
                     generations = generation_names(storage)

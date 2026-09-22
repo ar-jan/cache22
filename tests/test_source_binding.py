@@ -11,7 +11,6 @@ from typer.testing import CliRunner
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.archive_storage import repository_operation
 from cache22.cli import app
-from cache22.config import ArchiveType
 from cache22.import_service import ImportResult, import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.repository_ref import parse_repository_url
@@ -90,10 +89,7 @@ def test_ipv6_clone_url_and_archive_reuse(
 
 
 @pytest.mark.parametrize("first_override", [False, True])
-@pytest.mark.parametrize("archive_type", ["git", "fossil"])
-def test_source_conflicts_before_archive_reuse(
-    tmp_path: Path, first_override: bool, archive_type: ArchiveType
-) -> None:
+def test_source_conflicts_before_archive_reuse(tmp_path: Path, first_override: bool) -> None:
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=clone) as run,
@@ -104,26 +100,20 @@ def test_source_conflicts_before_archive_reuse(
             == parse_repository_url(URL, case_sensitive=first_override).clone_url
         )
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
-    if archive_type == "fossil":
-        paths.fossil_repository.write_text("completed fossil")
     before = paths.source_file.read_bytes()
     with (
         patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="stored .*requested"),
     ):
-        import_repository(URL, tmp_path, archive_type, case_sensitive=not first_override)
+        import_repository(URL, tmp_path, "git", case_sensitive=not first_override)
     path = "Team/Repo" if first_override else "team/repo"
     with (
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
-        reused = import_repository(
-            f"User@host:/{path}", tmp_path, archive_type, case_sensitive=True
-        )
-    assert fetch.call_count == int(archive_type == "git")
-    assert reused.archive_path == (
-        paths.fossil_repository if archive_type == "fossil" else result.archive_path
-    )
+        reused = import_repository(f"User@host:/{path}", tmp_path, "git", case_sensitive=True)
+    fetch.assert_called_once()
+    assert reused.archive_path == result.archive_path
     assert paths.source_file.read_bytes() == before
 
 
@@ -132,7 +122,6 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
 
     def failed(args: list[str], *, check: bool, observe_progress: bool = False) -> None:
         Path(args[-1]).mkdir()
-        paths.git_marks.write_text("orphan")
         raise subprocess.CalledProcessError(1, args)
 
     with (
@@ -142,12 +131,10 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
     ):
         import_repository(URL, tmp_path, "git", case_sensitive=True)
     assert not paths.source_file.exists()
-    assert not paths.git_marks.exists()
     inode = paths.lock_file.stat().st_ino
     with repository_operation(tmp_path, paths) as storage:
         assert storage is not None
         storage.bind_source("host/Team/Repo")
-        paths.temp_dir.mkdir()
         paths.mirror_repository.mkdir()
     clean_repository_import_state(URL, (tmp_path,))
     assert not paths.source_file.exists()
@@ -194,7 +181,7 @@ def test_unbound_archive_is_rejected_and_metadata_only_can_rebind(tmp_path: Path
 @pytest.mark.parametrize("marker", [None, "", "unrelated\n", "symlink"])
 def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: str | None) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
-    paths.temp_dir.mkdir(parents=True)
+    paths.mirror_repository.mkdir(parents=True)
     if marker == "symlink":
         paths.lock_file.symlink_to(tmp_path / "missing")
     elif marker is not None:
@@ -203,11 +190,11 @@ def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: st
         (tmp_path / name).mkdir()
     valid = archive_paths_for_repository(tmp_path, parse_repository_url("https://host/team/zvalid"))
     with repository_operation(tmp_path, valid, create=True):
-        valid.temp_dir.mkdir()
+        valid.mirror_repository.mkdir()
     before = sorted(p.name for p in paths.repository_dir.iterdir())
-    assert clean_all_import_state((tmp_path,)) == (valid.temp_dir,)
+    assert clean_all_import_state((tmp_path,)) == (valid.mirror_repository,)
     assert sorted(p.name for p in paths.repository_dir.iterdir()) == before
-    assert paths.temp_dir.is_dir()
+    assert paths.mirror_repository.is_dir()
 
 
 def test_cli_passes_case_sensitive_option(tmp_path: Path) -> None:
@@ -218,10 +205,11 @@ def test_cli_passes_case_sensitive_option(tmp_path: Path) -> None:
 
 def test_import_does_not_claim_nonempty_unowned_storage(tmp_path: Path) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
-    paths.temp_dir.mkdir(parents=True)
+    unrelated = paths.repository_dir / "unrelated"
+    unrelated.mkdir(parents=True)
     with pytest.raises(ValueError, match="nonempty"):
         import_repository(URL, tmp_path, "git")
-    assert list(paths.repository_dir.iterdir()) == [paths.temp_dir]
+    assert list(paths.repository_dir.iterdir()) == [unrelated]
 
 
 def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:

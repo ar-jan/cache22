@@ -130,7 +130,6 @@ def execute_job(
     convert_timeout: float = 7200,
     adopt: bool = False,
     archive_type: str = "git",
-    archive_type_explicit: bool = True,
     source_url: str | None = None,
     cancel: threading.Event | None = None,
 ) -> Any:
@@ -169,7 +168,6 @@ def execute_job(
                     adopt=adopt,
                     index=index,
                     record=record,
-                    archive_type_explicit=archive_type_explicit,
                 )
     except operation.OperationInterrupted, KeyboardInterrupt:
         queue.interrupt(job)

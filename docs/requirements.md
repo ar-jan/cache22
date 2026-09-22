@@ -14,13 +14,7 @@ So: avoid standard Git repositories.
 
 Options:
 - Git bundle
-- Fossil SCM
 - Compressed archive
-
-Fossil SCM looks promising:
-- `fossil import --git`
-- `fossil git export`
-- `--incremental` import option
 
 ## Features
 

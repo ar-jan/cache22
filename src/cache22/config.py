@@ -12,9 +12,9 @@ from typing import Any, Literal, cast
 
 import tomli_w
 
-ArchiveType = Literal["git", "fossil"]
+ArchiveType = Literal["git"]
 DEFAULT_ARCHIVE_TYPE: ArchiveType = "git"
-SUPPORTED_ARCHIVE_TYPES = frozenset({"git", "fossil"})
+SUPPORTED_ARCHIVE_TYPES = frozenset({"git"})
 
 
 class ConfigError(ValueError):
