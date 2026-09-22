@@ -101,8 +101,18 @@ class Queue:
                 "DELETE FROM workers WHERE COALESCE(stopped_at,heartbeat_at)<?",
                 (self.index.now() - 30 * 86400,),
             )
+            # Keep the evidence for each last-success timestamp beyond history expiry.
             db.execute(
-                "DELETE FROM jobs WHERE state IN ('succeeded','failed','cancelled') AND finished_at<?",
+                """WITH latest_success AS (
+                    SELECT a.job_id,row_number() OVER (
+                        PARTITION BY j.repository_id,a.kind
+                        ORDER BY a.finished_at DESC,a.id DESC
+                    ) AS position
+                    FROM job_attempts a JOIN jobs j ON j.id=a.job_id
+                    WHERE a.outcome='succeeded'
+                )
+                DELETE FROM jobs WHERE state IN ('succeeded','failed','cancelled') AND finished_at<?
+                AND id NOT IN (SELECT job_id FROM latest_success WHERE position=1)""",
                 (self.index.now() - 30 * 86400,),
             )
 
@@ -163,8 +173,8 @@ class Queue:
                 (token, self.index.now() + LEASE_SECONDS, row["id"]),
             )
             attempt = db.execute(
-                "INSERT INTO job_attempts(job_id,started_at) VALUES(?,?)",
-                (row["id"], self.index.now()),
+                "INSERT INTO job_attempts(job_id,kind,started_at) VALUES(?,?,?)",
+                (row["id"], row["kind"], self.index.now()),
             )
             return dict(row, state="running", claim_token=token, attempt_id=attempt.lastrowid)
 
@@ -346,8 +356,8 @@ class Queue:
             )
             job = dict(db.execute("SELECT * FROM jobs WHERE id=?", (cursor.lastrowid,)).fetchone())
             attempt = db.execute(
-                "INSERT INTO job_attempts(job_id,started_at) VALUES(?,?)",
-                (job["id"], self.index.now()),
+                "INSERT INTO job_attempts(job_id,kind,started_at) VALUES(?,?,?)",
+                (job["id"], job["kind"], self.index.now()),
             )
             job["attempt_id"] = attempt.lastrowid
             return job

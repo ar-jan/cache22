@@ -13,6 +13,8 @@ from typing import Any
 from .operation import current_operation
 from .repository_ref import RepositoryRef, is_repository_url, parse_repository_url
 
+SCHEMA_VERSION = 3
+
 SCHEMA = """
 CREATE TABLE repositories (
  id INTEGER PRIMARY KEY, repo_key TEXT NOT NULL UNIQUE,
@@ -25,14 +27,7 @@ CREATE TABLE repositories (
    CHECK(local_state IN ('unknown','absent','ready','missing','incomplete')),
  local_observed_at INTEGER, reconciliation_required INTEGER NOT NULL DEFAULT 0,
  local_head_ref TEXT, local_head_oid TEXT, local_head_committed_at INTEGER,
- local_ref_digest TEXT, remote_head_ref TEXT, remote_head_oid TEXT, remote_ref_digest TEXT,
- last_check_attempt_at INTEGER, last_checked_at INTEGER,
- last_fetch_attempt_at INTEGER, last_fetched_at INTEGER,
- check_outcome TEXT, fetch_outcome TEXT,
- check_error_category TEXT, check_error TEXT, check_error_at INTEGER,
- fetch_error_category TEXT, fetch_error TEXT, fetch_error_at INTEGER,
- last_convert_attempt_at INTEGER, last_converted_at INTEGER, convert_outcome TEXT,
- convert_error_category TEXT, convert_error TEXT, convert_error_at INTEGER
+ local_ref_digest TEXT, remote_head_ref TEXT, remote_head_oid TEXT, remote_ref_digest TEXT
 );
 CREATE TABLE schedules (
  repository_id INTEGER PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
@@ -54,10 +49,12 @@ CREATE UNIQUE INDEX running_repository ON jobs(repository_id) WHERE state='runni
 CREATE INDEX runnable_jobs ON jobs(state,due_at,origin,id);
 CREATE TABLE job_attempts (
  id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK(kind IN ('check','fetch','convert')),
  started_at INTEGER NOT NULL, finished_at INTEGER, outcome TEXT,
  error_category TEXT, error TEXT
 );
 CREATE INDEX attempts_job ON job_attempts(job_id,id);
+CREATE INDEX attempts_success ON job_attempts(job_id,kind,finished_at) WHERE outcome='succeeded';
 CREATE INDEX jobs_history ON jobs(finished_at,id);
 CREATE INDEX jobs_repository_history ON jobs(repository_id,id);
 CREATE TABLE attempt_progress (
@@ -72,8 +69,21 @@ CREATE TABLE workers (
 CREATE INDEX workers_heartbeat ON workers(heartbeat_at);
 CREATE INDEX schedules_due ON schedules(enabled,next_due_at);
 CREATE INDEX repository_inventory ON repositories(local_state,host,repo_key);
+CREATE VIEW job_errors AS
+ SELECT j.id AS job_id,j.repository_id,a.kind,j.origin,j.state,j.due_at,j.retry_count,
+ a.id AS attempt_id,a.finished_at AS error_at,a.outcome,a.error_category,a.error
+ FROM jobs j JOIN job_attempts a ON a.id=(
+   SELECT max(id) FROM job_attempts WHERE job_id=j.id AND finished_at IS NOT NULL)
+ WHERE j.state IN ('pending','running','failed') AND a.outcome IN ('failed','interrupted');
 CREATE VIEW inventory AS SELECT r.*,
- CAST((check_error IS NOT NULL OR fetch_error IS NOT NULL OR convert_error IS NOT NULL) AS INTEGER) AS has_error,
+ (SELECT max(a.finished_at) FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+  WHERE j.repository_id=r.id AND a.kind='check' AND a.outcome='succeeded') AS last_checked_at,
+ (SELECT max(a.finished_at) FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+  WHERE j.repository_id=r.id AND a.kind='fetch' AND a.outcome='succeeded') AS last_fetched_at,
+ (SELECT max(a.finished_at) FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+  WHERE j.repository_id=r.id AND a.kind='convert' AND a.outcome='succeeded') AS last_converted_at,
+ e.error AS last_error,e.kind AS last_error_kind,e.error_category AS last_error_category,
+ e.finished_at AS last_error_at,CAST(e.id IS NOT NULL AS INTEGER) AS has_error,
  archive_root || '/' || repo_key AS repository_dir,
  archive_root || '/' || repo_key || '/' || archive_file AS archive_path,
  CASE WHEN reconciliation_required OR remote_ref_digest IS NULL THEN 'unknown'
@@ -84,7 +94,9 @@ CREATE VIEW inventory AS SELECT r.*,
  CAST(EXISTS(SELECT 1 FROM jobs j WHERE j.repository_id=r.id AND j.state='running') AS INTEGER) AS running,
  CAST(COALESCE(s.enabled,0) AS INTEGER) AS scheduled,
  CAST(COALESCE(s.blocked,0) AS INTEGER) AS schedule_blocked, s.interval_seconds, s.next_due_at
- FROM repositories r LEFT JOIN schedules s ON s.repository_id=r.id;
+ FROM repositories r LEFT JOIN schedules s ON s.repository_id=r.id
+ LEFT JOIN job_attempts e ON e.id=(SELECT attempt_id FROM job_errors
+   WHERE repository_id=r.id ORDER BY error_at DESC,attempt_id DESC LIMIT 1);
 """
 
 
@@ -101,7 +113,7 @@ def repository_key(repository: RepositoryRef) -> str:
 
 def _version_error(version: int) -> str:
     return (
-        f"Unsupported repository index version: {version}; expected 2. "
+        f"Unsupported repository index version: {version}; expected {SCHEMA_VERSION}. "
         "Stop Cache22 processes, back up and remove the old index and its WAL/SHM sidecars, "
         "then run 'cache22 repo audit --fix'. Schedules and job history are not migrated."
     )
@@ -122,7 +134,7 @@ class Index:
             self.path = self.path.expanduser().resolve()
             with self.connect() as db:
                 version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version != 2:
+                if version != SCHEMA_VERSION:
                     raise ValueError(_version_error(version))
             return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -141,8 +153,8 @@ class Index:
                 for statement in SCHEMA.split(";"):
                     if statement.strip():
                         db.execute(statement)
-                db.execute("PRAGMA user_version=2")
-            elif version != 2:
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            elif version != SCHEMA_VERSION:
                 raise ValueError(_version_error(version))
             db.commit()
 
@@ -281,6 +293,7 @@ class Index:
             "local_head_committed_at",
             "last_checked_at",
             "last_fetched_at",
+            "last_converted_at",
             "remote_status",
         }:
             raise ValueError(f"Unsupported sort column: {sort}")

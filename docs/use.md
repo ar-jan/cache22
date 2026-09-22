@@ -245,7 +245,17 @@ The local commit date is the committer timestamp at local HEAD. No remote commit
 date is collected. Remote status compares the last observed remote refs and HEAD
 with the local mirror: `unknown`, `not_fetched`, `current`, or `updates_available`.
 Force pushes, deleted refs, tags, and non-default branches all participate. Status
-is an observation, not a live guarantee; check its timestamp and diagnostics.
+is an observation, not a live guarantee.
+
+Inventory's `last_checked_at`, `last_fetched_at`, and `last_converted_at` are
+completion times of successful whole job attempts, derived from history. Running,
+failed, and interrupted attempts do not advance them, even if local Git work
+finished before the failure. Unknown timestamps are null. Only check jobs advance
+`last_checked_at`: fetch can refresh remote refs without advancing that timestamp.
+A transport failure in fetch's optional final remote probe preserves the previous
+remote snapshot and does not fail the fetch or create a separate check diagnostic.
+Detailed attempt outcomes are available through `repo jobs` and the manager;
+per-kind outcome/error fields are no longer exposed by inventory.
 
 `repo add --fetch` downloads immediately; `--queue` queues a one-off fetch.
 Schedules are disabled until explicitly enabled. A successful scheduled check
@@ -276,7 +286,17 @@ cache22 manager errors --db /path/to/index.sqlite3 --json
 `manager errors` shows the latest failed or interrupted completed attempt per
 problem job, including retries. Its diagnostic stays visible while another attempt
 runs; succeeded and cancelled jobs are excluded. A separate successful job does
-not hide an older failed job. Terminal history is retained for 30 days.
+not hide an older failed job. Inventory's `has_error` follows the same rule;
+`last_error`, `last_error_kind`, `last_error_category`, and `last_error_at` describe
+the most recent such problem, ordered by completion time and then attempt ID.
+The error kind belongs to the completed attempt, even if its job has since been
+promoted from check to fetch. These fields are null when no problem job remains.
+
+Terminal history is retained for 30 days, except the latest successful job per
+repository and kind. Those jobs and their attempts remain until a newer success
+replaces them; this preserves last-success timestamps for inactive repositories.
+Pending and running jobs do not expire through history cleanup. Old failed jobs
+still expire after 30 days, removing their diagnostics from inventory.
 
 `manager queue` shows queue counts, worker availability, and job progress. Choose
 `--section running|runnable|deferred|history` (default: `running`).
@@ -300,7 +320,7 @@ Full index data can be inspected through Datasette; generic writes are disabled.
 Only Cache22's forms/API perform mutations through shared services. Keep the
 inventory ID column visible for live row updates and selection.
 
-The index uses schema version 2; older versions are rejected without migration.
+The index uses schema version 3; other versions are rejected without migration.
 Before using an older index, stop all Cache22 processes, back it up, and discard that index
 and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
 This discards schedules, queued work, registrations, and history, but never archive

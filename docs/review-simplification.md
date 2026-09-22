@@ -351,39 +351,46 @@ This is a sensible layout. Observations:
 
 ### 3.2 Index schema: `repositories`
 
-Forty columns. Grouped:
+**Implemented (review step 4, schema version 3).** The 18 per-kind attempt,
+success, outcome, and error columns have been removed. `repositories` now has
+22 columns for identity, storage, timestamps, and local/remote observations.
+Execution outcomes are written only through queue attempt finalization and
+interruption handling; services no longer duplicate those writes in inventory.
 
-| Group | Columns | Notes |
-| --- | --- | --- |
-| Identity | `id`, `repo_key`, `host`, `source_url`, `source_path`, `archive_root` | Keep. |
-| Derived identity | `project_name`, `display_path` | `project_name = repo_key.rsplit('/',1)[1]`; `display_path` is only used to derive `project_name` and is never read back. Drop both, or keep `display_path` (original casing) and drop `project_name`. |
-| Storage | `storage_format`, `archive_file` | `archive_file` is always `name.git` or the active bundle generation; the latter is also in `bundle.json`. Could be derived from `storage_format` + a `bundle_generation` column, or kept — it's cheap. |
-| Timestamps | `created_at`, `updated_at` | Keep. |
-| Local observation | `local_state`, `local_observed_at`, `reconciliation_required`, `local_head_ref`, `local_head_oid`, `local_head_committed_at`, `local_ref_digest` | Keep; this is the core value. |
-| Remote observation | `remote_head_ref`, `remote_head_oid`, `remote_ref_digest` | Keep. |
-| Per-kind outcome (×3) | `last_{check,fetch,convert}_attempt_at`, `last_{checked,fetched,converted}_at`, `{check,fetch,convert}_outcome`, `{check,fetch,convert}_error_category`, `{check,fetch,convert}_error`, `{check,fetch,convert}_error_at` | **18 columns** duplicating `jobs` + `job_attempts`. |
+`inventory` derives `last_checked_at`, `last_fetched_at`, and `last_converted_at`
+from the maximum completion timestamp of successful attempts of each kind.
+These describe whole job outcomes. The optional remote probe after a fetch does
+not count as a check job, and its tolerated transport failure creates no separate
+check diagnostic. Failed or interrupted jobs cannot advance a success timestamp.
 
-The 18 per-kind columns exist so `inventory` can show "last error" without a
-join, and so direct (non-queued) operations record outcomes. But every direct
-operation now *does* create a job via `Queue.immediate()`, so `job_attempts`
-has the same rows. `execute_job` writes each outcome twice
-(`repo_service.py:144,149-156,182-192` and `queue.finish`).
+`job_attempts.kind` captures the job kind at claim time, so promoting a pending
+check retry to fetch cannot relabel earlier attempts. Historical detail and
+error reporting use this immutable kind; queue displays retain current job kind.
 
-**Recommendation.** Drop the 18 columns. Add to `inventory`:
+The shared `job_errors` view selects the latest completed failed or interrupted
+attempt per pending, running, or failed job. Both manager errors and inventory
+use it. Inventory exposes `has_error` plus `last_error`, `last_error_kind`,
+`last_error_category`, and `last_error_at`, selecting one problem by completion
+time descending and attempt ID descending. A running retry retains its previous
+diagnostic; success or cancellation clears that job's diagnostic. A separate
+successful job does not hide an older failed job.
 
-```sql
-(SELECT max(finished_at) FROM job_attempts a JOIN jobs j ON j.id=a.job_id
- WHERE j.repository_id=r.id AND j.kind='fetch' AND a.outcome='succeeded') AS last_fetched_at,
-(SELECT ... outcome='failed' ... ORDER BY a.id DESC LIMIT 1) AS last_error
-```
+Correlated inventory queries use `jobs_repository_history`, `attempts_job`, and
+a partial `attempts_success(job_id,kind,finished_at)` index. There is no cached
+copy of the removed outcome fields. History cleanup retains the latest successful
+job per repository and kind, including its attempts, beyond 30 days; superseded
+successes and other terminal jobs expire normally. This preserves timestamps
+without retaining all history.
 
-or a small `repository_status` view. With the `jobs_repository_history` index
-this is cheap at 1–100k rows. `has_error` becomes "latest attempt for any
-unfinished-or-failed job failed", which is what `manager errors` already
-computes (`manager_service.py:210-220`).
+Fresh indexes use `user_version=3`; other versions are rejected without migration
+or automatic deletion. Rebuilding through offline audit restores archive identity
+and observations, but cannot restore schedules or execution history. Queue and
+scheduler separation remains step 5; `jobs.error*`, progress storage, and local
+observation state are unchanged.
 
-If the extra join is judged too costly for the list view, keep *one* pair —
-`last_fetched_at`, `last_checked_at` — and drop the other 16.
+The remaining derived columns (`project_name`, `display_path`, and `archive_file`)
+are still candidates for removal as recommended in the summary. Their storage
+and derivation have not changed in this step.
 
 ### 3.3 `reconciliation_required` and `local_state`
 
@@ -404,7 +411,7 @@ inside `local_fields` from the record, not at every call site.
 ```sql
 jobs(id, repository_id, kind, origin, state, due_at, created_at, finished_at,
      retry_count, claim_token, lease_until, error_category, error)
-job_attempts(id, job_id, started_at, finished_at, outcome, error_category, error)
+job_attempts(id, job_id, kind, started_at, finished_at, outcome, error_category, error)
 attempt_progress(attempt_id PK, phase, observed_at, completed, total, unit, percentage, detail)
 schedules(repository_id PK, enabled, blocked, interval_seconds, next_due_at)
 workers(id, pid, started_at, heartbeat_at, stopped_at, current_job_id)
@@ -532,8 +539,9 @@ Things that look like over-engineering but are earning their keep:
    dispatch.~~ Done. Locking remains internal, discovery opens by directory,
    and service import cycles are removed. Bundle-internal checks and manager
    initialization imports remain intentionally.
-4. Drop the 18 per-kind outcome columns; add `inventory` subqueries. Bump
-   `user_version` to 3 (the README already says older indexes are discarded).
+4. ~~Drop the 18 per-kind outcome columns; derive inventory status from
+   attempts and bump `user_version` to 3.~~ Done. Latest successful jobs survive
+   history expiry; manager and inventory share job-scoped error semantics.
 5. Split `Queue` into queue + scheduler.
 6. CLI flattening (`repo` prefix removal, `jobs` replaces `manager
    errors|queue`, `web`/`worker`). This is the most user-visible change; do

@@ -24,12 +24,14 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
     error = error_snapshot(index)["errors"][0]
     assert (error["state"], error["retry_count"], error["due_at"]) == ("pending", 1, 1060)
     assert error["attempt_number"] == 1
+    assert index.get(repository["id"])["last_error"] == error["error"]
     now = 1060
     retry = queue.claim()
     assert retry is not None
     error = error_snapshot(index)["errors"][0]
     assert error["state"] == "running"
     assert error["attempt_id"] == job["attempt_id"]
+    assert index.get(repository["id"])["last_error"] == error["error"]
     queue.interrupt(retry, "Worker stopping")
     error = error_snapshot(index)["errors"][0]
     assert (error["outcome"], error["error"], error["attempt_number"]) == (
@@ -40,8 +42,24 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
     retry = queue.claim()
     assert retry is not None
     assert error_snapshot(index)["errors"][0]["error"] == "Worker stopping"
+    record = index.get(repository["id"])
+    assert record["last_error"] == "Worker stopping"
+    assert record["last_error_category"] == "interrupted"
+    assert record["last_error_at"] == now
+    assert record["has_error"]
     queue.finish(retry)
     assert error_snapshot(index)["errors"] == []
+    assert not index.get(repository["id"])["has_error"]
+    cancelled = queue.immediate(repository["id"], "fetch")
+    queue.finish(cancelled, category="transport", error="Cancelled retry")
+    assert index.get(repository["id"])["has_error"]
+    queue.unqueue(repository["id"])
+    record = index.get(repository["id"])
+    assert not record["has_error"]
+    assert all(
+        record[field] is None
+        for field in ("last_error", "last_error_kind", "last_error_category", "last_error_at")
+    )
 
 
 def test_errors_pagination_and_job_scope(tmp_path: Path) -> None:
@@ -54,7 +72,7 @@ def test_errors_pagination_and_job_scope(tmp_path: Path) -> None:
     now += 1
     second = queue.immediate(repository["id"], "fetch")
     queue.finish(second, category="structural", error="Second failure")
-    third = queue.immediate(repository["id"], "fetch")
+    third = queue.immediate(repository["id"], "convert")
     queue.finish(third, category="structural", error="Third failure at same time")
     cancelled = queue.immediate(repository["id"], "fetch")
     queue.finish(cancelled, category="transport", error="Cancelled retry")
@@ -64,6 +82,13 @@ def test_errors_pagination_and_job_scope(tmp_path: Path) -> None:
     page = error_snapshot(index, limit=1)
     assert [row["id"] for row in page["errors"]] == [third["id"]]
     assert page["next_offset"] == 1
+    record = index.get(repository["id"])
+    assert record["has_error"]
+    assert (record["last_error"], record["last_error_kind"], record["last_error_at"]) == (
+        "Third failure at same time",
+        "convert",
+        now,
+    )
     page = error_snapshot(index, limit=2, offset=1)
     assert [row["id"] for row in page["errors"]] == [second["id"], first["id"]]
     assert page["next_offset"] is None

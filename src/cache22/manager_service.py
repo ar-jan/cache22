@@ -169,7 +169,7 @@ def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0
         attempts = [
             dict(row)
             for row in db.execute(
-                """SELECT a.*,j.kind,j.origin,p.phase,p.observed_at,p.completed,p.total,p.unit,p.percentage,p.detail
+                """SELECT a.*,j.origin,p.phase,p.observed_at,p.completed,p.total,p.unit,p.percentage,p.detail
             FROM job_attempts a JOIN jobs j ON j.id=a.job_id
             LEFT JOIN attempt_progress p ON p.attempt_id=a.id
             WHERE j.repository_id=? ORDER BY a.id DESC LIMIT ? OFFSET ?""",
@@ -192,17 +192,12 @@ def error_snapshot(index: Index, *, limit: int = 100, offset: int = 0) -> dict[s
         rows = [
             dict(row)
             for row in db.execute(
-                """SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,
-                j.due_at,j.retry_count,a.id AS attempt_id,a.finished_at AS error_at,
-                a.outcome,a.error_category,a.error,
+                """SELECT e.job_id AS id,e.repository_id,r.repo_key,e.kind,e.origin,e.state,
+                e.due_at,e.retry_count,e.attempt_id,e.error_at,e.outcome,e.error_category,e.error,
                 (SELECT count(*) FROM job_attempts n
-                 WHERE n.job_id=j.id AND n.id<=a.id) AS attempt_number
-                FROM jobs j JOIN repositories r ON r.id=j.repository_id
-                JOIN job_attempts a ON a.id=(SELECT max(id) FROM job_attempts
-                    WHERE job_id=j.id AND finished_at IS NOT NULL)
-                WHERE j.state IN ('pending','running','failed')
-                    AND a.outcome IN ('failed','interrupted')
-                ORDER BY a.finished_at DESC,a.id DESC LIMIT ? OFFSET ?""",
+                 WHERE n.job_id=e.job_id AND n.id<=e.attempt_id) AS attempt_number
+                FROM job_errors e JOIN repositories r ON r.id=e.repository_id
+                ORDER BY e.error_at DESC,e.attempt_id DESC LIMIT ? OFFSET ?""",
                 (limit + 1, offset),
             )
         ]

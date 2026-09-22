@@ -157,6 +157,17 @@ def test_datasette_browsing_selection_commands_and_boundaries(tmp_path: Path) ->
             )
             assert response.status_code == 400
             assert len(index.list()) == 3
+            queue = Queue(index)
+            failed = queue.immediate(ids[1], "check")
+            queue.finish(failed, category="structural", error="Invalid storage")
+            response = await ds.client.post(
+                "/-/cache22/api/selection", json={"query": "has_error=1"}
+            )
+            assert response.status_code == 200
+            assert response.json()["ids"] == [ids[1]]
+            response = await ds.client.get("/index/inventory.json?has_error=1")
+            assert response.status_code == 200
+            assert response.json()["rows"][0]["last_error"] == "Invalid storage"
         finally:
             await ds.invoke_shutdown()
 

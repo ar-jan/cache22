@@ -87,27 +87,8 @@ def publish_local(index: Index, record: dict[str, Any], repo: Repository | None)
 
 def publish_remote(index: Index, record: dict[str, Any]) -> None:
     operation.progress("remote observation")
-    index.update(record["id"], last_check_attempt_at=index.now())
-    try:
-        snapshot = remote_snapshot(record["source_url"])
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-        index.update(
-            record["id"],
-            check_outcome="failed",
-            check_error_category=category_for(exc),
-            check_error=error_text(exc, record["source_url"]),
-            check_error_at=index.now(),
-        )
-        raise
-    index.update(
-        record["id"],
-        **remote_fields(snapshot),
-        last_checked_at=index.now(),
-        check_outcome="succeeded",
-        check_error=None,
-        check_error_category=None,
-        check_error_at=None,
-    )
+    snapshot = remote_snapshot(record["source_url"])
+    index.update(record["id"], **remote_fields(snapshot))
 
 
 def check_repository(
@@ -159,15 +140,7 @@ def fetch_locked(
             publish_local(index, record, repo)
             if index.get(record["id"])["local_state"] != "ready":
                 raise ValueError("Imported mirror could not be validated for the inventory")
-            # A remote observation is separate from successful local materialization.
-            index.update(
-                record["id"],
-                last_fetched_at=index.now(),
-                fetch_outcome="succeeded",
-                fetch_error=None,
-                fetch_error_category=None,
-                fetch_error_at=None,
-            )
+            # A transport failure in this optional probe does not fail the fetch job.
             try:
                 publish_remote(index, record)
             except operation.TransportError:
@@ -230,19 +203,10 @@ def execute_job(
         timeout = {"check": check_timeout, "fetch": fetch_timeout, "convert": convert_timeout}[kind]
         with queue.running(job, timeout, cancel):
             operation.progress("validation")
-            index.update(record["id"], **{f"last_{kind}_attempt_at": index.now()})
             if kind == "check":
                 check_locked(index, record)
             elif kind == "convert":
                 result = convert_locked(index, record)
-                index.update(
-                    record["id"],
-                    last_converted_at=index.now(),
-                    convert_outcome="succeeded",
-                    convert_error=None,
-                    convert_error_category=None,
-                    convert_error_at=None,
-                )
             else:
                 if not Path(record["archive_root"]).is_dir():
                     raise FileNotFoundError(f"Archive root unavailable: {record['archive_root']}")
@@ -259,19 +223,7 @@ def execute_job(
         category = category_for(exc)
         message = error_text(exc, record["source_url"])
         if not isinstance(exc, operation.ClaimLostError):
-            # Publication must remain fenced even after the operation context exits.
-            with index.transaction() as db:
-                queue.validate(db, job)
-                index.update_in(
-                    db,
-                    record["id"],
-                    **{
-                        f"{kind}_outcome": "failed",
-                        f"{kind}_error_category": category,
-                        f"{kind}_error": message,
-                        f"{kind}_error_at": index.now(),
-                    },
-                )
+            # Queue finalization validates the claim after the operation context exits.
             queue.finish(job, category=category, error=message)
         raise
     else:
