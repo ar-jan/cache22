@@ -46,7 +46,7 @@ class Repository:
         return git(self.source, "rev-parse", "HEAD")
 
     def fetch(self) -> dict[str, Any]:
-        import_repository(URL, self.root, "git", index=self.index)
+        import_repository(URL, self.root, index=self.index)
         return self.index.get(self.id)
 
 
@@ -395,7 +395,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     r.commit("first")
     queue = Queue(r.index)
     queue.enqueue(r.id)
-    result = import_repository(URL, archive_type="git", index=r.index)
+    result = import_repository(URL, index=r.index)
     assert result.repository is not None
     assert result.repository["archive_root"] == str(r.root)
     assert queue.claim() is None
@@ -405,7 +405,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     from cache22 import config
 
     config.config_file().write_text(f'archive_dirs = ["{other_root}"]\n')
-    result = import_repository(URL, archive_type="git", index=r.index)
+    result = import_repository(URL, index=r.index)
     assert result.archive_path == Path(r.index.get(r.id)["archive_path"])
 
 

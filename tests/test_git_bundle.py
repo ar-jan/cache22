@@ -51,7 +51,7 @@ class Repo:
         return git(self.source, "rev-parse", "HEAD")
 
     def fetch(self) -> Any:
-        return import_repository(URL, self.root, "git", index=self.index)
+        return import_repository(URL, self.root, index=self.index)
 
     def convert(self) -> Path:
         queue = Queue(self.index)

@@ -36,7 +36,6 @@ def test_import_repository_clones_git_mirror(tmp_path: Path) -> None:
         result = import_repository(
             "https://gitlab.com/Group/Subgroup/Cache22.git",
             archive_dir=archive_dir,
-            archive_type="git",
         )
 
     assert result.archive_path == paths.mirror_repository
@@ -71,7 +70,7 @@ def test_import_repository_updates_existing_git_archive_with_info(tmp_path: Path
         patch("cache22.import_service.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
-        result = import_repository(url, archive_dir=archive_dir, archive_type="git")
+        result = import_repository(url, archive_dir=archive_dir)
 
     assert result.archive_path == paths.mirror_repository
     assert result.info_messages == (f"INFO: updated Git mirror: {paths.mirror_repository}",)
@@ -92,7 +91,7 @@ def test_import_repository_rejects_incomplete_final_clone(tmp_path: Path) -> Non
         patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
         pytest.raises(ValueError, match="Expected a bare Git mirror"),
     ):
-        import_repository(url, archive_dir=archive_dir, archive_type="git")
+        import_repository(url, archive_dir=archive_dir)
 
 
 def test_failed_clone_releases_lock_and_removes_only_incomplete_output(tmp_path: Path) -> None:
@@ -115,11 +114,11 @@ def test_failed_clone_releases_lock_and_removes_only_incomplete_output(tmp_path:
         patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         with pytest.raises(RuntimeError, match="git clone --mirror failed"):
-            import_repository(url, tmp_path, "git")
+            import_repository(url, tmp_path)
         assert not paths.mirror_repository.exists()
         assert not paths.clone_complete_marker.exists()
         assert paths.lock_file.is_file()
-        result = import_repository(url, tmp_path, "git")
+        result = import_repository(url, tmp_path)
 
     assert result.archive_path == paths.mirror_repository
     assert paths.clone_complete_marker.is_file()

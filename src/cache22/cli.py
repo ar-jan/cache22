@@ -10,13 +10,7 @@ from typing import NoReturn
 import typer
 
 from .adoption import AdoptionRequiredError
-from .config import (
-    ConfigError,
-    add_archive_dir,
-    default_archive_type,
-    list_archive_dirs,
-    set_archive_type,
-)
+from .config import ConfigError, add_archive_dir, list_archive_dirs
 from .import_service import ImportResult, import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .manager_cli import manager_app
@@ -28,7 +22,6 @@ app = typer.Typer(
 )
 config_app = typer.Typer(help="Manage cache22 configuration.", no_args_is_help=True)
 archive_app = typer.Typer(help="Manage archive directories.", no_args_is_help=True)
-archive_type_app = typer.Typer(help="Manage the default archival format.", no_args_is_help=True)
 import_app = typer.Typer(help="Import repositories into the archive.", no_args_is_help=True)
 import_clean_app = typer.Typer(help="Clean partial import state.", no_args_is_help=True)
 
@@ -37,7 +30,6 @@ app.add_typer(worker_app, name="worker")
 app.add_typer(manager_app, name="manager")
 app.add_typer(config_app, name="config")
 config_app.add_typer(archive_app, name="archive")
-config_app.add_typer(archive_type_app, name="archive-type")
 app.add_typer(import_app, name="import")
 import_app.add_typer(import_clean_app, name="clean")
 
@@ -72,19 +64,6 @@ def config_archive_list() -> None:
         typer.echo(str(archive_dir))
 
 
-@archive_type_app.command("show")
-@_user_command
-def config_archive_type_show() -> None:
-    typer.echo(default_archive_type())
-
-
-@archive_type_app.command("set")
-@_user_command
-def config_archive_type_set(archive_type: str) -> None:
-    configured_archive_type = set_archive_type(archive_type)
-    typer.echo(f"Default archive type: {configured_archive_type}")
-
-
 @import_app.command(
     "repo",
     help="Import or update an archived Git repository.",
@@ -110,11 +89,10 @@ def import_repo(
         ):
             raise typer.Exit(code=1) from exc
         # The first attempt has released its locks. Retry against the same root
-        # and archive mode even if configuration changed while awaiting input.
+        # even if configuration changed while awaiting input.
         result = import_repository(
             url,
             archive_dir=exc.archive_dir,
-            archive_type="git",
             case_sensitive=case_sensitive,
             adopt=True,
         )

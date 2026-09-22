@@ -10,7 +10,7 @@ cache22 config archive add /absolute/path/to/archive
 cache22 import repo https://github.com/ar-jan/cache22.git
 ```
 
-In Git archive mode, repeating an import fetches updates into the existing mirror.
+Repeating an import fetches updates into the existing mirror.
 Updates include new refs, forced changes, and pruning branches and tags deleted
 upstream. The mirror's HEAD follows the advertised default branch, including
 renames, or the advertised detached commit. A failed fetch keeps the initialized
@@ -137,13 +137,6 @@ Local identity stays lowercase.
 Each local path binds to one source; conflicting casing is rejected before reuse or Git work.
 Failed imports release that binding once cleanup leaves no archive or partial state.
 
-### Archive type
-
-Git is the only supported archive type and the default. Inspect or set it with
-`cache22 config archive-type show` and `cache22 config archive-type set git`.
-Archive type is separate from storage representation: Git repositories can be
-stored as mirrors or standalone bundles using the conversion command above.
-
 ### Clean-up
 
 If an interrupted import leaves a complete Git mirror without Cache22 metadata,
@@ -188,7 +181,7 @@ Targeted operations reject symlinked storage paths.
 Missing archive roots are errors and must be restored before importing or cleaning.
 
 Direct CLI imports use the first configured archive root; both cleanup commands
-search all configured roots. Explicit root/type overrides are available through
+search all configured roots. An explicit root override is available through
 the Python service, not import CLI options.
 
 Repository inputs reject ASCII control characters and DEL before normalization,

@@ -129,7 +129,6 @@ def execute_job(
     fetch_timeout: float = 7200,
     convert_timeout: float = 7200,
     adopt: bool = False,
-    archive_type: str = "git",
     source_url: str | None = None,
     cancel: threading.Event | None = None,
 ) -> Any:
@@ -155,7 +154,6 @@ def execute_job(
                     convert_error_at=None,
                 )
             else:
-                from .config import normalize_archive_type
                 from .import_service import _import_repository
 
                 if not Path(record["archive_root"]).is_dir():
@@ -163,7 +161,6 @@ def execute_job(
                 result = _import_repository(
                     source_url if source_url is not None else record["source_url"],
                     Path(record["archive_root"]),
-                    normalize_archive_type(archive_type),
                     case_sensitive=True,
                     adopt=adopt,
                     index=index,

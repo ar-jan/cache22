@@ -8,13 +8,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
 import tomli_w
-
-ArchiveType = Literal["git"]
-DEFAULT_ARCHIVE_TYPE: ArchiveType = "git"
-SUPPORTED_ARCHIVE_TYPES = frozenset({"git"})
 
 
 class ConfigError(ValueError):
@@ -40,13 +36,12 @@ def config_file() -> Path:
 @dataclass(slots=True)
 class Config:
     archive_dirs: list[Path]
-    archive_type: ArchiveType = DEFAULT_ARCHIVE_TYPE
 
 
 def load_config() -> Config:
     path = config_file()
     if not path.exists():
-        return Config(archive_dirs=[], archive_type=DEFAULT_ARCHIVE_TYPE)
+        return Config(archive_dirs=[])
 
     try:
         with path.open("rb") as handle:
@@ -56,10 +51,7 @@ def load_config() -> Config:
     except OSError as exc:
         raise ConfigError(f"Config file could not be read: {path}") from exc
 
-    return Config(
-        archive_dirs=_parse_archive_dirs(data, path),
-        archive_type=_parse_archive_type(data, path),
-    )
+    return Config(archive_dirs=_parse_archive_dirs(data, path))
 
 
 @contextmanager
@@ -83,10 +75,7 @@ def _save_config(config: Config) -> None:
     """Publish settings while the caller holds the configuration transaction lock."""
     path = config_file()
 
-    payload = {
-        "archive_dirs": [str(archive_dir) for archive_dir in config.archive_dirs],
-        "archive_type": config.archive_type,
-    }
+    payload = {"archive_dirs": [str(archive_dir) for archive_dir in config.archive_dirs]}
     encoded = tomli_w.dumps(payload).encode()
     temporary_path: Path | None = None
     try:
@@ -133,18 +122,6 @@ def list_archive_dirs() -> list[Path]:
     return load_config().archive_dirs
 
 
-def default_archive_type() -> ArchiveType:
-    return load_config().archive_type
-
-
-def set_archive_type(raw_archive_type: str) -> ArchiveType:
-    archive_type = normalize_archive_type(raw_archive_type)
-    with _config_transaction() as config:
-        config.archive_type = archive_type
-        _save_config(config)
-    return archive_type
-
-
 def default_archive_dir() -> Path:
     archive_dirs = list_archive_dirs()
     if not archive_dirs:
@@ -153,17 +130,6 @@ def default_archive_dir() -> Path:
         )
 
     return archive_dirs[0]
-
-
-def normalize_archive_type(raw_archive_type: str) -> ArchiveType:
-    archive_type = raw_archive_type.strip().casefold()
-    if archive_type not in SUPPORTED_ARCHIVE_TYPES:
-        supported_types = ", ".join(sorted(SUPPORTED_ARCHIVE_TYPES))
-        raise ValueError(
-            f"Unsupported archive type: {raw_archive_type}. Expected one of: {supported_types}"
-        )
-
-    return cast(ArchiveType, archive_type)
 
 
 def _parse_archive_dirs(data: Any, path: Path) -> list[Path]:
@@ -186,17 +152,6 @@ def _parse_archive_dirs(data: Any, path: Path) -> list[Path]:
         archive_dirs.append(archive_dir)
 
     return archive_dirs
-
-
-def _parse_archive_type(data: Any, path: Path) -> ArchiveType:
-    raw_archive_type = data.get("archive_type", DEFAULT_ARCHIVE_TYPE)
-    if not isinstance(raw_archive_type, str):
-        raise ConfigError(f"'archive_type' must be a string in {path}")
-
-    try:
-        return normalize_archive_type(raw_archive_type)
-    except ValueError as exc:
-        raise ConfigError(f"{exc} in {path}") from exc
 
 
 def _normalize_persisted_archive_dir(raw_path: str, config_path: Path, index: int) -> Path:

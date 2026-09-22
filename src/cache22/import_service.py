@@ -9,13 +9,7 @@ from . import operation
 from .adoption import prepare_git_import
 from .archive_layout import ArchivePaths, archive_paths_for_repository
 from .archive_storage import RepositoryStorage, repository_operation
-from .config import (
-    ArchiveType,
-    default_archive_dir,
-    default_archive_type,
-    normalize_archive_dir,
-    normalize_archive_type,
-)
+from .config import default_archive_dir, normalize_archive_dir
 from .git_mirror import ensure_git_mirror
 from .index import Index, repository_key
 from .job_queue import Queue
@@ -34,7 +28,6 @@ class ImportResult:
 def import_repository(
     url: str,
     archive_dir: Path | None = None,
-    archive_type: ArchiveType | None = None,
     *,
     case_sensitive: bool = False,
     adopt: bool = False,
@@ -54,7 +47,6 @@ def import_repository(
         if archive_dir is None and existing
         else _resolve_archive_dir(archive_dir)
     )
-    kind = _resolve_archive_type(archive_type)
     record = index.add(repository, root, importing=True)
     job = Queue(index).immediate(record["id"], "fetch")
     result = execute_job(
@@ -62,7 +54,6 @@ def import_repository(
         job,
         fetch_timeout=timeout,
         adopt=adopt,
-        archive_type=kind,
         source_url=repository.clone_url,
     )
 
@@ -72,7 +63,6 @@ def import_repository(
 def _import_repository(
     url: str,
     archive_dir: Path | None = None,
-    archive_type: ArchiveType | None = None,
     *,
     case_sensitive: bool = False,
     adopt: bool = False,
@@ -81,7 +71,6 @@ def _import_repository(
 ) -> ImportResult:
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
     resolved_archive_dir = _resolve_archive_dir(archive_dir)
-    _resolve_archive_type(archive_type)
     paths = archive_paths_for_repository(resolved_archive_dir, repository)
     index.update(record["id"], reconciliation_required=True)
     adopted = False
@@ -177,10 +166,3 @@ def _import_locked_repository(
 
 def _resolve_archive_dir(archive_dir: Path | None) -> Path:
     return normalize_archive_dir(default_archive_dir() if archive_dir is None else archive_dir)
-
-
-def _resolve_archive_type(archive_type: ArchiveType | None) -> ArchiveType:
-    if archive_type is not None:
-        return normalize_archive_type(archive_type)
-
-    return default_archive_type()

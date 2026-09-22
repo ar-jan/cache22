@@ -102,7 +102,6 @@ def add(
         import_repository(
             record["source_url"],
             Path(record["archive_root"]),
-            "git",
             case_sensitive=True,
             index=index,
         )
@@ -176,7 +175,6 @@ def _batch(
                 import_repository(
                     record["source_url"],
                     Path(record["archive_root"]),
-                    "git",
                     case_sensitive=True,
                     adopt=adopt,
                     index=index,
