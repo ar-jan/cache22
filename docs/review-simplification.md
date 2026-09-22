@@ -520,10 +520,8 @@ Things that look like over-engineering but are earning their keep:
 
 ## 6. Suggested sequence
 
-1. Remove `archive_type` (config, CLI, signatures, tests). Mechanical; no
-   behaviour change.
-2. Merge `import repo` into `repo fetch`; `import clean` → `repo clean`.
-   Update `use.md`.
+1. ~~Remove `archive_type` (config, CLI, signatures, tests).~~ Done.
+2. ~~Merge `import repo` into `repo fetch`; `import clean` → `repo clean`.~~ Done.
 3. Introduce `Repository` facade in one module; move the 13
    `bundle_manifest` checks into it. Remove lazy imports as they become
    unnecessary.

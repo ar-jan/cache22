@@ -17,8 +17,8 @@ source .venv/bin/activate
 # Configure where archives are stored
 cache22 config archive add /absolute/path/to/archive
 
-# Import a repository (remote paths are lowercased by default)
-cache22 import repo https://github.com/ar-jan/cache22.git
+# Fetch a repository (remote paths are lowercased by default)
+cache22 repo fetch https://github.com/ar-jan/cache22.git
 ```
 
 See [docs/use.md](docs/use.md) for further documentation.

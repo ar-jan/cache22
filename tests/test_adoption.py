@@ -386,9 +386,9 @@ def test_cli_offers_adoption_and_releases_locks_before_prompt(
     before = snapshot(mirror.paths.repository_dir)
     with (
         patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
-        patch("cache22.cli._is_interactive", side_effect=terminal),
+        patch("cache22.repo_cli._is_interactive", side_effect=terminal),
     ):
-        result = CliRunner().invoke(app, ["import", "repo", URL], input=answer)
+        result = CliRunner().invoke(app, ["repo", "fetch", URL], input=answer)
     assert (result.exit_code == 0) == success, result.output
     assert "[y/N]" in result.stderr
     assert "Verify and adopt" not in result.stdout
@@ -403,13 +403,13 @@ def test_cli_noninteractive_requires_flag_and_explicit_adoption_never_prompts(
 ) -> None:
     with (
         patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
-        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
+        patch("cache22.repo_cli.typer.confirm", side_effect=AssertionError("must not prompt")),
     ):
         runner = CliRunner()
-        result = runner.invoke(app, ["import", "repo", URL])
+        result = runner.invoke(app, ["repo", "fetch", URL])
         assert result.exit_code == 1
         assert "--adopt" in result.stderr
-        result = runner.invoke(app, ["import", "repo", URL, "--adopt"])
+        result = runner.invoke(app, ["repo", "fetch", URL, "--adopt"])
         assert result.exit_code == 0, result.output
 
 
@@ -424,10 +424,10 @@ def test_ineligible_conflicts_never_offer_adoption(mirror: Mirror, problem: str)
     before = snapshot(mirror.paths.repository_dir)
     with (
         patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
-        patch("cache22.cli._is_interactive", return_value=True),
-        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
+        patch("cache22.repo_cli._is_interactive", return_value=True),
+        patch("cache22.repo_cli.typer.confirm", side_effect=AssertionError("must not prompt")),
     ):
-        result = CliRunner().invoke(app, ["import", "repo", URL])
+        result = CliRunner().invoke(app, ["repo", "fetch", URL])
     assert result.exit_code == 1
     assert "[y/N]" not in result.stderr
     assert not isinstance(result.exception, AssertionError)
@@ -443,10 +443,10 @@ def test_prompt_retry_pins_configuration_and_revalidates_state(mirror: Mirror) -
         patch(
             "cache22.import_service.default_archive_dir", side_effect=[mirror.root, AssertionError]
         ),
-        patch("cache22.cli._is_interactive", return_value=True),
-        patch("cache22.cli.typer.confirm", side_effect=confirm) as prompt,
+        patch("cache22.repo_cli._is_interactive", return_value=True),
+        patch("cache22.repo_cli.typer.confirm", side_effect=confirm) as prompt,
     ):
-        result = CliRunner().invoke(app, ["import", "repo", URL])
+        result = CliRunner().invoke(app, ["repo", "fetch", URL])
     assert result.exit_code == 1
     assert "source conflict" in result.stderr
     assert prompt.call_count == 1

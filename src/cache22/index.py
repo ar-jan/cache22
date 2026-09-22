@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .operation import current_operation
-from .repository_ref import RepositoryRef, parse_repository_url
+from .repository_ref import RepositoryRef, is_repository_url, parse_repository_url
 
 SCHEMA = """
 CREATE TABLE repositories (
@@ -229,17 +229,25 @@ class Index:
                 f"Repository source conflict: stored {existing['source_path']}; requested {repository.source_path}"
             )
 
-    def get(self, selector: str | int) -> dict[str, Any]:
-        if isinstance(selector, str) and (
-            "://" in selector or "@" in selector.split("/", 1)[0] and ":" in selector
-        ):
-            selector = repository_key(parse_repository_url(selector))
-        column = "id" if isinstance(selector, int) else "repo_key"
+    @staticmethod
+    def _selector_key(selector: str | int) -> str | int:
+        if isinstance(selector, str) and is_repository_url(selector):
+            return repository_key(parse_repository_url(selector))
+        return selector
+
+    def find(self, selector: str | int) -> dict[str, Any] | None:
+        """Look up by ID, key, or clone URL; return None when not indexed."""
+        key = self._selector_key(selector)
+        column = "id" if isinstance(key, int) else "repo_key"
         with self.connect() as db:
-            row = db.execute(f"SELECT * FROM inventory WHERE {column}=?", (selector,)).fetchone()
-        if row is None:
-            raise ValueError(f"Repository is not indexed: {selector}")
-        return self._record(row)
+            row = db.execute(f"SELECT * FROM inventory WHERE {column}=?", (key,)).fetchone()
+        return None if row is None else self._record(row)
+
+    def get(self, selector: str | int) -> dict[str, Any]:
+        record = self.find(selector)
+        if record is None:
+            raise ValueError(f"Repository is not indexed: {self._selector_key(selector)}")
+        return record
 
     @staticmethod
     def _record(row: sqlite3.Row) -> dict[str, Any]:

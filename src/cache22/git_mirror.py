@@ -36,7 +36,7 @@ def ensure_git_mirror(
     if paths.mirror_repository.exists():
         raise ValueError(
             f"Mirror repository exists without a completion marker: {paths.mirror_repository}. "
-            f"Clear it with 'cache22 import clean repo {url}' to start over."
+            f"Clear it with 'cache22 repo clean {url}' to start over."
         )
 
     operation.progress("cloning")

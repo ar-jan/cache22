@@ -23,6 +23,11 @@ class RepositoryRef:
     source_path: str = field(default="", compare=False)
 
 
+def is_repository_url(selector: str) -> bool:
+    """Distinguish clone URLs from index keys such as ``host/namespace/name``."""
+    return "://" in selector or ("@" in selector.split("/", 1)[0] and ":" in selector)
+
+
 def parse_repository_url(url: str, *, case_sensitive: bool = False) -> RepositoryRef:
     if any(ord(char) < 32 or ord(char) == 127 for char in url):
         raise ValueError("Unsafe repository URL: control characters are not supported")

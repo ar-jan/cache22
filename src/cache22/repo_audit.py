@@ -219,7 +219,7 @@ def audit(
                         issues.append(
                             {
                                 "path": str(leftover),
-                                "problem": "Bundle staging or retired storage remains; run import clean",
+                                "problem": "Bundle staging or retired storage remains; run repo clean",
                                 "fixed": False,
                             }
                         )

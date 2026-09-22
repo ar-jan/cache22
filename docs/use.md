@@ -6,11 +6,14 @@
 # Configure where archives are stored
 cache22 config archive add /absolute/path/to/archive
 
-# Import a repository (remote paths are lowercased by default)
-cache22 import repo https://github.com/ar-jan/cache22.git
+# Fetch a repository (remote paths are lowercased by default)
+cache22 repo fetch https://github.com/ar-jan/cache22.git
 ```
 
-Repeating an import fetches updates into the existing mirror.
+A clone URL that is not yet indexed is registered and fetched into the first
+configured archive root. An indexed repository can be fetched again by URL or by
+its key, for example `github.com/ar-jan/cache22`; the stored source URL and
+archive root are used. Repeating a fetch updates the existing mirror.
 Updates include new refs, forced changes, and pruning branches and tags deleted
 upstream. The mirror's HEAD follows the advertised default branch, including
 renames, or the advertised detached commit. A failed fetch keeps the initialized
@@ -18,7 +21,7 @@ mirror for retry. Ref updates are atomic; updating HEAD is a subsequent step.
 Before publishing HEAD, Cache22 checks that its remote target and object ID stayed
 the same across the fetch and that the fetched target matches. If this check or
 HEAD publication fails, the command reports an incomplete update and retains the
-fetched refs without publishing HEAD. Retry the import to complete it; Cache22
+fetched refs without publishing HEAD. Retry the fetch to complete it; Cache22
 does not retry automatically.
 
 Every existing-mirror update rechecks the storage layout before running Git.
@@ -41,8 +44,8 @@ also offers **Convert to bundle** on repository and bulk actions. Conversion run
 after earlier work for that repository, so it can follow an initial queued fetch.
 An already bundled repository is verified without rewriting its bundle.
 
-After conversion, `repo check`, `repo fetch`, direct imports, and scheduled updates
-continue to work. Checks compare bundle refs and saved HEAD metadata with the
+After conversion, `repo check`, `repo fetch`, and scheduled updates continue to
+work. Checks compare bundle refs and saved HEAD metadata with the
 remote without restoring objects. Fetches restore temporary bare Git storage,
 fetch incrementally, and publish a newly verified standalone bundle. Network
 transfers are incremental, but local storage is restored and the bundle rewritten.
@@ -60,7 +63,7 @@ then set HEAD with `git symbolic-ref HEAD REF` or
 
 Publication is atomic. A failed fetch or verification preserves the selected
 archive. Interrupted cleanup may leave retired generations, a retained mirror,
-or `.cache22-bundle` staging; `import clean repo URL` cleans recognized state and
+or `.cache22-bundle` staging; `repo clean SELECTOR` cleans recognized state and
 verifies the selected bundle before retiring old archives. `repo audit --fix`
 rebuilds bundle inventory offline. Invalid active metadata preserves data for
 inspection; restore a missing manifest rather than attempting adoption.
@@ -81,15 +84,15 @@ If a mirror already exists at the expected path, for example
 `ARCHIVE/github.com/karpathy/llm.c/llm.c.git`, initialize it with:
 
 ```sh
-cache22 import repo https://github.com/karpathy/llm.c.git --adopt
+cache22 repo fetch https://github.com/karpathy/llm.c.git --adopt
 ```
 
 Cache22 verifies the origin identity, bare mirror configuration, and full Git
 object integrity before writing missing metadata and fetching updates. It never
-reclones or deletes the supplied mirror on failure. Later imports need no flag.
+reclones or deletes the supplied mirror on failure. Later fetches need no flag.
 Verification can take time for large mirrors.
 
-An ordinary import encountering an eligible uninitialized directory offers:
+An ordinary fetch encountering an eligible uninitialized directory offers:
 
 ```text
 Verify and adopt the existing Git mirror, then fetch updates? [y/N]:
@@ -132,57 +135,58 @@ fetching, and HEAD synchronization; fetching does not run automatic maintenance.
 
 ### Case-sensitive sources
 
-Use `cache22 import repo https://host/Team/Repo --case-sensitive` to preserve remote path casing on a case-sensitive server.
-Local identity stays lowercase.
-Each local path binds to one source; conflicting casing is rejected before reuse or Git work.
-Failed imports release that binding once cleanup leaves no archive or partial state.
+Use `cache22 repo fetch https://host/Team/Repo --case-sensitive` (or `repo add
+--case-sensitive`) to preserve remote path casing on a case-sensitive server when
+registering a new URL. Local identity stays lowercase. Each local path binds to one
+source; conflicting casing is rejected before reuse or Git work. Failed fetches
+release that binding once cleanup leaves no archive or partial state.
 
 ### Clean-up
 
-If an interrupted import leaves a complete Git mirror without Cache22 metadata,
+If an interrupted fetch leaves a complete Git mirror without Cache22 metadata,
 try `--adopt` to verify and retain it. To discard incomplete import state instead:
 
 ```sh
-# Clean one repository by URL
-cache22 import clean repo https://github.com/ar-jan/cache22.git
+# Clean one or more repositories by key or URL
+cache22 repo clean github.com/ar-jan/cache22
 
 # Clean all configured archive directories
-cache22 import clean all
+cache22 repo clean --all
 ```
 
 ## Details
 
 The entire configured archive directory is managed by Cache22.
 For `https://Git.Example.ORG/Team/Project.git`, files are stored directly under `ARCHIVE/git.example.org/team/project/`, including `project.git`, the `.clone-complete` marker, and the persistent `.lock` file.
-Repository directories are terminal containers. For example, importing both
+Repository directories are terminal containers. For example, fetching both
 `host/team/project` and `host/team/project/child` into the same archive is rejected
-in either order, including simultaneous imports. Subgroup namespaces and sibling
+in either order, including simultaneous fetches. Subgroup namespaces and sibling
 repositories remain supported.
 Previous layouts are unsupported and are not migrated.
 
-Imports and cleanup report a repository-busy error on repository or namespace
+Fetches and cleanup report a repository-busy error on repository or namespace
 reservation contention. Acquiring the brief archive-root lock can wait.
 Verification reserves the candidate directory and its namespace ancestors using
 inode locks. It creates no reservation files and does not hold the archive-wide
-root lock during the integrity check. Sibling imports and targeted cleanup can
+root lock during the integrity check. Sibling fetches and targeted cleanup can
 continue while verification runs; conflicting reservations fail immediately.
 Reservations release on process exit, including interrupted adoption before any
 Cache22 metadata has been published.
 Cleanup keeps completed archives and lock files.
 It only cleans recognized Cache22 storage; unowned mirrors are left untouched.
-A completion marker must contain exactly `complete\n` for imports to reuse the
-archive. A malformed marker causes an import error without changing the mirror.
+A completion marker must contain exactly `complete\n` for fetches to reuse the
+archive. A malformed marker causes a fetch error without changing the mirror.
 Cleanup preserves a mirror beside such a marker, but can remove an orphan marker
 when no mirror exists.
 The retained lock keeps the path reserved as a repository even after its archive data is removed.
-`clean all` visits subgroup namespaces, stops traversal at repository boundaries,
+`repo clean --all` visits subgroup namespaces, stops traversal at repository boundaries,
 skips directory symlinks, and stops on a busy repository without rolling back earlier cleanup.
 Targeted operations reject symlinked storage paths.
-Missing archive roots are errors and must be restored before importing or cleaning.
+Missing archive roots are errors and must be restored before fetching or cleaning.
 
-Direct CLI imports use the first configured archive root; both cleanup commands
-search all configured roots. An explicit root override is available through
-the Python service, not import CLI options.
+Fetching a new URL uses the first configured archive root; `repo add --archive-dir`
+chooses another root before the first fetch. Cleanup by selector searches all
+configured roots.
 
 Repository inputs reject ASCII control characters and DEL before normalization,
 and reject literal `?` and `#` in HTTPS, SSH, and scp-style forms. Surrounding
@@ -255,11 +259,10 @@ use `--timeout` on check/fetch, or `--check-timeout`/`--fetch-timeout` on the wo
 JSON output uses UTC ISO 8601 timestamps; unknown values are null. List pagination
 uses `--limit` and `--offset` (default limit 100).
 
-Direct imports and cleanup also maintain the index. Existing mirrors are discovered
-through their next operation or `repo audit --fix`. Audit never adopts unowned
-storage or deletes archives, and cannot recover old scheduling or fetch/check
-timestamps from disk. Explicit `repo fetch SELECTOR --adopt` uses the same verified
-adoption rules as `import repo --adopt`.
+Cleanup also maintains the index. Existing mirrors are discovered through their
+next operation or `repo audit --fix`. Audit never adopts unowned storage or
+deletes archives, and cannot recover old scheduling or fetch/check timestamps from
+disk.
 
 
 ## Inspecting queue errors and status

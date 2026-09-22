@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -14,12 +15,15 @@ from typing import Annotated, Any
 
 import typer
 
-from .import_service import import_repository
+from .adoption import AdoptionRequiredError
+from .import_service import ImportResult, import_repository
+from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
 from .job_queue import Queue
 from .manager_service import duration
 from .repo_audit import audit
 from .repo_service import add_repository, check_repository, run_worker
+from .repository_ref import is_repository_url
 from .worker import notify_ready, run_continuous, shutdown_signals
 
 repo_app = typer.Typer(help="Browse the repository index and manage updates.", no_args_is_help=True)
@@ -42,6 +46,10 @@ def command[**P](function: Callable[P, None]) -> Callable[P, None]:
             raise typer.Exit(1) from exc
 
     return wrapped
+
+
+def _is_interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
 
 
 def _json_value(value: Any, key: str = "") -> Any:
@@ -146,46 +154,94 @@ def show(selector: str, as_json: bool = typer.Option(False, "--json")) -> None:
     output(Index().get(selector), as_json)
 
 
-def selected(index: Index, selectors: list[str], all_repositories: bool) -> list[dict[str, Any]]:
+def selected(index: Index, selectors: list[str] | None, all_repositories: bool) -> list[str]:
+    """Deduplicated selectors, or every indexed key for --all."""
     if bool(selectors) == all_repositories:
         raise typer.BadParameter("Provide selectors or --all, exclusively")
-    if all_repositories:
-        with index.connect() as db:
-            return [
-                index.get(row["id"])
-                for row in db.execute("SELECT id FROM repositories ORDER BY repo_key")
-            ]
-    return list({record["id"]: record for record in (index.get(s) for s in selectors)}.values())
+    if not all_repositories:
+        return list(dict.fromkeys(selectors or []))
+    with index.connect() as db:
+        return [
+            row["repo_key"]
+            for row in db.execute("SELECT repo_key FROM repositories ORDER BY repo_key")
+        ]
+
+
+def _fetch_one(
+    index: Index, selector: str, *, case_sensitive: bool, adopt: bool, timeout: float
+) -> ImportResult:
+    """Fetch an indexed repository, or register and fetch a new clone URL."""
+    record = index.find(selector)
+    if record is None and not is_repository_url(selector):
+        raise ValueError(f"Repository is not indexed: {selector}")
+
+    def attempt(adopt: bool, archive_dir: Path | None = None) -> ImportResult:
+        if record is not None:
+            return import_repository(
+                record["source_url"],
+                Path(record["archive_root"]),
+                case_sensitive=True,
+                adopt=adopt,
+                index=index,
+                timeout=timeout,
+            )
+        return import_repository(
+            selector,
+            archive_dir=archive_dir,
+            case_sensitive=case_sensitive,
+            adopt=adopt,
+            index=index,
+            timeout=timeout,
+        )
+
+    try:
+        return attempt(adopt)
+    except AdoptionRequiredError as exc:
+        if adopt or not _is_interactive():
+            raise
+        typer.echo(exc.conflict_message, err=True)
+        if not typer.confirm(
+            "Verify and adopt the existing Git mirror, then fetch updates?", default=False, err=True
+        ):
+            raise ValueError("Adoption declined; the existing mirror was left untouched") from exc
+        # The first attempt has released its locks. Retry against the same root
+        # even if configuration changed while awaiting input.
+        return attempt(True, exc.archive_dir)
 
 
 def _batch(
-    selectors: list[str],
+    selectors: list[str] | None,
     all_repositories: bool,
+    *,
     fetch: bool,
-    adopt: bool,
+    case_sensitive: bool = False,
+    adopt: bool = False,
     timeout: float,
     as_json: bool,
 ) -> None:
     index = Index()
     results: list[dict[str, Any]] = []
     failed = False
-    for record in selected(index, selectors, all_repositories):
+    for selector in selected(index, selectors, all_repositories):
         try:
             if fetch:
-                import_repository(
-                    record["source_url"],
-                    Path(record["archive_root"]),
-                    case_sensitive=True,
-                    adopt=adopt,
-                    index=index,
-                    timeout=timeout,
+                result = _fetch_one(
+                    index, selector, case_sensitive=case_sensitive, adopt=adopt, timeout=timeout
                 )
+                if not as_json:
+                    for message in result.info_messages:
+                        typer.echo(message)
             else:
-                check_repository(record["id"], index=index, timeout=timeout)
-            results.append(index.get(record["id"]))
+                check_repository(selector, index=index, timeout=timeout)
+            results.append(index.get(selector))
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
             failed = True
-            results.append(dict(index.get(record["id"]), operation_error=str(exc)))
+            record = index.find(selector)
+            results.append(
+                dict(record, operation_error=str(exc))
+                if record is not None
+                else {"selector": selector, "operation_error": str(exc)}
+            )
     output(results, as_json)
     if failed:
         raise typer.Exit(1)
@@ -199,7 +255,8 @@ def check(
     timeout: float = 120,
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    _batch(selectors or [], all_repositories, False, False, timeout, as_json)
+    """Compare indexed repositories with their remotes without fetching."""
+    _batch(selectors, all_repositories, fetch=False, timeout=timeout, as_json=as_json)
 
 
 @repo_app.command("fetch")
@@ -207,11 +264,50 @@ def check(
 def fetch(
     selectors: Annotated[list[str] | None, typer.Argument()] = None,
     all_repositories: bool = typer.Option(False, "--all"),
-    adopt: bool = False,
+    case_sensitive: bool = typer.Option(
+        False, "--case-sensitive", help="Preserve remote path casing when registering a new URL."
+    ),
+    adopt: bool = typer.Option(
+        False, "--adopt", help="Verify and initialize an existing Git mirror before updating it."
+    ),
     timeout: float = 7200,
     as_json: bool = typer.Option(False, "--json"),
 ) -> None:
-    _batch(selectors or [], all_repositories, True, adopt, timeout, as_json)
+    """Fetch repositories by key or URL; unknown URLs are registered first."""
+    _batch(
+        selectors,
+        all_repositories,
+        fetch=True,
+        case_sensitive=case_sensitive,
+        adopt=adopt,
+        timeout=timeout,
+        as_json=as_json,
+    )
+
+
+@repo_app.command("clean")
+@command
+def clean(
+    selectors: Annotated[list[str] | None, typer.Argument()] = None,
+    all_repositories: bool = typer.Option(False, "--all"),
+) -> None:
+    """Remove partial import state; completed archives and lock files are kept."""
+    index = Index()
+    removed: list[Path] = []
+    if all_repositories and not selectors:
+        removed.extend(clean_all_import_state())
+    else:
+        for selector in selected(index, selectors, all_repositories):
+            record = index.find(selector)
+            if record is None and not is_repository_url(selector):
+                raise ValueError(f"Repository is not indexed: {selector}")
+            removed.extend(
+                clean_repository_import_state(record["source_url"] if record else selector)
+            )
+    if not removed:
+        typer.echo("No partial import state found.")
+    for path in removed:
+        typer.echo(f"Removed partial import state: {path}")
 
 
 @repo_app.command("convert")
