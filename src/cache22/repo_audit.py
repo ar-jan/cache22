@@ -8,71 +8,25 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .adoption import prepare_git_import
-from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
 from .archive_storage import (
-    RepositoryStorage,
     has_repository_boundary,
     open_archive_directory,
-    repository_operation,
 )
 from .config import list_archive_dirs
-from .git_config import validate_git_mirror_config
-from .git_layout import validate_git_mirror_layout
-from .git_observation import local_fields
 from .index import Index, repository_key
 from .repository_ref import parse_repository_url, validate_storage_component
-from .system_tools import find_git_executable
+from .storage import Repository, absent_fields
 
 
-def register_storage(index: Index, root: Path, storage: RepositoryStorage) -> dict[str, Any]:
-    source = storage.read_source()
+def register_storage(index: Index, root: Path, repo: Repository) -> dict[str, Any]:
+    source = repo.read_source()
     if source is None:
         raise ValueError("Managed mirror has no source binding")
-    origin = storage_origin(storage, source)
+    origin = repo.origin_url(source)
     ref = parse_repository_url(origin, case_sensitive=True)
-    if archive_paths_for_repository(root, ref) != storage.paths:
+    if Repository.paths_for(root, ref) != repo.paths:
         raise ValueError("Mirror is not at its canonical path")
     return index.add(ref, root)
-
-
-def storage_origin(storage: RepositoryStorage, source: str) -> str:
-    if storage.entry(storage.paths.bundle_manifest.name) is not None:
-        from .git_bundle import read_bundle
-
-        return read_bundle(storage, source).source_url
-    storage.validate_clone_marker()
-    validate_git_mirror_layout(storage.paths.mirror_repository)
-    return validate_git_mirror_config(
-        find_git_executable(), storage.paths.mirror_repository, source
-    )
-
-
-def _prepare_adoption(
-    storage: RepositoryStorage, root: Path, record: dict[str, Any] | None
-) -> bool:
-    paths = storage.paths
-    storage.validate()
-    if storage.entry(paths.bundle_manifest.name) is not None:
-        return False
-    storage.validate_clone_marker()
-    if storage.entry(paths.mirror_repository.name) is None:
-        return False
-    source = storage.read_source()
-    if (
-        storage.entry(paths.lock_file.name) is not None
-        and source is not None
-        and storage.entry(paths.clone_complete_marker.name) is not None
-    ):
-        return False
-    validate_git_mirror_layout(paths.mirror_repository)
-    origin = validate_git_mirror_config(find_git_executable(), paths.mirror_repository)
-    ref = parse_repository_url(origin, case_sensitive=True)
-    if archive_paths_for_repository(root, ref) != paths:
-        raise ValueError("Mirror is not at its canonical path")
-    if record is not None and record["source_path"] != ref.source_path:
-        raise ValueError("Repository source conflict with inventory")
-    return prepare_git_import(storage, archive_dir=root, source_path=ref.source_path, adopt=True)
 
 
 def audit(
@@ -128,7 +82,6 @@ def audit(
                             continue
                         pending.append(relative / child)
                     continue
-                paths = archive_paths_for_directory(path)
                 key = relative.as_posix()
                 record = records.get(key)
                 if record is not None and record["archive_root"] != str(root):
@@ -139,29 +92,30 @@ def audit(
                 adopted = False
 
                 def prepare(
-                    storage: RepositoryStorage,
-                    root: Path = root,
+                    repo: Repository,
                     record: dict[str, Any] | None = record,
                 ) -> None:
                     nonlocal adopted
-                    adopted = _prepare_adoption(storage, root, record)
+                    adopted = repo.prepare_adoption(
+                        record["source_path"] if record is not None else None
+                    )
 
-                with repository_operation(
-                    root, paths, prepare=prepare if adopt else None
-                ) as storage:
-                    if storage is None:
+                with Repository.open_directory(
+                    root, path, prepare=prepare if adopt else None
+                ) as repo:
+                    if repo is None:
                         raise ValueError("Unrecognized ownership marker")
                     registered = record is None
                     if record is None:
                         # Validate before adding; no index-only audit side effects.
-                        source = storage.read_source()
+                        source = repo.read_source()
                         if source is None:
                             raise ValueError("Managed storage has no source binding")
-                        origin = storage_origin(storage, source)
+                        origin = repo.origin_url(source)
                         ref = parse_repository_url(origin, case_sensitive=True)
                         if repository_key(ref) != key:
                             raise ValueError("Mirror is not at its canonical path")
-                        observed = local_fields(storage, source)
+                        observed = repo.observe_local(source)
                         if observed["local_state"] != "ready":
                             raise ValueError("Mirror cannot be indexed as ready")
                         if not fix:
@@ -175,8 +129,7 @@ def audit(
                             continue
                         record = index.add(ref, root)
                         records[key] = record
-                    fields = local_fields(
-                        storage,
+                    fields = repo.observe_local(
                         record["source_path"],
                         previously_ready=record["local_state"] in {"ready", "missing"},
                         expected_format=record["storage_format"],
@@ -201,21 +154,7 @@ def audit(
                                 "fixed": fix,
                             }
                         )
-                    from .git_bundle import generation_names
-
-                    generations = generation_names(storage)
-                    active = fields.get("archive_file")
-                    leftovers = [
-                        paths.repository_dir / name for name in generations if name != active
-                    ]
-                    if storage.entry(paths.bundle_staging.name) is not None:
-                        leftovers.append(paths.bundle_staging)
-                    if (
-                        fields.get("storage_format") == "bundle"
-                        and storage.entry(paths.mirror_repository.name) is not None
-                    ):
-                        leftovers.append(paths.mirror_repository)
-                    for leftover in leftovers:
+                    for leftover in repo.leftover_paths(fields):
                         issues.append(
                             {
                                 "path": str(leftover),
@@ -256,19 +195,23 @@ def audit(
         try:
             root = Path(record["archive_root"])
             ref = parse_repository_url(record["source_url"], case_sensitive=True)
-            paths = archive_paths_for_repository(root, ref)
-            with repository_operation(root, paths) as storage:
+            paths = Repository.paths_for(root, ref)
+            with Repository.open(root, ref) as repo:
                 if (
-                    storage is None
+                    repo is None
                     and paths.repository_dir.exists()
                     and any(paths.repository_dir.iterdir())
                 ):
                     raise ValueError("Expected repository has unowned or invalid storage")
-                fields = local_fields(
-                    storage,
-                    record["source_path"],
-                    previously_ready=record["local_state"] in {"ready", "missing"},
-                    expected_format=record["storage_format"],
+                previously_ready = record["local_state"] in {"ready", "missing"}
+                fields = (
+                    absent_fields(previously_ready)
+                    if repo is None
+                    else repo.observe_local(
+                        record["source_path"],
+                        previously_ready=previously_ready,
+                        expected_format=record["storage_format"],
+                    )
                 )
                 if (
                     any(record[k] != v for k, v in fields.items())

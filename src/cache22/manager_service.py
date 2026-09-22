@@ -9,11 +9,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .config import default_archive_dir, normalize_archive_dir
 from .index import Index, repository_key
 from .job_queue import BLOCKING_JOB_SQL, Queue
 from .operation import sanitize
-from .repository_ref import RepositoryRef, parse_repository_url
+from .repo_service import registration_target
 
 MAX_BATCH = 10_000
 
@@ -36,20 +35,6 @@ def json_value(value: Any, key: str = "") -> Any:
     if isinstance(value, int) and (key.endswith("_at") or key == "lease_until"):
         return datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z")
     return value
-
-
-def registration_target(
-    index: Index, url: str, root: Path | None, case_sensitive: bool
-) -> tuple[RepositoryRef, Path]:
-    ref = parse_repository_url(url, case_sensitive=case_sensitive)
-    if root is None:
-        with index.connect() as db:
-            row = db.execute(
-                "SELECT archive_root FROM repositories WHERE repo_key=?", (repository_key(ref),)
-            ).fetchone()
-        if row:
-            return ref, Path(row["archive_root"])
-    return ref, normalize_archive_dir(root if root is not None else default_archive_dir())
 
 
 def register_batch(

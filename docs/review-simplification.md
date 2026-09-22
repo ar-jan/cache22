@@ -43,34 +43,38 @@ Each is expanded below.
 
 ## 1. Architecture
 
-### 1.1 Layering as it exists
+### 1.1 Layering after the Repository facade
+
+Review step 3 is implemented. The dependency direction is now:
 
 ```
-cli.py ─┬─ repo_cli.py ────┐
-        ├─ manager_cli.py ─┤
-        └─ (import/config) ┘
-                 │
-     import_service ⇄ repo_service ⇄ manager_service ⇄ worker
-                 │            │
-        adoption / git_mirror / git_bundle / git_observation / repo_audit / import_state
-                 │
-        archive_storage ── archive_layout ── repository_ref
-                 │
-             operation (contextvar-based deadline/fence/progress)
-                 │
-             index ── job_queue
+cli / web
+    │
+import_service / manager_service / worker
+    │
+repo_service / repo_audit / import_state       (inventory and job policy)
+    │
+storage.Repository                           (locked operations and format dispatch)
+    │
+git_bundle / adoption / git_mirror / git_observation
+    │
+archive_storage / archive_layout / git_config / git_layout / repository_ref
 ```
 
-The intended layering (CLI → service → storage → git) is sound, but the
-service tier has become a set of mutually dependent modules. Twelve imports are
-deferred into function bodies to avoid cycles (`grep -n "^\s\{4,\}from \."`):
+`git_bundle` uses mirror and snapshot helpers; mirror-only adoption remains
+below the facade. Remote observation remains available directly to services.
+Services also use index, queue, and operation fencing as before.
 
-| Module | Lazy imports | Why |
-| --- | --- | --- |
-| `repo_service` | `import_service._import_repository`, `manager_service.registration_target`, `worker.run_continuous`, `git_bundle.materialize`, `config.normalize_archive_type` | Both directions of `repo_service ⇄ import_service`, `⇄ manager_service`, `⇄ worker` |
-| `archive_storage`, `git_observation`, `adoption`, `import_state`, `repo_audit`, `import_service` | `git_bundle.*` | `git_bundle` imports `archive_storage`; everyone else needs bundle helpers to check `bundle_manifest` |
+`repo_service` owns `fetch_locked`, `ImportResult`, and `registration_target`.
+`import_service` and `manager_service` import those shared service operations;
+`worker` imports job execution and owns both worker entry points. None of
+these dependencies require service-to-service lazy imports.
 
-Lazy imports are a symptom, not a design. Recommendation: see §1.4.
+The remaining function-local imports in production are in
+`manager/app.py:create_datasette`: `Datasette`, `Database`, `pm`, and the
+manager plugin name and route hook. Datasette imports follow plugin-loading
+environment setup. These initialization imports are outside the storage
+refactor; there is no blanket prohibition on lazy imports.
 
 ### 1.2 Two entry points for the same operation
 
@@ -125,41 +129,43 @@ is greenfield and explicitly does not preserve compatibility.
 arrives, it will need a different `RepositoryRef`, different storage, and a
 different fetch protocol; a config string will not be the interesting part.
 
-### 1.4 The service tier should have one dispatch point for storage format
+### 1.4 One service-facing dispatch point for storage format
 
-The check "is this a bundle or a mirror?" (`storage.entry(paths.bundle_manifest.name) is not None`)
-appears 13 times across 7 modules. Each caller then branches to
-`git_bundle.*` or mirror code. Because `git_bundle` imports `archive_storage`,
-`git_observation`, `git_mirror`, etc., and those modules need `git_bundle`
-back, every one of them defers the import.
+**Implemented (review step 3).** `storage.Repository` is the only production
+module importing `git_bundle`. Services use `observe_local`, `fetch`,
+`convert_to_bundle`, `clean`, and the facade's adoption and discovery helpers.
+A focused AST test enforces the bundle import boundary for both absolute and
+relative imports.
 
-Proposed shape:
+`Repository.open(root, ref)` derives canonical paths for known repositories.
+`Repository.open_directory(root, directory)` opens discovery candidates without
+requiring a valid source URL or creating missing directories. Both wrap the
+existing `repository_operation`; `RepositoryStorage` and `ArchivePaths` remain
+internal building blocks. Discovery walks retain `open_archive_directory` and
+release their reservations before opening each repository.
 
-```
-repository_ref   (pure: parse URL → RepositoryRef)
-archive_paths    (pure: RepositoryRef + root → paths)
-locking          (open_archive_directory, root lock, owned lock; today's archive_storage minus RepositoryStorage)
-git_local        (git_layout + git_config + mirror_snapshot + fetch_git_repository + ensure_git_mirror)
-git_remote       (remote_snapshot, _remote_head)
-bundle           (read/write/restore/verify bundle; depends on git_local only)
-storage          (class Repository: format-aware facade; imports git_local, bundle, locking)
-index, queue, scheduler
-services         (fetch, check, convert, clean, audit — thin; imports storage, index, queue)
-cli / web
-```
+Preparation receives the same facade subsequently yielded by the context.
+It runs under directory reservations, potentially before ownership-lock
+publication and final validation. Existing lock ordering, symlink rejection,
+and root-lock release during adoption verification are preserved.
 
-`storage.Repository` becomes the only module that knows both `git_local` and
-`bundle` and does the `if bundled:` dispatch. Everything above it calls
-`repo.observe_local()`, `repo.fetch(url)`, `repo.convert_to_bundle()`,
-`repo.clean()`. Everything below it never imports upward.
+The facade evaluates manifest presence dynamically. Its selected-format guard
+rejects a missing manifest when the index expects a bundle, but accepts a disk
+bundle when the index still says mirror: an interrupted inventory publication
+must remain recoverable. Local observation separately classifies incomplete
+or missing storage.
 
-This eliminates all twelve lazy imports and the `RepositoryStorage` /
-`ArchivePaths` / `repository_operation` triple that callers currently have to
-assemble by hand (`root`, `paths = archive_paths_for_repository(root, ref)`,
-`with repository_operation(root, paths, ...) as storage`), which is repeated
-in `repo_service.check_locked`, `repo_service.convert_locked`,
-`import_service._import_repository`, `import_state.clean_repository_import_state`,
-`repo_audit.audit` (twice).
+Bundle fetch and conversion forward a service-provided publication callback.
+The sequence remains durable manifest publication, fenced inventory publication,
+then source retirement. A failed callback preserves the previous copy.
+Storage fetch results contain only the archive path and informational messages;
+the inventory-bearing `ImportResult` stays in the service tier.
+
+Bundle-internal manifest checks and low-level structural validation remain in
+their implementations. Generation filename enumeration now belongs to
+`RepositoryStorage.bundle_generations`, removing the reverse bundle dependency.
+`adoption` retains mirror-only verification. Git modules have not been renamed,
+and operation contexts, schema, queue policy, and CLI behavior are unchanged.
 
 ### 1.5 `operation.py` mixes three concerns
 
@@ -522,9 +528,10 @@ Things that look like over-engineering but are earning their keep:
 
 1. ~~Remove `archive_type` (config, CLI, signatures, tests).~~ Done.
 2. ~~Merge `import repo` into `repo fetch`; `import clean` → `repo clean`.~~ Done.
-3. Introduce `Repository` facade in one module; move the 13
-   `bundle_manifest` checks into it. Remove lazy imports as they become
-   unnecessary.
+3. ~~Introduce the `Repository` facade and centralize service-level storage
+   dispatch.~~ Done. Locking remains internal, discovery opens by directory,
+   and service import cycles are removed. Bundle-internal checks and manager
+   initialization imports remain intentionally.
 4. Drop the 18 per-kind outcome columns; add `inventory` subqueries. Bump
    `user_version` to 3 (the README already says older indexes are discarded).
 5. Split `Queue` into queue + scheduler.

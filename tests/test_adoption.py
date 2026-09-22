@@ -905,7 +905,7 @@ def test_audit_does_not_recreate_disappeared_candidate(
         mirror.paths.repository_dir.rename(moved)
         return repository_operation(*args, **kwargs)
 
-    with patch("cache22.repo_audit.repository_operation", side_effect=disappear):
+    with patch("cache22.storage.repository_operation", side_effect=disappear):
         issues = audit(adopt=True)
     assert len(issues) == 1 and not issues[0]["fixed"]
     assert not mirror.paths.repository_dir.exists()

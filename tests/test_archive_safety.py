@@ -89,7 +89,7 @@ def test_import_rejects_repository_prefix_conflicts(
         paths.clone_complete_marker.write_text("complete\n")
     before = sorted(tmp_path.rglob("*"))
     with (
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
         import_repository(second, tmp_path, case_sensitive=True)
@@ -194,7 +194,7 @@ def test_missing_configured_root_fails_before_clone_or_cleanup(tmp_path: Path) -
     with (
         patch("cache22.config.list_archive_dirs", return_value=[missing]),
         patch("cache22.import_state.list_archive_dirs", return_value=[missing]),
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
     ):
         with pytest.raises(ValueError, match="Archive directory does not exist"):
             import_repository("https://host/team/project")

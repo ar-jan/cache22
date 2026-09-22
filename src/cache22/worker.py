@@ -40,6 +40,27 @@ def shutdown_signals(stop: threading.Event) -> Iterator[None]:
             signal.signal(sig, handler)
 
 
+def run_worker(
+    *,
+    index: Index | None = None,
+    check_timeout: float = 120,
+    fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
+    stop: threading.Event | None = None,
+) -> list[dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
+    run_continuous(
+        index=index,
+        stop=stop,
+        check_timeout=check_timeout,
+        fetch_timeout=fetch_timeout,
+        convert_timeout=convert_timeout,
+        report=outcomes.append,
+        once=True,
+    )
+    return outcomes
+
+
 def run_continuous(
     *,
     index: Index | None = None,

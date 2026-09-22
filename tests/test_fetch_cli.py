@@ -9,8 +9,8 @@ import pytest
 from typer.testing import CliRunner
 
 from cache22.cli import app
-from cache22.import_service import ImportResult
 from cache22.index import Index
+from cache22.repo_service import ImportResult
 from cache22.repository_ref import parse_repository_url
 
 URL = "https://github.com/ar-jan/cache22.git"

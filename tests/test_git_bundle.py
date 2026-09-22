@@ -23,8 +23,9 @@ from cache22.index import Index
 from cache22.job_queue import Queue
 from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
-from cache22.repo_service import check_repository, execute_job, run_worker
+from cache22.repo_service import check_repository, execute_job
 from cache22.repository_ref import parse_repository_url
+from cache22.worker import run_worker
 
 URL = "https://example.test/team/project"
 
@@ -313,6 +314,46 @@ def test_index_failure_after_publication_retains_source_and_audit_recovers(
     assert repo.index.get(repo.id)["storage_format"] == "bundle"
     clean_repository_import_state(URL)
     assert not repo.paths.mirror_repository.exists()
+
+
+def test_bundle_fetch_index_failure_retains_generation_and_recovers_offline(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = repo.commit("first")
+    repo.fetch()
+    previous = repo.convert()
+    latest = repo.commit("update")
+    update = repo.index.update
+
+    def fail_publication(repository_id: int, **fields: Any) -> None:
+        if fields.get("storage_format") == "bundle":
+            raise sqlite3.OperationalError("injected index failure")
+        update(repository_id, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repo.index, "update", fail_publication)
+        with pytest.raises(sqlite3.OperationalError, match="injected index failure"):
+            repo.fetch()
+
+    manifest = json.loads(repo.paths.bundle_manifest.read_text())
+    published = repo.paths.repository_dir / manifest["bundle_file"]
+    assert published != previous
+    assert published.is_file()
+    assert previous.is_file()
+    record = repo.index.get(repo.id)
+    assert record["local_head_oid"] == first
+    assert record["reconciliation_required"]
+
+    repo.source.rename(repo.source.with_name("offline"))
+    assert any(issue["fixed"] for issue in audit(index=repo.index, fix=True))
+    record = repo.index.get(repo.id)
+    assert record["local_head_oid"] == latest
+    assert record["archive_path"] == str(published)
+    assert not record["reconciliation_required"]
+    assert previous in clean_repository_import_state(URL)
+    assert not previous.exists()
+    assert published.is_file()
+    assert audit(index=repo.index) == []
 
 
 def test_expired_conversion_claim_cannot_publish(

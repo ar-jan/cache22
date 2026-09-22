@@ -16,15 +16,15 @@ from typing import Annotated, Any
 import typer
 
 from .adoption import AdoptionRequiredError
-from .import_service import ImportResult, import_repository
+from .import_service import import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
 from .job_queue import Queue
 from .manager_service import duration
 from .repo_audit import audit
-from .repo_service import add_repository, check_repository, run_worker
+from .repo_service import ImportResult, add_repository, check_repository
 from .repository_ref import is_repository_url
-from .worker import notify_ready, run_continuous, shutdown_signals
+from .worker import notify_ready, run_continuous, run_worker, shutdown_signals
 
 repo_app = typer.Typer(help="Browse the repository index and manage updates.", no_args_is_help=True)
 worker_app = typer.Typer(help="Execute persistent update jobs.", no_args_is_help=True)

@@ -37,10 +37,10 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
         return subprocess.CompletedProcess(args, 0)
 
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("/usr/bin/git")),
         patch("cache22.git_mirror.run_git", side_effect=clone),
-        patch("cache22.repo_service.local_fields", return_value={"local_state": "ready"}),
-        patch("cache22.import_service.publish_remote"),
+        patch("cache22.storage.Repository.observe_local", return_value={"local_state": "ready"}),
+        patch("cache22.repo_service.publish_remote"),
         patch("cache22.git_mirror._remote_head", return_value=None),
         patch("cache22.git_mirror._synchronize_head"),
     ):
@@ -85,7 +85,7 @@ def _pause_registration(root: Path, entered: Event, release: Event) -> None:
 def _import_conflicting_child(root: Path, entered: Event, finished: Event) -> None:
     entered.set()
     with (
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
         import_repository(URL + "/child", root)
@@ -127,7 +127,7 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     try:
         assert entered.wait(10)
         with (
-            patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+            patch("cache22.storage.find_git_executable", side_effect=AssertionError),
             pytest.raises(RepositoryBusyError, match="Repository is busy"),
         ):
             import_repository("https://host/Team/Project", tmp_path, case_sensitive=True)

@@ -20,7 +20,8 @@ from cache22.import_service import import_repository
 from cache22.index import Index
 from cache22.job_queue import Queue
 from cache22.repo_audit import audit
-from cache22.repo_service import add_repository, check_repository, run_worker
+from cache22.repo_service import add_repository, check_repository
+from cache22.worker import run_worker
 
 URL = "https://example.test/team/project"
 
