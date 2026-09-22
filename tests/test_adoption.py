@@ -148,7 +148,7 @@ def test_adoption_registers_without_recloning_then_import_updates(
         ("metadata", "Malformed source metadata"),
         ("binding", "Repository source conflict: stored"),
         ("marker", "Malformed clone completion marker"),
-        ("stage", "unexpected entries: .cache22-import"),
+        ("stage", "unexpected entries: .cache22-bundle"),
     ],
 )
 def test_invalid_adoption_never_changes_existing_data(
@@ -191,7 +191,7 @@ def test_invalid_adoption_never_changes_existing_data(
     elif problem == "marker":
         paths.clone_complete_marker.write_text("unfinished")
     elif problem == "stage":
-        paths.temp_dir.mkdir()
+        paths.bundle_staging.mkdir()
     before = snapshot(paths.repository_dir)
     with pytest.raises(ValueError, match=re.escape(message)):
         import_repository(URL, mirror.root, "git", adopt=True)
@@ -335,9 +335,9 @@ def test_adoption_reservation_allows_sibling_work_and_rejects_conflicts(
 
     def sibling() -> None:
         import_repository(sibling_url, mirror.root, "git")
-        sibling_paths.temp_dir.mkdir()
+        sibling_paths.bundle_staging.mkdir()
         assert clean_repository_import_state(sibling_url, (mirror.root,)) == (
-            sibling_paths.temp_dir,
+            sibling_paths.bundle_staging,
         )
 
     with (
@@ -457,19 +457,6 @@ def test_prompt_retry_pins_configuration_and_revalidates_state(mirror: Mirror) -
     assert not mirror.paths.lock_file.exists()
 
 
-def test_fossil_rejects_adoption_without_changes_or_prompt(mirror: Mirror) -> None:
-    before = snapshot(mirror.paths.repository_dir)
-    with (
-        patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
-        patch("cache22.import_service.default_archive_type", return_value="fossil"),
-        patch("cache22.cli.typer.confirm", side_effect=AssertionError("must not prompt")),
-    ):
-        result = CliRunner().invoke(app, ["import", "repo", URL, "--adopt"])
-    assert result.exit_code == 1
-    assert "only supported in Git" in result.stderr
-    assert snapshot(mirror.paths.repository_dir) == before
-
-
 @pytest.mark.parametrize("initialized", [False, True])
 @pytest.mark.parametrize(
     "key",
@@ -544,37 +531,6 @@ def test_trusted_user_ssh_configuration_remains_available(
     import_repository(url, mirror.root, "git", adopt=True)
     assert sentinel.exists()
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
-
-
-@pytest.mark.parametrize("owned,bound", [(False, False), (True, False), (False, True)])
-@pytest.mark.parametrize("sidecar", ["fossil_repository", "git_marks", "fossil_marks"])
-def test_unverified_fossil_artifacts_are_not_claimed(
-    mirror: Mirror, owned: bool, bound: bool, sidecar: str
-) -> None:
-    paths = mirror.paths
-    if owned:
-        paths.lock_file.write_bytes(LOCK_SIGNATURE)
-    if bound:
-        paths.source_file.write_text('{"source_path":"host/team/project"}')
-    getattr(paths, sidecar).write_text("unverified sidecar")
-    before = snapshot(paths.repository_dir)
-    for adopt in (False, True):
-        with pytest.raises(ValueError, match="cannot verify Fossil artifacts"):
-            import_repository(URL, mirror.root, "git", adopt=adopt)
-    assert snapshot(paths.repository_dir) == before
-
-
-def test_managed_fossil_artifacts_are_preserved_during_readoption(mirror: Mirror) -> None:
-    paths = mirror.paths
-    paths.lock_file.write_bytes(LOCK_SIGNATURE)
-    paths.source_file.write_text('{"source_path":"host/team/project"}')
-    for path in (paths.fossil_repository, paths.git_marks, paths.fossil_marks):
-        path.write_text("managed sidecar")
-    import_repository(URL, mirror.root, "git", adopt=True)
-    result = import_repository(URL, mirror.root, "fossil")
-    assert result.archive_path == paths.fossil_repository
-    for path in (paths.fossil_repository, paths.git_marks, paths.fossil_marks):
-        assert path.read_text() == "managed sidecar"
 
 
 def test_default_branch_rename_updates_head_and_keeps_mirror_cloneable(mirror: Mirror) -> None:
@@ -768,7 +724,7 @@ def test_unsafe_initialized_layout_is_rejected_before_git(mirror: Mirror, proble
 
     with (
         patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
-        pytest.raises(RuntimeError, match="Unsafe|self-contained|Partial|nested|bare Git mirror"),
+        pytest.raises(ValueError, match="Unsafe|self-contained|Partial|nested|bare Git mirror"),
     ):
         import_repository(URL, mirror.root, "git")
     assert snapshot(mirror.paths.repository_dir) == before
@@ -784,20 +740,17 @@ def test_ordinary_update_does_not_repeat_full_object_verification(mirror: Mirror
 
 
 @pytest.mark.parametrize("contents", [b"", b"unfinished\n", b"complete", b"complete\nextra"])
-@pytest.mark.parametrize("archive_type", ["git", "fossil"])
 def test_malformed_completion_marker_blocks_reuse_without_changes(
-    mirror: Mirror, contents: bytes, archive_type: str
+    mirror: Mirror, contents: bytes
 ) -> None:
     import_repository(URL, mirror.root, "git", adopt=True)
-    if archive_type == "fossil":
-        mirror.paths.fossil_repository.write_bytes(b"existing sidecar")
     mirror.paths.clone_complete_marker.write_bytes(contents)
     before = snapshot(mirror.paths.repository_dir)
     with (
         patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
         pytest.raises(ValueError, match="Malformed clone completion marker"),
     ):
-        import_repository(URL, mirror.root, "git" if archive_type == "git" else "fossil")
+        import_repository(URL, mirror.root, "git")
     assert snapshot(mirror.paths.repository_dir) == before
     assert clean_repository_import_state(URL, (mirror.root,)) == ()
     assert snapshot(mirror.paths.repository_dir) == before

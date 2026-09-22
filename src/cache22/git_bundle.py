@@ -332,8 +332,6 @@ def materialize(
         source_url = validate_git_mirror_config(
             find_git_executable(), paths.mirror_repository, source_path
         )
-        if storage.entry(paths.temp_dir.name) is not None:
-            raise ValueError("Clean unfinished import staging before conversion")
     else:
         source_url = update_url or old.source_url
     clear_staging(storage)

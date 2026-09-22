@@ -132,8 +132,6 @@ def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
         if source is None:
             raise ValueError("Bundle storage has no source binding; preserving it")
         removed_paths.extend(cleanup(storage, source))
-    if storage.remove(paths.temp_dir.name):
-        removed_paths.append(paths.temp_dir)
 
     mirror_exists = storage.entry(paths.mirror_repository.name) is not None
     marker_exists = storage.entry(paths.clone_complete_marker.name) is not None

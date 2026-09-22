@@ -16,7 +16,7 @@ from cache22 import git_bundle, operation
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
 from cache22.archive_storage import RepositoryBusyError, repository_operation
 from cache22.cli import app
-from cache22.config import add_archive_dir, set_archive_type
+from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
@@ -376,17 +376,14 @@ def test_invalid_active_bundle_never_falls_back_to_retained_mirror(
     assert repo.paths.mirror_repository.is_dir()
 
 
-def test_bundle_representation_overrides_implicit_fossil_default(repo: Repo) -> None:
+def test_direct_import_updates_existing_bundle(repo: Repo) -> None:
     repo.commit("first")
     repo.fetch()
     repo.convert()
     second = repo.commit("second")
-    set_archive_type("fossil")
     result = import_repository(URL, index=repo.index)
     assert result.archive_path.suffix == ".bundle"
     assert repo.index.get(repo.id)["local_head_oid"] == second
-    with pytest.raises(ValueError, match="Fossil"):
-        import_repository(URL, archive_type="fossil", index=repo.index)
     assert not repo.paths.mirror_repository.exists()
 
 

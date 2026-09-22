@@ -149,10 +149,10 @@ def test_set_archive_type_persists_normalized_value(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    archive_type = set_archive_type("FOSSIL")
+    archive_type = set_archive_type("GIT")
 
-    assert archive_type == "fossil"
-    assert default_archive_type() == "fossil"
+    assert archive_type == "git"
+    assert default_archive_type() == "git"
 
 
 def test_load_reports_unreadable_config_path(
@@ -186,7 +186,7 @@ def test_failed_save_preserves_previous_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    original = Config([tmp_path / "archive"], "fossil")
+    original = Config([tmp_path / "archive"], "git")
     _save_config(original)
     path = tmp_path / "cache22" / "config.toml"
     previous_bytes = path.read_bytes()
@@ -209,7 +209,7 @@ def test_failed_save_preserves_previous_config(
         patch(target, side_effect=effect),
         pytest.raises(ConfigError, match="Config file could not be written"),
     ):
-        _save_config(Config(original.archive_dirs, "git"))
+        _save_config(Config([tmp_path / "replacement"], "git"))
 
     assert path.read_bytes() == previous_bytes
     assert load_config() == original
@@ -253,13 +253,13 @@ def test_archive_type_show_reports_configured_value(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    write_config(tmp_path, 'archive_type = "fossil"\n')
+    write_config(tmp_path, 'archive_type = "git"\n')
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     result = runner.invoke(app, ["config", "archive-type", "show"])
 
     assert result.exit_code == 0
-    assert result.output == "fossil\n"
+    assert result.output == "git\n"
 
 
 def test_archive_type_set_updates_config_without_traceback(
@@ -269,11 +269,11 @@ def test_archive_type_set_updates_config_without_traceback(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["config", "archive-type", "set", "fossil"])
+    result = runner.invoke(app, ["config", "archive-type", "set", "git"])
 
     assert result.exit_code == 0
-    assert "Default archive type: fossil" in result.output
-    assert default_archive_type() == "fossil"
+    assert "Default archive type: git" in result.output
+    assert default_archive_type() == "git"
     assert "Traceback" not in result.output
 
 
@@ -328,7 +328,7 @@ def test_concurrent_config_commands_preserve_both_changes(
             second_result = (
                 pool.submit(add_archive_dir, second)
                 if second_change == "archive"
-                else pool.submit(set_archive_type, "fossil")
+                else pool.submit(set_archive_type, "git")
             )
             assert contending.wait(5)
         finally:
@@ -338,7 +338,7 @@ def test_concurrent_config_commands_preserve_both_changes(
 
     config = load_config()
     assert config.archive_dirs == ([first, second] if second_change == "archive" else [first])
-    assert config.archive_type == ("git" if second_change == "archive" else "fossil")
+    assert config.archive_type == "git"
 
 
 def test_failed_config_transaction_releases_lock(

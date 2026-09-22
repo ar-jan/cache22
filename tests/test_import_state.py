@@ -9,7 +9,7 @@ from cache22.import_state import clean_all_import_state, clean_repository_import
 from cache22.repository_ref import parse_repository_url
 
 
-def test_clean_repository_import_state_removes_fossil_stage_and_incomplete_clone(
+def test_clean_repository_import_state_removes_incomplete_clone(
     tmp_path: Path,
 ) -> None:
     archive_dir = tmp_path / "archive"
@@ -17,16 +17,13 @@ def test_clean_repository_import_state_removes_fossil_stage_and_incomplete_clone
     url = "https://gitlab.com/group/subgroup/cache22.git"
     repository = parse_repository_url(url)
     paths = archive_paths_for_repository(archive_dir, repository)
-    paths.temp_dir.mkdir(parents=True)
-    paths.lock_file.write_text("cache22-storage-v1\n")
-    (paths.temp_dir / "partial").write_text("partial")
     paths.mirror_repository.mkdir(parents=True)
     paths.lock_file.write_text("cache22-storage-v1\n")
+    (paths.mirror_repository / "partial").write_text("partial")
 
     removed_paths = clean_repository_import_state(url, archive_dirs=(archive_dir,))
 
-    assert removed_paths == (paths.temp_dir, paths.mirror_repository)
-    assert not paths.temp_dir.exists()
+    assert removed_paths == (paths.mirror_repository,)
     assert not paths.mirror_repository.exists()
 
 
@@ -56,7 +53,7 @@ def test_clean_all_import_state_removes_partial_state_in_all_archive_dirs(tmp_pa
     second_archive_dir.mkdir()
     first_repository = parse_repository_url("https://github.com/ar-jan/cache22.git")
     first_paths = archive_paths_for_repository(first_archive_dir, first_repository)
-    first_paths.temp_dir.mkdir(parents=True)
+    first_paths.mirror_repository.mkdir(parents=True)
     first_paths.lock_file.write_text("cache22-storage-v1\n")
     second_repository = parse_repository_url("https://gitlab.com/group/subgroup/cache22.git")
     second_paths = archive_paths_for_repository(second_archive_dir, second_repository)
@@ -67,6 +64,6 @@ def test_clean_all_import_state_removes_partial_state_in_all_archive_dirs(tmp_pa
         archive_dirs=(first_archive_dir, second_archive_dir),
     )
 
-    assert removed_paths == (first_paths.temp_dir, second_paths.mirror_repository)
-    assert not first_paths.temp_dir.exists()
+    assert removed_paths == (first_paths.mirror_repository, second_paths.mirror_repository)
+    assert not first_paths.mirror_repository.exists()
     assert not second_paths.mirror_repository.exists()

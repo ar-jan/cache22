@@ -1,7 +1,7 @@
 [project]
 name = "cache22"
 version = "0.0.1"
-description = "CLI for archiving Git repositories into Fossil"
+description = "CLI for archiving Git repositories as mirrors or bundles"
 requires-python = ">=3.14"
 dependencies = [
     "datasette==1.0a40",

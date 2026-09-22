@@ -76,7 +76,7 @@ def test_import_repo_rejects_extra_arguments_without_traceback(runner: CliRunner
 
 def test_import_clean_repo_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> None:
     removed_paths = (
-        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22-import",
+        tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / ".cache22-bundle",
         tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git",
     )
 

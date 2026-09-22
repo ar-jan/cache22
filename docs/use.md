@@ -69,8 +69,6 @@ Empty mirrors cannot be converted. If an update becomes empty, it fails while
 preserving the previous bundle. Only history reachable from current refs and HEAD
 is retained; removed or force-pushed history can disappear on the next rewrite.
 Conversion back to a mirror and external bundle adoption are not supported.
-An implicit Fossil default does not change a bundled repository's representation;
-explicit Fossil operations on it are rejected. Existing Fossil sidecars are preserved.
 
 Conversion has its own diagnostics and does not advance fetch/check timestamps
 or change the update schedule. The worker's `--convert-timeout` defaults to 7200
@@ -107,11 +105,6 @@ or partial clones, external object alternates, symlinked storage, unrelated file
 unfinished staging state, and conflicting or malformed metadata are rejected.
 HTTPS and SSH origins are equivalent, but origin path casing must match the
 effective requested source; use `--case-sensitive` when appropriate.
-Fossil archives and marks files are rejected when adoption would establish missing
-ownership or source metadata: Git verification cannot certify those files.
-Sidecars already associated with a valid Cache22 ownership marker and matching
-source binding are preserved. Fossil mode does not support adoption and retains
-its existing reuse behavior.
 
 ### Repository Git configuration
 
@@ -144,19 +137,12 @@ Local identity stays lowercase.
 Each local path binds to one source; conflicting casing is rejected before reuse or Git work.
 Failed imports release that binding once cleanup leaves no archive or partial state.
 
-### Fossil
+### Archive type
 
-By default, imports are treated as Git repositories and stored as Git mirror clones.
-If you switch the archive type to `fossil`, cache22 keeps the Git mirror and also creates a Fossil archive alongside it.
-This experimental path is on hold because it does not guarantee reconstruction
-with original Git object IDs. It reuses an existing mirror without fetching and
-returns an existing Fossil sidecar without refreshing it. A conversion retry
-replaces staging left by the previous attempt.
-
-```sh
-# Optional: switch the default archival format from git to fossil
-cache22 config archive-type set fossil
-```
+Git is the only supported archive type and the default. Inspect or set it with
+`cache22 config archive-type show` and `cache22 config archive-type set git`.
+Archive type is separate from storage representation: Git repositories can be
+stored as mirrors or standalone bundles using the conversion command above.
 
 ### Clean-up
 
@@ -175,7 +161,6 @@ cache22 import clean all
 
 The entire configured archive directory is managed by Cache22.
 For `https://Git.Example.ORG/Team/Project.git`, files are stored directly under `ARCHIVE/git.example.org/team/project/`, including `project.git`, the `.clone-complete` marker, and the persistent `.lock` file.
-Optional Fossil output and staging data also live there.
 Repository directories are terminal containers. For example, importing both
 `host/team/project` and `host/team/project/child` into the same archive is rejected
 in either order, including simultaneous imports. Subgroup namespaces and sibling

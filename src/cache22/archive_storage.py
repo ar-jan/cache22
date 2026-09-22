@@ -112,12 +112,8 @@ class RepositoryStorage:
     def validate(self) -> None:
         for path, directory in (
             (self.paths.mirror_repository, True),
-            (self.paths.temp_dir, True),
             (self.paths.clone_complete_marker, False),
-            (self.paths.fossil_repository, False),
             (self.paths.source_file, False),
-            (self.paths.git_marks, False),
-            (self.paths.fossil_marks, False),
             (self.paths.bundle_manifest, False),
             (self.paths.bundle_staging, True),
         ):
@@ -157,8 +153,6 @@ class RepositoryStorage:
             self.entry(path.name) is not None
             for path in (
                 self.paths.mirror_repository,
-                self.paths.fossil_repository,
-                self.paths.temp_dir,
                 self.paths.clone_complete_marker,
                 self.paths.bundle_manifest,
                 self.paths.bundle_staging,
@@ -233,11 +227,9 @@ class RepositoryStorage:
     def release_unused_source(self) -> list[Path]:
         if self.has_import_state():
             return []
-        removed = []
-        for path in (self.paths.git_marks, self.paths.fossil_marks, self.paths.source_file):
-            if self.remove(path.name):
-                removed.append(path)
-        return removed
+        if self.remove(self.paths.source_file.name):
+            return [self.paths.source_file]
+        return []
 
     def write_clone_marker(self) -> None:
         name = self.paths.clone_complete_marker.name
