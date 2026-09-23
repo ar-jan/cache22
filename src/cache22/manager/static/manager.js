@@ -204,7 +204,7 @@
         for (const worker of data.workers) workers.append(element("p", `Worker ${worker.pid}: ${worker.stopped_at ? "stopped" : !worker.available ? "stale" : worker.current_job_id ? `running job ${worker.current_job_id}` : "idle"}; heartbeat ${worker.heartbeat_age_seconds}s ago`));
         $("#c22-counts").textContent = Object.entries(data.counts).map(([name, count]) => `${name}: ${count}`).join(" · ");
         $("#c22-jobs").replaceChildren(table([["Job", "id"], ["Repository", repositoryLink], ["Operation", "kind"], ["Origin", "origin"],
-          ["State", "state"], ["Attempt", "attempt_number"], ["Due / retry", "due_at"], ["Waiting for job", "blocking_job_id"], ["Elapsed (s)", "elapsed_seconds"], ["Phase", progress], ["Diagnostic", "error"]], data.jobs));
+          ["State", "state"], ["Attempt", "attempt_number"], ["Due / retry", "due_at"], ["Waiting for job", "blocking_job_id"], ["Elapsed (s)", "elapsed_seconds"], ["Phase", progress], ["Diagnostic", r => r.diagnostic?.error]], data.jobs));
       } else {
         const detail = $("#c22-detail"); detail.replaceChildren();
         for (const [key, value] of Object.entries(data.repository)) {
