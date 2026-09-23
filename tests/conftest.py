@@ -15,19 +15,17 @@ def mock_inventory_git(monkeypatch: pytest.MonkeyPatch) -> None:
     Real observations are exercised by the Git integration tests, not these
     subprocess contract tests.
     """
-    from cache22 import git_mirror, import_service, repo_service
-    from cache22.archive_storage import RepositoryStorage
+    from cache22 import git_mirror, repo_service
+    from cache22.storage import Repository
 
     def fields(
-        storage: RepositoryStorage | None,
+        repo: Repository,
         source_path: str,
         *,
         previously_ready: bool = False,
         expected_format: str = "git",
     ) -> dict[str, str]:
-        if storage is None:
-            return {"local_state": "absent"}
-        paths = storage.paths
+        paths = repo.paths
         mirror = paths.mirror_repository.exists()
         marker = paths.clone_complete_marker.exists()
         return {
@@ -38,8 +36,8 @@ def mock_inventory_git(monkeypatch: pytest.MonkeyPatch) -> None:
             else "absent"
         }
 
-    monkeypatch.setattr(repo_service, "local_fields", fields)
-    monkeypatch.setattr(import_service, "publish_remote", lambda *args: None)
+    monkeypatch.setattr(Repository, "observe_local", fields)
+    monkeypatch.setattr(repo_service, "publish_remote", lambda *args: None)
 
     monkeypatch.setattr(
         git_mirror, "_remote_head", lambda *args: git_mirror._RemoteHead(None, None)

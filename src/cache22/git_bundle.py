@@ -35,11 +35,6 @@ class BundleState:
     source_url: str
 
 
-def generation_names(storage: RepositoryStorage) -> list[str]:
-    pattern = re.compile(re.escape(storage.paths.repository_dir.name) + r"\.[0-9a-f]{32}\.bundle\Z")
-    return sorted(name for name in os.listdir(storage.directory_fd) if pattern.fullmatch(name))
-
-
 def _regular(storage: RepositoryStorage, name: str) -> int:
     entry = storage.entry(name)
     if entry is None or not stat.S_ISREG(entry.st_mode):
@@ -122,7 +117,7 @@ def read_bundle(storage: RepositoryStorage, source_path: str) -> BundleState:
     ):
         raise ValueError("Unsupported bundle manifest version or storage format")
     name = data["bundle_file"]
-    if not isinstance(name, str) or name not in generation_names(storage):
+    if not isinstance(name, str) or name not in storage.bundle_generations():
         raise ValueError("Invalid or missing bundle generation")
     if data["object_format"] not in ("sha1", "sha256"):
         raise ValueError("Unsupported bundle object format")
@@ -254,7 +249,7 @@ def clear_staging(storage: RepositoryStorage) -> None:
 def retire(storage: RepositoryStorage, state: BundleState) -> list[Path]:
     """Caller must have independently restored and verified the selected generation."""
     removed: list[Path] = []
-    names = [name for name in generation_names(storage) if name != state.path.name]
+    names = [name for name in storage.bundle_generations() if name != state.path.name]
     if storage.entry(storage.paths.mirror_repository.name) is not None:
         validate_git_mirror_layout(storage.paths.mirror_repository)
         names.append(storage.paths.mirror_repository.name)
@@ -276,7 +271,7 @@ def cleanup(storage: RepositoryStorage, source_path: str) -> list[Path]:
     if storage.entry(storage.paths.bundle_manifest.name) is not None:
         state = read_bundle(storage, source_path)
         retired = (
-            len(generation_names(storage)) > 1
+            len(storage.bundle_generations()) > 1
             or storage.entry(storage.paths.mirror_repository.name) is not None
             or storage.entry(storage.paths.clone_complete_marker.name) is not None
         )
@@ -285,14 +280,14 @@ def cleanup(storage: RepositoryStorage, source_path: str) -> list[Path]:
             storage.paths.bundle_staging.mkdir(mode=0o700)
             restore(state, storage.paths.bundle_staging / "verify.git")
             removed.extend(retire(storage, state))
-    elif generation_names(storage):
+    elif storage.bundle_generations():
         storage.validate_clone_marker()
         if storage.entry(storage.paths.clone_complete_marker.name) is None:
             raise ValueError(
                 "Unpublished bundles have no complete source mirror; preserving storage"
             )
         validate_git_mirror_layout(storage.paths.mirror_repository)
-        for name in generation_names(storage):
+        for name in storage.bundle_generations():
             with os.fdopen(_regular(storage, name), "rb"):
                 pass
             storage.remove(name)

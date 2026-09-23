@@ -11,14 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from . import operation
-from .archive_storage import RepositoryStorage
 from .git_config import (
     git_local_environment,
     git_repository_command,
     git_repository_environment,
-    validate_git_mirror_config,
 )
-from .git_layout import validate_git_mirror_layout
 from .system_tools import find_git_executable
 
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -89,56 +86,6 @@ def remote_snapshot(url: str) -> RefSnapshot:
     if refs and head is None:
         raise ValueError("Nonempty remote did not advertise HEAD")
     return RefSnapshot(refs, target, head)
-
-
-def local_fields(
-    storage: RepositoryStorage | None,
-    source_path: str,
-    *,
-    previously_ready: bool = False,
-    expected_format: str = "git",
-) -> dict[str, Any]:
-    empty: dict[str, Any] = {
-        "local_head_ref": None,
-        "local_head_oid": None,
-        "local_head_committed_at": None,
-        "local_ref_digest": None,
-    }
-    if storage is None:
-        return dict(empty, local_state="missing" if previously_ready else "absent")
-    paths = storage.paths
-    from .git_bundle import bundle_fields, generation_names
-
-    if storage.entry(paths.bundle_manifest.name) is not None:
-        try:
-            return bundle_fields(storage, source_path)
-        except ValueError, OSError, subprocess.SubprocessError:
-            return dict(empty, local_state="incomplete", storage_format="bundle")
-    if expected_format == "bundle":
-        return dict(empty, local_state="incomplete")
-    mirror_exists = storage.entry(paths.mirror_repository.name) is not None
-    marker_exists = storage.entry(paths.clone_complete_marker.name) is not None
-    if not mirror_exists and not marker_exists:
-        if generation_names(storage) or storage.entry(paths.bundle_staging.name) is not None:
-            return dict(empty, local_state="incomplete")
-        return dict(empty, local_state="missing" if previously_ready else "absent")
-    if not mirror_exists or not marker_exists:
-        return dict(empty, local_state="incomplete")
-    try:
-        storage.validate_clone_marker()
-        storage.check_source(source_path)
-        validate_git_mirror_layout(paths.mirror_repository)
-        git = find_git_executable()
-        validate_git_mirror_config(git, paths.mirror_repository, source_path)
-    except ValueError:
-        return dict(empty, local_state="incomplete")
-
-    snapshot, date, _ = mirror_snapshot(paths.mirror_repository)
-    return dict(
-        snapshot_fields(snapshot, date),
-        storage_format="git",
-        archive_file=paths.mirror_repository.name,
-    )
 
 
 def mirror_snapshot(mirror: Path) -> tuple[RefSnapshot, int | None, str]:

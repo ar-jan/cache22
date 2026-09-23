@@ -23,8 +23,10 @@ from cache22.index import Index
 from cache22.job_queue import Queue
 from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
-from cache22.repo_service import check_repository, execute_job, run_worker
+from cache22.repo_service import check_repository, execute_job
 from cache22.repository_ref import parse_repository_url
+from cache22.scheduler import Scheduler
+from cache22.worker import run_worker
 
 URL = "https://example.test/team/project"
 
@@ -51,12 +53,13 @@ class Repo:
         return git(self.source, "rev-parse", "HEAD")
 
     def fetch(self) -> Any:
-        return import_repository(URL, self.root, "git", index=self.index)
+        return import_repository(URL, self.root, index=self.index)
 
     def convert(self) -> Path:
         queue = Queue(self.index)
+        scheduler = Scheduler(self.index)
         job_id = queue.enqueue(self.id, "convert")
-        job = queue.claim(job_id)
+        job = scheduler.claim(job_id)
         assert job is not None
         return execute_job(self.index, job)
 
@@ -247,6 +250,7 @@ def test_missing_manifest_never_recreates_mirror(repo: Repo) -> None:
 def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
     repo.commit("first")
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     fetch = queue.enqueue(repo.id)
     conversion = bulk_command(repo.index, [repo.id], "convert")[0]["job_id"]
     assert queue.enqueue(repo.id, "convert") == conversion
@@ -255,7 +259,7 @@ def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
     deferred = queue_snapshot(repo.index, section="deferred")
     assert {job["id"] for job in deferred["jobs"]} == {conversion, check}
     assert all(job["blocking_job_id"] == fetch for job in deferred["jobs"])
-    assert queue.claim(conversion) is None
+    assert scheduler.claim(conversion) is None
     with pytest.raises(RepositoryBusyError):
         repo.fetch()
     results = run_worker(index=repo.index)
@@ -266,26 +270,27 @@ def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
 
 def test_retry_and_expired_claim_do_not_cross_conversion(repo: Repo) -> None:
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     first = queue.enqueue(repo.id, "fetch")
-    job = queue.claim(first)
+    job = scheduler.claim(first)
     assert job is not None
     conversion = queue.enqueue(repo.id, "convert")
     last = queue.enqueue(repo.id, "fetch")
     repo.clock[0] += 121
-    recovered = queue.claim()
+    recovered = scheduler.claim()
     assert recovered is not None and recovered["id"] == first
-    queue.finish(recovered, category="transport", error="offline")
-    assert queue.claim(conversion) is None
-    assert queue.claim(last) is None
-    assert queue.claim() is None
+    scheduler.finish(recovered, category="transport", error="offline")
+    assert scheduler.claim(conversion) is None
+    assert scheduler.claim(last) is None
+    assert scheduler.claim() is None
     queue.unqueue(repo.id)
     assert all(j["state"] == "cancelled" for j in queue.list())
 
 
 def test_cli_conversion_enqueues_without_reading_archive(repo: Repo) -> None:
-    result = CliRunner().invoke(app, ["repo", "convert", URL, "--to", "bundle", "--json"])
+    result = CliRunner().invoke(app, ["queue", URL, "--kind", "convert", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["status"] == "queued"
+    assert json.loads(result.output)[0]["status"] == "accepted"
     assert Queue(repo.index).list()[0]["kind"] == "convert"
     assert not repo.paths.repository_dir.exists()
 
@@ -313,6 +318,46 @@ def test_index_failure_after_publication_retains_source_and_audit_recovers(
     assert repo.index.get(repo.id)["storage_format"] == "bundle"
     clean_repository_import_state(URL)
     assert not repo.paths.mirror_repository.exists()
+
+
+def test_bundle_fetch_index_failure_retains_generation_and_recovers_offline(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = repo.commit("first")
+    repo.fetch()
+    previous = repo.convert()
+    latest = repo.commit("update")
+    update = repo.index.update
+
+    def fail_publication(repository_id: int, **fields: Any) -> None:
+        if fields.get("storage_format") == "bundle":
+            raise sqlite3.OperationalError("injected index failure")
+        update(repository_id, **fields)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(repo.index, "update", fail_publication)
+        with pytest.raises(sqlite3.OperationalError, match="injected index failure"):
+            repo.fetch()
+
+    manifest = json.loads(repo.paths.bundle_manifest.read_text())
+    published = repo.paths.repository_dir / manifest["bundle_file"]
+    assert published != previous
+    assert published.is_file()
+    assert previous.is_file()
+    record = repo.index.get(repo.id)
+    assert record["local_head_oid"] == first
+    assert record["reconciliation_required"]
+
+    repo.source.rename(repo.source.with_name("offline"))
+    assert any(issue["fixed"] for issue in audit(index=repo.index, fix=True))
+    record = repo.index.get(repo.id)
+    assert record["local_head_oid"] == latest
+    assert record["archive_path"] == str(published)
+    assert not record["reconciliation_required"]
+    assert previous in clean_repository_import_state(URL)
+    assert not previous.exists()
+    assert published.is_file()
+    assert audit(index=repo.index) == []
 
 
 def test_expired_conversion_claim_cannot_publish(
@@ -390,8 +435,8 @@ def test_direct_import_updates_existing_bundle(repo: Repo) -> None:
 def test_scheduled_fetch_updates_bundle_and_conversion_does_not_change_schedule(repo: Repo) -> None:
     repo.commit("first")
     repo.fetch()
-    queue = Queue(repo.index)
-    queue.schedule(repo.id, 60)
+    scheduler = Scheduler(repo.index)
+    scheduler.schedule(repo.id, 60)
     with repo.index.connect() as db:
         before = dict(db.execute("SELECT * FROM schedules").fetchone())
     repo.convert()
@@ -407,15 +452,16 @@ def test_scheduled_fetch_updates_bundle_and_conversion_does_not_change_schedule(
 
 def test_claim_waits_for_running_immediate_check_even_with_older_fetch(repo: Repo) -> None:
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     first = queue.enqueue(repo.id, "fetch")
-    running = queue.immediate(repo.id, "check")
-    other_worker = Queue(Index(repo.index.path, clock=lambda: repo.clock[0]))
+    running = scheduler.immediate(repo.id, "check")
+    other_worker = Scheduler(Index(repo.index.path, clock=lambda: repo.clock[0]))
     assert other_worker.claim() is None
     assert (
         queue_snapshot(repo.index, section="deferred")["jobs"][0]["blocking_job_id"]
         == running["id"]
     )
-    queue.finish(running)
+    scheduler.finish(running)
     claimed = other_worker.claim()
     assert claimed is not None and claimed["id"] == first
 

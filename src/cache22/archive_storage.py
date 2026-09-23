@@ -4,6 +4,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import shutil
 import stat
 import time
@@ -146,9 +147,13 @@ class RepositoryStorage:
             os.unlink(name, dir_fd=self.directory_fd)
         return True
 
-    def has_import_state(self) -> bool:
-        from .git_bundle import generation_names
+    def bundle_generations(self) -> list[str]:
+        pattern = re.compile(
+            re.escape(self.paths.repository_dir.name) + r"\.[0-9a-f]{32}\.bundle\Z"
+        )
+        return sorted(name for name in os.listdir(self.directory_fd) if pattern.fullmatch(name))
 
+    def has_import_state(self) -> bool:
         return any(
             self.entry(path.name) is not None
             for path in (
@@ -157,7 +162,7 @@ class RepositoryStorage:
                 self.paths.bundle_manifest,
                 self.paths.bundle_staging,
             )
-        ) or bool(generation_names(self))
+        ) or bool(self.bundle_generations())
 
     def read_source(self) -> str | None:
         name = self.paths.source_file.name

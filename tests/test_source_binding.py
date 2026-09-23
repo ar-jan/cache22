@@ -11,8 +11,9 @@ from typer.testing import CliRunner
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.archive_storage import repository_operation
 from cache22.cli import app
-from cache22.import_service import ImportResult, import_repository
+from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
+from cache22.repo_service import ImportResult
 from cache22.repository_ref import parse_repository_url
 
 pytestmark = pytest.mark.usefixtures("mock_inventory_git")
@@ -72,17 +73,17 @@ def test_ipv6_clone_url_and_archive_reuse(
     assert repository.source_path == f"2001:db8::1/{path}"
     assert repository.clone_url == expected
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
-        first = import_repository(url, tmp_path, "git", case_sensitive=case_sensitive)
+        first = import_repository(url, tmp_path, case_sensitive=case_sensitive)
         assert run.call_args.args[0][-2] == expected
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
         assert (
-            import_repository(url, tmp_path, "git", case_sensitive=case_sensitive).archive_path
+            import_repository(url, tmp_path, case_sensitive=case_sensitive).archive_path
             == first.archive_path
         )
         assert fetch.call_args.kwargs["url"] == expected
@@ -91,10 +92,10 @@ def test_ipv6_clone_url_and_archive_reuse(
 @pytest.mark.parametrize("first_override", [False, True])
 def test_source_conflicts_before_archive_reuse(tmp_path: Path, first_override: bool) -> None:
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=clone) as run,
     ):
-        result = import_repository(URL, tmp_path, "git", case_sensitive=first_override)
+        result = import_repository(URL, tmp_path, case_sensitive=first_override)
         assert (
             run.call_args.args[0][-2]
             == parse_repository_url(URL, case_sensitive=first_override).clone_url
@@ -102,16 +103,16 @@ def test_source_conflicts_before_archive_reuse(tmp_path: Path, first_override: b
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     before = paths.source_file.read_bytes()
     with (
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="stored .*requested"),
     ):
-        import_repository(URL, tmp_path, "git", case_sensitive=not first_override)
+        import_repository(URL, tmp_path, case_sensitive=not first_override)
     path = "Team/Repo" if first_override else "team/repo"
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
-        reused = import_repository(f"User@host:/{path}", tmp_path, "git", case_sensitive=True)
+        reused = import_repository(f"User@host:/{path}", tmp_path, case_sensitive=True)
     fetch.assert_called_once()
     assert reused.archive_path == result.archive_path
     assert paths.source_file.read_bytes() == before
@@ -125,11 +126,11 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
         raise subprocess.CalledProcessError(1, args)
 
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=failed),
         pytest.raises(RuntimeError),
     ):
-        import_repository(URL, tmp_path, "git", case_sensitive=True)
+        import_repository(URL, tmp_path, case_sensitive=True)
     assert not paths.source_file.exists()
     inode = paths.lock_file.stat().st_ino
     with repository_operation(tmp_path, paths) as storage:
@@ -139,10 +140,10 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(tmp_path: Path) ->
     clean_repository_import_state(URL, (tmp_path,))
     assert not paths.source_file.exists()
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
-        import_repository(URL, tmp_path, "git")
+        import_repository(URL, tmp_path)
     assert json.loads(paths.source_file.read_text()) == {"source_path": "host/team/repo"}
     assert paths.lock_file.stat().st_ino == inode
 
@@ -161,7 +162,7 @@ def test_malformed_binding_is_never_replaced(tmp_path: Path, metadata: str, mess
     with repository_operation(tmp_path, paths, create=True):
         paths.source_file.write_text(metadata)
     with pytest.raises(ValueError, match=message):
-        import_repository(URL, tmp_path, "git")
+        import_repository(URL, tmp_path)
     assert paths.source_file.read_text() == metadata
 
 
@@ -198,9 +199,11 @@ def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: st
 
 
 def test_cli_passes_case_sensitive_option(tmp_path: Path) -> None:
-    with patch("cache22.cli.import_repository", return_value=ImportResult(tmp_path)) as call:
-        assert CliRunner().invoke(app, ["import", "repo", URL, "--case-sensitive"]).exit_code == 0
-    call.assert_called_once_with(URL, case_sensitive=True, adopt=False)
+    with patch("cache22.repo_cli.import_repository", return_value=ImportResult(tmp_path)) as call:
+        CliRunner().invoke(app, ["fetch", URL, "--case-sensitive"])
+    assert call.call_args.args == (URL,)
+    assert call.call_args.kwargs["case_sensitive"] is True
+    assert call.call_args.kwargs["adopt"] is False
 
 
 def test_import_does_not_claim_nonempty_unowned_storage(tmp_path: Path) -> None:
@@ -208,19 +211,18 @@ def test_import_does_not_claim_nonempty_unowned_storage(tmp_path: Path) -> None:
     unrelated = paths.repository_dir / "unrelated"
     unrelated.mkdir(parents=True)
     with pytest.raises(ValueError, match="nonempty"):
-        import_repository(URL, tmp_path, "git")
+        import_repository(URL, tmp_path)
     assert list(paths.repository_dir.iterdir()) == [unrelated]
 
 
 def test_repository_name_ending_in_git_can_be_reused(tmp_path: Path) -> None:
     url = "https://host/Team/Repo.git.git"
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
-        first = import_repository(url, tmp_path, "git", case_sensitive=True)
+        first = import_repository(url, tmp_path, case_sensitive=True)
     with patch("cache22.git_mirror._fetch_git_mirror"):
         assert (
-            import_repository(url, tmp_path, "git", case_sensitive=True).archive_path
-            == first.archive_path
+            import_repository(url, tmp_path, case_sensitive=True).archive_path == first.archive_path
         )

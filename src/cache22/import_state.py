@@ -6,18 +6,17 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
 
-from .archive_layout import archive_paths_for_directory, archive_paths_for_repository
+from .archive_layout import archive_paths_for_directory
 from .archive_storage import (
-    RepositoryStorage,
     has_repository_boundary,
     open_archive_directory,
-    repository_operation,
 )
 from .config import list_archive_dirs, normalize_archive_dir
 from .index import Index
 from .repo_audit import register_storage
 from .repo_service import publish_local
 from .repository_ref import parse_repository_url, validate_storage_component
+from .storage import Repository
 
 
 def clean_repository_import_state(
@@ -28,10 +27,9 @@ def clean_repository_import_state(
     removed_paths: list[Path] = []
 
     for archive_dir in _resolve_archive_dirs(archive_dirs):
-        paths = archive_paths_for_repository(archive_dir, repository)
-        with repository_operation(archive_dir, paths) as storage:
-            if storage is not None:
-                removed_paths.extend(_clean_repository_storage(storage))
+        with Repository.open(archive_dir, repository) as repo:
+            if repo is not None:
+                removed_paths.extend(_clean_repository_storage(repo))
 
     return tuple(sorted(removed_paths, key=str))
 
@@ -50,7 +48,7 @@ def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ..
         archive_dirs = list_archive_dirs()
         if not archive_dirs:
             raise ValueError(
-                "No archive directories configured. Add one with 'cache22 config archive add PATH'"
+                "No archive roots configured. Add one with 'cache22 config root add PATH'"
             )
     return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
 
@@ -80,71 +78,41 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
                 except FileNotFoundError:
                     marker_is_symlink = False
         # Release shared discovery reservations before requesting an exclusive
-        # repository reservation. repository_operation rechecks the marker.
+        # repository reservation. Repository.open_directory rechecks the marker.
         if paths is not None:
             with (
-                repository_operation(root, paths)
+                Repository.open_directory(root, paths.repository_dir)
                 if not marker_is_symlink
-                else nullcontext(None) as storage
+                else nullcontext(None) as repo
             ):
-                if storage is not None:
-                    removed_paths.extend(_clean_repository_storage(storage))
+                if repo is not None:
+                    removed_paths.extend(_clean_repository_storage(repo))
             continue
         directories_to_visit.extend(relative / name for name in children if _valid_component(name))
 
     return removed_paths
 
 
-def _clean_repository_storage(storage: RepositoryStorage) -> list[Path]:
-    paths = storage.paths
+def _clean_repository_storage(repo: Repository) -> list[Path]:
+    paths = repo.paths
     index = Index()
     with index.connect() as db:
         row = db.execute(
             "SELECT id FROM inventory WHERE repository_dir=?", (str(paths.repository_dir),)
         ).fetchone()
     record = index.get(row["id"]) if row else None
-    if (
-        record is not None
-        and record["storage_format"] == "bundle"
-        and storage.entry(paths.bundle_manifest.name) is None
-    ):
-        raise ValueError("Selected bundle manifest is missing; preserving all archive data")
-    if record is None and (
-        storage.entry(paths.clone_complete_marker.name) is not None
-        or storage.entry(paths.bundle_manifest.name) is not None
-    ):
-        source = storage.read_source()
-        if source is not None:
-            components = source.split("/")
-            root = paths.repository_dir.parents[len(components) - 1]
-            try:
-                record = register_storage(index, root, storage)
-            except ValueError:
-                pass
+    if record is not None:
+        repo.require_selected_format(record["storage_format"])
+    if record is None and repo.has_completion_metadata and repo.read_source() is not None:
+        try:
+            record = register_storage(index, repo.root, repo)
+        except ValueError:
+            pass
     if record is not None:
         index.update(record["id"], reconciliation_required=True)
-    removed_paths: list[Path] = []
-    from .git_bundle import cleanup, generation_names
-
-    bundled = storage.entry(paths.bundle_manifest.name) is not None
-    if bundled or generation_names(storage) or storage.entry(paths.bundle_staging.name) is not None:
-        source = storage.read_source()
-        if source is None:
-            raise ValueError("Bundle storage has no source binding; preserving it")
-        removed_paths.extend(cleanup(storage, source))
-
-    mirror_exists = storage.entry(paths.mirror_repository.name) is not None
-    marker_exists = storage.entry(paths.clone_complete_marker.name) is not None
-    if mirror_exists and not marker_exists:
-        storage.remove(paths.mirror_repository.name)
-        removed_paths.append(paths.mirror_repository)
-    if marker_exists and not mirror_exists and not bundled:
-        storage.remove(paths.clone_complete_marker.name)
-        removed_paths.append(paths.clone_complete_marker)
-
-    removed_paths.extend(storage.release_unused_source())
+    removed_paths = repo.clean()
     if record is not None:
-        publish_local(index, record, storage)
+        publish_local(index, record, repo)
     return removed_paths
 
 

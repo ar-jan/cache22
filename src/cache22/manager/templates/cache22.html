@@ -18,7 +18,7 @@
     <select name="root"><option value="">Keep existing binding; otherwise use default root</option>
     {% for root in roots %}<option value="{{ root }}">{{ root }}</option>{% endfor %}</select>
   </label>
-  {% if not roots %}<p>Configure an archive root with <code>cache22 config archive add PATH</code> before adding new repositories.</p>{% endif %}
+  {% if not roots %}<p>Configure an archive root with <code>cache22 config root add PATH</code> before adding new repositories.</p>{% endif %}
   <label><input type="checkbox" name="case_sensitive"> Preserve remote path case</label>
   <label>After registration <select name="fetch"><option value="false">Register only</option><option value="true">Register and fetch</option></select></label>
   <p>Fetching is queued. Recurring scheduling is a separate action.</p>

@@ -37,14 +37,14 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
         return subprocess.CompletedProcess(args, 0)
 
     with (
-        patch("cache22.import_service.find_git_executable", return_value=Path("/usr/bin/git")),
+        patch("cache22.storage.find_git_executable", return_value=Path("/usr/bin/git")),
         patch("cache22.git_mirror.run_git", side_effect=clone),
-        patch("cache22.repo_service.local_fields", return_value={"local_state": "ready"}),
-        patch("cache22.import_service.publish_remote"),
+        patch("cache22.storage.Repository.observe_local", return_value={"local_state": "ready"}),
+        patch("cache22.repo_service.publish_remote"),
         patch("cache22.git_mirror._remote_head", return_value=None),
         patch("cache22.git_mirror._synchronize_head"),
     ):
-        import_repository(URL, root, "git")
+        import_repository(URL, root)
 
 
 def _hold_lock(root: Path, entered: Event, release: Event) -> None:
@@ -85,10 +85,10 @@ def _pause_registration(root: Path, entered: Event, release: Event) -> None:
 def _import_conflicting_child(root: Path, entered: Event, finished: Event) -> None:
     entered.set()
     with (
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(URL + "/child", root, "git")
+        import_repository(URL + "/child", root)
     finished.set()
 
 
@@ -127,10 +127,10 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     try:
         assert entered.wait(10)
         with (
-            patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+            patch("cache22.storage.find_git_executable", side_effect=AssertionError),
             pytest.raises(RepositoryBusyError, match="Repository is busy"),
         ):
-            import_repository("https://host/Team/Project", tmp_path, "git", case_sensitive=True)
+            import_repository("https://host/Team/Project", tmp_path, case_sensitive=True)
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
             clean_repository_import_state(URL, (tmp_path,))
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
@@ -148,7 +148,7 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     assert paths.clone_complete_marker.is_file()
     lock_inode = paths.lock_file.stat().st_ino
     with patch("cache22.git_mirror._fetch_git_mirror"):
-        assert import_repository(URL, tmp_path, "git").archive_path == paths.mirror_repository
+        assert import_repository(URL, tmp_path).archive_path == paths.mirror_repository
     assert clean_repository_import_state(URL, (tmp_path,)) == ()
     assert paths.lock_file.stat().st_ino == lock_inode
     assert (paths.mirror_repository / "HEAD").read_text() == "winner"
@@ -180,7 +180,7 @@ def test_active_descendant_prevents_ancestor_reservation(tmp_path: Path) -> None
     child = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "/child"))
     with repository_operation(tmp_path, child, create=True):
         with pytest.raises(RepositoryBusyError):
-            import_repository(URL, tmp_path, "git", adopt=True)
+            import_repository(URL, tmp_path, adopt=True)
         assert not parent.lock_file.exists()
 
 

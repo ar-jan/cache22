@@ -13,19 +13,9 @@ from contextlib import contextmanager
 from typing import Any
 
 from .index import Index
-from .job_queue import Queue
 from .operation import OperationInterrupted
 from .repo_service import error_text, execute_job
-
-
-def notify_ready() -> None:
-    value = os.environ.pop("CACHE22_READY_FD", None)
-    if value is not None:
-        fd = int(value)
-        try:
-            os.write(fd, b"1")
-        finally:
-            os.close(fd)
+from .scheduler import Scheduler
 
 
 @contextmanager
@@ -40,6 +30,27 @@ def shutdown_signals(stop: threading.Event) -> Iterator[None]:
             signal.signal(sig, handler)
 
 
+def run_worker(
+    *,
+    index: Index | None = None,
+    check_timeout: float = 120,
+    fetch_timeout: float = 7200,
+    convert_timeout: float = 7200,
+    stop: threading.Event | None = None,
+) -> list[dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
+    run_continuous(
+        index=index,
+        stop=stop,
+        check_timeout=check_timeout,
+        fetch_timeout=fetch_timeout,
+        convert_timeout=convert_timeout,
+        report=outcomes.append,
+        once=True,
+    )
+    return outcomes
+
+
 def run_continuous(
     *,
     index: Index | None = None,
@@ -48,7 +59,6 @@ def run_continuous(
     fetch_timeout: float = 7200,
     convert_timeout: float = 7200,
     report: Callable[[dict[str, Any]], None] = lambda result: None,
-    ready: Callable[[], None] = lambda: None,
     once: bool = False,
 ) -> None:
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
@@ -79,14 +89,13 @@ def run_continuous(
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
-    queue = Queue(index)
+    scheduler = Scheduler(index)
     try:
-        ready()
         while not stop.is_set():
-            queue.materialize()
+            scheduler.tick()
             if stop.is_set():
                 break
-            job = queue.claim()
+            job = scheduler.claim()
             if job is None:
                 if once:
                     break

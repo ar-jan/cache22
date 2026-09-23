@@ -19,11 +19,9 @@ from cache22.config import (
     ConfigError,
     _save_config,
     add_archive_dir,
-    default_archive_type,
     list_archive_dirs,
     load_config,
     normalize_archive_dir,
-    set_archive_type,
 )
 
 
@@ -40,7 +38,7 @@ def write_config(tmp_path: Path, contents: str) -> Path:
     return config_path
 
 
-def test_load_defaults_archive_type_to_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_reads_archive_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     write_config(tmp_path, f'archive_dirs = ["{archive_dir}"]\n')
@@ -49,7 +47,6 @@ def test_load_defaults_archive_type_to_git(tmp_path: Path, monkeypatch: pytest.M
     config = load_config()
 
     assert config.archive_dirs == [archive_dir.resolve()]
-    assert config.archive_type == "git"
 
 
 def test_rejects_non_list_archive_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,22 +62,6 @@ def test_rejects_non_string_archive_dirs(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     with pytest.raises(ConfigError, match=r"'archive_dirs\[0\]' must be a string"):
-        load_config()
-
-
-def test_rejects_non_string_archive_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    write_config(tmp_path, "archive_type = 123\n")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-    with pytest.raises(ConfigError, match="'archive_type' must be a string"):
-        load_config()
-
-
-def test_rejects_invalid_archive_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    write_config(tmp_path, 'archive_type = "bundle"\n')
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-    with pytest.raises(ConfigError, match="Unsupported archive type"):
         load_config()
 
 
@@ -144,17 +125,6 @@ def test_add_archive_dir_detects_duplicate_loaded_canonical_path(
     assert list_archive_dirs() == [archive_dir.resolve()]
 
 
-def test_set_archive_type_persists_normalized_value(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-    archive_type = set_archive_type("GIT")
-
-    assert archive_type == "git"
-    assert default_archive_type() == "git"
-
-
 def test_load_reports_unreadable_config_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -186,7 +156,7 @@ def test_failed_save_preserves_previous_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    original = Config([tmp_path / "archive"], "git")
+    original = Config([tmp_path / "archive"])
     _save_config(original)
     path = tmp_path / "cache22" / "config.toml"
     previous_bytes = path.read_bytes()
@@ -209,7 +179,7 @@ def test_failed_save_preserves_previous_config(
         patch(target, side_effect=effect),
         pytest.raises(ConfigError, match="Config file could not be written"),
     ):
-        _save_config(Config([tmp_path / "replacement"], "git"))
+        _save_config(Config([tmp_path / "replacement"]))
 
     assert path.read_bytes() == previous_bytes
     assert load_config() == original
@@ -224,7 +194,7 @@ def test_list_reports_invalid_config_without_traceback(
     write_config(tmp_path, 'archive_dirs = "not-a-list"\n')
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["config", "archive", "list"])
+    result = runner.invoke(app, ["config", "root", "list"])
 
     assert result.exit_code == 1
     assert "'archive_dirs' must be a list of strings" in result.output
@@ -241,39 +211,10 @@ def test_add_reports_write_failure_without_traceback(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     with patch("cache22.config._save_config", side_effect=OSError("disk full")):
-        result = runner.invoke(app, ["config", "archive", "add", str(archive_dir)])
+        result = runner.invoke(app, ["config", "root", "add", str(archive_dir)])
 
     assert result.exit_code == 1
     assert "disk full" in result.output
-    assert "Traceback" not in result.output
-
-
-def test_archive_type_show_reports_configured_value(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    write_config(tmp_path, 'archive_type = "git"\n')
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-    result = runner.invoke(app, ["config", "archive-type", "show"])
-
-    assert result.exit_code == 0
-    assert result.output == "git\n"
-
-
-def test_archive_type_set_updates_config_without_traceback(
-    runner: CliRunner,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-    result = runner.invoke(app, ["config", "archive-type", "set", "git"])
-
-    assert result.exit_code == 0
-    assert "Default archive type: git" in result.output
-    assert default_archive_type() == "git"
     assert "Traceback" not in result.output
 
 
@@ -287,16 +228,15 @@ def test_list_reports_unreadable_config_without_traceback(
     (config_dir / "config.toml").mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["config", "archive", "list"])
+    result = runner.invoke(app, ["config", "root", "list"])
 
     assert result.exit_code == 1
     assert "Config file could not be read" in result.output
     assert "Traceback" not in result.output
 
 
-@pytest.mark.parametrize("second_change", ["archive", "archive_type"])
 def test_concurrent_config_commands_preserve_both_changes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_change: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     first, second = tmp_path / "first", tmp_path / "second"
@@ -325,20 +265,14 @@ def test_concurrent_config_commands_preserve_both_changes(
         first_result = pool.submit(add_archive_dir, first)
         try:
             assert publishing.wait(5)
-            second_result = (
-                pool.submit(add_archive_dir, second)
-                if second_change == "archive"
-                else pool.submit(set_archive_type, "git")
-            )
+            second_result = pool.submit(add_archive_dir, second)
             assert contending.wait(5)
         finally:
             release.set()
         assert first_result.result(timeout=5) == (first, True)
-        second_result.result(timeout=5)
+        assert second_result.result(timeout=5) == (second, True)
 
-    config = load_config()
-    assert config.archive_dirs == ([first, second] if second_change == "archive" else [first])
-    assert config.archive_type == "git"
+    assert load_config().archive_dirs == [first, second]
 
 
 def test_failed_config_transaction_releases_lock(

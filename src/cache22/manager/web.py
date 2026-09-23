@@ -1,31 +1,18 @@
-"""Web child entrypoint; never launches workers or scheduling tasks."""
+"""Run the web server independently of workers."""
 
 from __future__ import annotations
 
-import sys
-from typing import Any
+from typing import Annotated
 
+import typer
 import uvicorn
 
-from ..worker import notify_ready
+from ..cli_support import command
 from .app import create_datasette
 
 
-class Server(uvicorn.Server):
-    async def startup(self, sockets: Any = None) -> None:
-        await super().startup(sockets=sockets)
-        if self.started:
-            notify_ready()
-
-
-def main() -> None:
+@command
+def serve(port: Annotated[int, typer.Option(min=1, max=65535)] = 8001) -> None:
+    """Serve the browser manager on loopback; start workers separately."""
     ds = create_datasette()
-    Server(
-        uvicorn.Config(
-            ds.app(), host="127.0.0.1", port=int(sys.argv[1]), proxy_headers=False, access_log=False
-        )
-    ).run()
-
-
-if __name__ == "__main__":
-    main()
+    uvicorn.run(ds.app(), host="127.0.0.1", port=port, proxy_headers=False, access_log=False)

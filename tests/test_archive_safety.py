@@ -29,7 +29,7 @@ from cache22.repository_ref import parse_repository_url
 )
 def test_unsafe_repository_urls_fail_before_filesystem_changes(tmp_path: Path, url: str) -> None:
     with pytest.raises(ValueError, match="Unsafe|reserved"):
-        import_repository(url, tmp_path, "git")
+        import_repository(url, tmp_path)
     with pytest.raises(ValueError, match="Unsafe|reserved"):
         clean_repository_import_state(url, (tmp_path,))
     assert list(tmp_path.iterdir()) == []
@@ -42,7 +42,7 @@ def test_query_and_fragment_delimiters_fail_before_storage_changes(
 ) -> None:
     url = f"{prefix}team/project{suffix}"
     with pytest.raises(ValueError, match="query or fragment"):
-        import_repository(url, tmp_path, "git")
+        import_repository(url, tmp_path)
     with pytest.raises(ValueError, match="query or fragment"):
         clean_repository_import_state(url, (tmp_path,))
     assert list(tmp_path.iterdir()) == []
@@ -89,10 +89,10 @@ def test_import_rejects_repository_prefix_conflicts(
         paths.clone_complete_marker.write_text("complete\n")
     before = sorted(tmp_path.rglob("*"))
     with (
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(second, tmp_path, "git", case_sensitive=True)
+        import_repository(second, tmp_path, case_sensitive=True)
     assert sorted(tmp_path.rglob("*")) == before
     assert (paths.mirror_repository / "HEAD").read_text() == "keep"
     assert clean_all_import_state((tmp_path,)) == ()
@@ -144,7 +144,7 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
 
     for operation in (
         lambda: clean_repository_import_state(url, (root,)),
-        lambda: import_repository(url, root, "git"),
+        lambda: import_repository(url, root),
     ):
         with pytest.raises((OSError, ValueError), match="directory|symbolic|Unsafe"):
             operation()
@@ -194,12 +194,12 @@ def test_missing_configured_root_fails_before_clone_or_cleanup(tmp_path: Path) -
     with (
         patch("cache22.config.list_archive_dirs", return_value=[missing]),
         patch("cache22.import_state.list_archive_dirs", return_value=[missing]),
-        patch("cache22.import_service.find_git_executable", side_effect=AssertionError),
+        patch("cache22.storage.find_git_executable", side_effect=AssertionError),
     ):
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
-            import_repository("https://host/team/project", archive_type="git")
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
+        with pytest.raises(ValueError, match="Archive root does not exist"):
+            import_repository("https://host/team/project")
+        with pytest.raises(ValueError, match="Archive root does not exist"):
             clean_all_import_state()
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
+        with pytest.raises(ValueError, match="Archive root does not exist"):
             clean_repository_import_state("https://host/team/project")
     assert not missing.exists()
