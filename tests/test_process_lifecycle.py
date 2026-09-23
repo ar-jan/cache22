@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -31,7 +30,7 @@ def test_worker_sigterm_stops_git_and_recovers_attempt(tmp_path: Path) -> None:
     )
     git.chmod(0o755)
     process = subprocess.Popen(
-        [sys.executable, "-m", "cache22", "worker", "run", "--continuous"],
+        [sys.executable, "-m", "cache22", "worker"],
         env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -58,45 +57,63 @@ def test_worker_sigterm_stops_git_and_recovers_attempt(tmp_path: Path) -> None:
             process.wait(timeout=10)
 
 
-def test_combined_launcher_owns_worker_and_fails_with_child(tmp_path: Path) -> None:
+def test_web_runs_without_worker_and_stops_independently(tmp_path: Path) -> None:
+    index = Index()
+    repository = add_repository("https://host/team/repo", tmp_path, index=index)
+    queue = Queue(index)
+    queue.enqueue(repository["id"], "check")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     base = f"http://127.0.0.1:{port}"
-    with (tmp_path / "manager.log").open("w+") as log:
+    with (tmp_path / "web.log").open("w+") as log:
         process = subprocess.Popen(
-            [sys.executable, "-m", "cache22", "manager", "run", "--port", str(port)],
+            [sys.executable, "-m", "cache22", "web", "--port", str(port)],
             stdout=log,
             stderr=log,
         )
+        worker = None
         try:
             deadline = time.monotonic() + 10
-            workers = []
+            health = None
             while time.monotonic() < deadline and process.poll() is None:
                 try:
                     with urllib.request.urlopen(
                         base + "/-/cache22/api/health", timeout=0.2
                     ) as response:
-                        workers = json.load(response)["workers"]
-                    if workers:
-                        break
+                        health = json.load(response)
+                    break
                 except OSError:
-                    pass
-                time.sleep(0.05)
-            assert len(workers) == 1
-            worker_pid = workers[0]["pid"]
-            # Opening another page cannot launch another worker.
+                    time.sleep(0.05)
+            assert health is not None
+            assert health["workers"] == []
             urllib.request.urlopen(base + "/-/cache22/queue", timeout=2).close()
-            with urllib.request.urlopen(base + "/-/cache22/api/health", timeout=2) as response:
-                assert len(json.load(response)["workers"]) == 1
-            os.kill(worker_pid, signal.SIGTERM)
+            assert queue.list()[0]["state"] == "pending"
+            assert queue.list()[0]["attempts"] == []
+            queue.unqueue(repository["id"])
+            worker = subprocess.Popen(
+                [sys.executable, "-m", "cache22", "worker"], stdout=log, stderr=log
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and worker.poll() is None:
+                with urllib.request.urlopen(base + "/-/cache22/api/health", timeout=1) as response:
+                    health = json.load(response)
+                if health["workers"]:
+                    break
+                time.sleep(0.05)
+            assert len(health["workers"]) == 1
+            assert health["workers"][0]["pid"] == worker.pid
+            process.terminate()
             process.wait(timeout=10)
-            assert process.returncode == 1
+            assert process.returncode in (0, -15)
+            assert worker.poll() is None
+            assert queue.list()[0]["state"] == "cancelled"
             with pytest.raises(urllib.error.URLError, match="Connection refused"):
                 urllib.request.urlopen(base, timeout=0.5)
-            with pytest.raises(ProcessLookupError):
-                os.kill(worker_pid, 0)
         finally:
+            if worker is not None and worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=10)
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=15)

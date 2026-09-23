@@ -48,7 +48,7 @@ def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ..
         archive_dirs = list_archive_dirs()
         if not archive_dirs:
             raise ValueError(
-                "No archive directories configured. Add one with 'cache22 config archive add PATH'"
+                "No archive roots configured. Add one with 'cache22 config root add PATH'"
             )
     return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
 

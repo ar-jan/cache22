@@ -18,16 +18,6 @@ from .repo_service import error_text, execute_job
 from .scheduler import Scheduler
 
 
-def notify_ready() -> None:
-    value = os.environ.pop("CACHE22_READY_FD", None)
-    if value is not None:
-        fd = int(value)
-        try:
-            os.write(fd, b"1")
-        finally:
-            os.close(fd)
-
-
 @contextmanager
 def shutdown_signals(stop: threading.Event) -> Iterator[None]:
     previous = {
@@ -69,7 +59,6 @@ def run_continuous(
     fetch_timeout: float = 7200,
     convert_timeout: float = 7200,
     report: Callable[[dict[str, Any]], None] = lambda result: None,
-    ready: Callable[[], None] = lambda: None,
     once: bool = False,
 ) -> None:
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
@@ -102,7 +91,6 @@ def run_continuous(
     thread.start()
     scheduler = Scheduler(index)
     try:
-        ready()
         while not stop.is_set():
             scheduler.tick()
             if stop.is_set():

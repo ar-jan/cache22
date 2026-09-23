@@ -184,54 +184,56 @@ def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0
     }
 
 
-def error_snapshot(index: Index, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
-    """Latest completed problem per unfinished or failed job, including active retries."""
-    _page(limit, offset)
-    now = index.now()
-    with index.connect() as db:
-        db.execute("BEGIN")
-        rows = [
-            dict(row)
-            for row in db.execute(
-                """SELECT e.job_id AS id,e.repository_id,r.repo_key,e.kind,e.origin,e.state,
-                e.due_at,e.retry_count,e.attempt_id,e.error_at,e.outcome,e.error_category,e.error,
-                (SELECT count(*) FROM job_attempts n
-                 WHERE n.job_id=e.job_id AND n.id<=e.attempt_id) AS attempt_number
-                FROM job_errors e JOIN repositories r ON r.id=e.repository_id
-                ORDER BY e.error_at DESC,e.attempt_id DESC LIMIT ? OFFSET ?""",
-                (limit + 1, offset),
-            )
-        ]
-    return {
-        "observed_at": now,
-        "errors": rows[:limit],
-        "next_offset": offset + limit if len(rows) > limit else None,
-    }
-
-
 def queue_snapshot(
+    index: Index, *, section: str = "running", limit: int = 100, offset: int = 0
+) -> dict[str, Any]:
+    """Browser queue sections backed by the shared inspection query."""
+    sections = ("running", "runnable", "deferred", "history")
+    if section not in sections:
+        raise ValueError("Unknown queue section")
+    snapshot = jobs_snapshot(
+        index, state=section, limit=limit, offset=offset, include_attempts=False
+    )
+    snapshot["section"] = snapshot.pop("state")
+    snapshot["counts"] = {name: snapshot["counts"][name] for name in sections}
+    return snapshot
+
+
+def jobs_snapshot(
     index: Index,
     *,
-    section: str = "running",
+    state: str = "all",
+    repository_id: int | None = None,
+    include_attempts: bool = True,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
     _page(limit, offset)
     now = index.now()
     predicates = {
+        "all": "1",
+        "pending": "j.state='pending'",
+        "failed": "EXISTS (SELECT 1 FROM job_errors e WHERE e.job_id=j.id)",
         "running": "j.state='running'",
         "runnable": f"j.state='pending' AND j.due_at<=:now AND ({BLOCKING_JOB_SQL}) IS NULL",
         "deferred": f"j.state='pending' AND (j.due_at>:now OR ({BLOCKING_JOB_SQL}) IS NOT NULL)",
         "history": "j.state IN ('succeeded','failed','cancelled')",
     }
-    if section not in predicates:
-        raise ValueError("Unknown queue section")
+    if state not in predicates:
+        raise ValueError("Unknown job state")
+    scope = "(:repository_id IS NULL OR j.repository_id=:repository_id)"
+    params = {"now": now, "limit": limit + 1, "offset": offset, "repository_id": repository_id}
+    order = {
+        "all": "j.id DESC",
+        "history": "j.finished_at DESC,j.id DESC",
+        "failed": "(SELECT e.error_at FROM job_errors e WHERE e.job_id=j.id) DESC,(SELECT e.attempt_id FROM job_errors e WHERE e.job_id=j.id) DESC",
+    }.get(state, "j.origin='manual' DESC,j.due_at,j.id")
     with index.connect() as db:
         db.execute("BEGIN")
         counts = {
-            name: db.execute(f"SELECT count(*) FROM jobs j WHERE {where}", {"now": now}).fetchone()[
-                0
-            ]
+            name: db.execute(
+                f"SELECT count(*) FROM jobs j WHERE ({where}) AND {scope}", params
+            ).fetchone()[0]
             for name, where in predicates.items()
         }
         rows = [
@@ -248,16 +250,31 @@ def queue_snapshot(
             FROM jobs j JOIN repositories r ON r.id=j.repository_id
             LEFT JOIN job_attempts a ON a.id=(SELECT max(id) FROM job_attempts WHERE job_id=j.id)
             LEFT JOIN attempt_progress p ON p.attempt_id=a.id
-            WHERE {predicates[section]}
-            ORDER BY {"j.finished_at DESC,j.id DESC" if section == "history" else "j.origin='manual' DESC,j.due_at,j.id"}
+            WHERE ({predicates[state]}) AND {scope}
+            ORDER BY {order}
             LIMIT :limit OFFSET :offset""",
-                {"now": now, "limit": limit + 1, "offset": offset},
+                params,
             )
         ]
         workers = [
             dict(row)
             for row in db.execute("SELECT * FROM workers ORDER BY heartbeat_at DESC LIMIT 100")
         ]
+        for row in rows[:limit]:
+            diagnostic = db.execute(
+                """SELECT e.kind,e.attempt_id,e.error_at,e.outcome,e.error_category,e.error,
+                (SELECT count(*) FROM job_attempts a WHERE a.job_id=e.job_id AND a.id<=e.attempt_id) AS attempt_number
+                FROM job_errors e WHERE e.job_id=?""",
+                (row["id"],),
+            ).fetchone()
+            row["diagnostic"] = dict(diagnostic) if diagnostic else None
+            if include_attempts:
+                row["attempts"] = [
+                    dict(attempt)
+                    for attempt in db.execute(
+                        "SELECT * FROM job_attempts WHERE job_id=? ORDER BY id", (row["id"],)
+                    )
+                ]
     for row in rows:
         row["elapsed_seconds"] = (
             max(0, (row["attempt_finished_at"] or now) - row["started_at"])
@@ -269,7 +286,7 @@ def queue_snapshot(
         worker["available"] = worker["stopped_at"] is None and worker["heartbeat_age_seconds"] <= 15
     return {
         "observed_at": now,
-        "section": section,
+        "state": state,
         "counts": counts,
         "jobs": rows[:limit],
         "next_offset": offset + limit if len(rows) > limit else None,

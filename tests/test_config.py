@@ -194,7 +194,7 @@ def test_list_reports_invalid_config_without_traceback(
     write_config(tmp_path, 'archive_dirs = "not-a-list"\n')
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["config", "archive", "list"])
+    result = runner.invoke(app, ["config", "root", "list"])
 
     assert result.exit_code == 1
     assert "'archive_dirs' must be a list of strings" in result.output
@@ -211,7 +211,7 @@ def test_add_reports_write_failure_without_traceback(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
     with patch("cache22.config._save_config", side_effect=OSError("disk full")):
-        result = runner.invoke(app, ["config", "archive", "add", str(archive_dir)])
+        result = runner.invoke(app, ["config", "root", "add", str(archive_dir)])
 
     assert result.exit_code == 1
     assert "disk full" in result.output
@@ -228,7 +228,7 @@ def test_list_reports_unreadable_config_without_traceback(
     (config_dir / "config.toml").mkdir()
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["config", "archive", "list"])
+    result = runner.invoke(app, ["config", "root", "list"])
 
     assert result.exit_code == 1
     assert "Config file could not be read" in result.output

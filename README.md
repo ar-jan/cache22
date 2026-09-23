@@ -15,33 +15,39 @@ source .venv/bin/activate
 
 ```sh
 # Configure where archives are stored
-cache22 config archive add /absolute/path/to/archive
+cache22 config root add /absolute/path/to/archive
 
 # Fetch a repository (remote paths are lowercased by default)
-cache22 repo fetch https://github.com/ar-jan/cache22.git
+cache22 fetch https://github.com/ar-jan/cache22.git
 ```
 
 See [docs/use.md](docs/use.md) for further documentation.
 
 ## Browser manager
 
+Run these in separate terminals:
+
 ```sh
-cache22 manager run
+cache22 web
 # Open http://127.0.0.1:8001/
 ```
 
+```sh
+cache22 worker
+```
+
 The Datasette manager browses the index, registers repositories, submits bulk
-checks/fetches, changes schedules, and monitors queue progress. The launcher owns
-one web process and one continuous worker; closing the browser does not stop work.
-Use `cache22 manager run --web-only` with an independently managed
-`cache22 worker run --continuous`. All index data is available for inspection;
-changes go through Cache22 services. Assets are bundled locally.
+checks/fetches, changes schedules, and monitors progress. Web and worker run
+independently; stopping either does not stop the other. Jobs wait when no worker
+is available. Use `cache22 worker --once` for timer-driven operation. All index
+data is available for inspection; changes go through Cache22 services. Assets
+are bundled locally. See [usage](docs/use.md) for commands and service examples.
 
 The index uses schema version 3. Other versions are rejected without migration
 or automatic reset. To replace an older index, stop all Cache22 processes, back
 up the index, and remove it and its `-wal`/`-shm` sidecars. A fresh index is created
 on the next command. This loses registrations, schedules, queued work, and
-history, but leaves archive files intact. `cache22 repo audit --fix` can
+history, but leaves archive files intact. `cache22 audit --fix` can
 rediscover managed mirrors and bundles.
 
 Inventory success timestamps and error summaries come from job attempts.

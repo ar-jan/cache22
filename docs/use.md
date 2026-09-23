@@ -1,328 +1,176 @@
 # Usage
 
-## Archiving
+## Start here
 
 ```sh
-# Configure where archives are stored
-cache22 config archive add /absolute/path/to/archive
-
-# Fetch a repository (remote paths are lowercased by default)
-cache22 repo fetch https://github.com/ar-jan/cache22.git
+cache22 config root add /absolute/path/to/archive
+cache22 fetch https://github.com/ar-jan/cache22.git
+cache22 list
 ```
 
-A clone URL that is not yet indexed is registered and fetched into the first
-configured archive root. An indexed repository can be fetched again by URL or by
-its key, for example `github.com/ar-jan/cache22`; the stored source URL and
-archive root are used. Repeating a fetch updates the existing mirror.
-Updates include new refs, forced changes, and pruning branches and tags deleted
-upstream. The mirror's HEAD follows the advertised default branch, including
-renames, or the advertised detached commit. A failed fetch keeps the initialized
-mirror for retry. Ref updates are atomic; updating HEAD is a subsequent step.
-Before publishing HEAD, Cache22 checks that its remote target and object ID stayed
-the same across the fetch and that the fetched target matches. If this check or
-HEAD publication fails, the command reports an incomplete update and retains the
-fetched refs without publishing HEAD. Retry the fetch to complete it; Cache22
-does not retry automatically.
+Unknown fetch URLs are registered in the first configured root. Indexed repositories
+use their stored root and source URL. To choose a different root before fetching,
+use `add URL --root PATH`. The root must already exist. `add` only registers;
+it neither fetches nor queues work. Registration accepts multiple URLs.
 
-Every existing-mirror update rechecks the storage layout before running Git.
-Symlinks, redirected storage, and shallow or partial-clone state are rejected
-without modifying the mirror. These checks inspect filesystem entries; full Git
-object verification runs only during explicit adoption.
-
-### Standalone Git bundles
-
-Mirrors remain the default. To store an existing managed repository as a single
-self-contained Git bundle, queue an offline conversion:
-
-```sh
-cache22 repo convert github.com/ar-jan/cache22 --to bundle
-cache22 worker run --once
-```
-
-The command returns a job ID; it does not wait for conversion. The browser manager
-also offers **Convert to bundle** on repository and bulk actions. Conversion runs
-after earlier work for that repository, so it can follow an initial queued fetch.
-An already bundled repository is verified without rewriting its bundle.
-
-After conversion, `repo check`, `repo fetch`, and scheduled updates continue to
-work. Checks compare bundle refs and saved HEAD metadata with the
-remote without restoring objects. Fetches restore temporary bare Git storage,
-fetch incrementally, and publish a newly verified standalone bundle. Network
-transfers are incremental, but local storage is restored and the bundle rewritten.
-Allow space for the old bundle, working repository, replacement, and independent
-verification copy. No persistent mirror remains after successful cleanup.
-
-Inventory reports `storage_format` and `archive_path`. The container retains
-`.lock`, `source.json`, `bundle.json`, and one `project.<uuid>.bundle` generation.
-The manifest preserves the original source URL, exact HEAD state, and commit date.
-Keep it with the bundle: cloning a bundle alone cannot reliably recover the
-original symbolic HEAD target. For manual restoration, clone the selected bundle
-with `git clone --mirror FILE DEST`, set origin to the manifest's `source_url`,
-then set HEAD with `git symbolic-ref HEAD REF` or
-`git update-ref --no-deref HEAD OID` for a detached HEAD.
-
-Publication is atomic. A failed fetch or verification preserves the selected
-archive. Interrupted cleanup may leave retired generations, a retained mirror,
-or `.cache22-bundle` staging; `repo clean SELECTOR` cleans recognized state and
-verifies the selected bundle before retiring old archives. `repo audit --fix`
-rebuilds bundle inventory offline. Invalid active metadata preserves data for
-inspection; restore a missing manifest rather than attempting adoption.
-
-Empty mirrors cannot be converted. If an update becomes empty, it fails while
-preserving the previous bundle. Only history reachable from current refs and HEAD
-is retained; removed or force-pushed history can disappear on the next rewrite.
-Conversion back to a mirror and external bundle adoption are not supported.
-
-Conversion has its own diagnostics and does not advance fetch/check timestamps
-or change the update schedule. The worker's `--convert-timeout` defaults to 7200
-seconds. Queue and progress views show conversion alongside checks and fetches.
-Synchronous operations report busy rather than overtake pending conversion.
-
-### Adopting an existing mirror
-
-If a mirror already exists at the expected path, for example
-`ARCHIVE/github.com/karpathy/llm.c/llm.c.git`, initialize it with:
-
-```sh
-cache22 repo fetch https://github.com/karpathy/llm.c.git --adopt
-```
-
-Cache22 verifies the origin identity, bare mirror configuration, and full Git
-object integrity before writing missing metadata and fetching updates. It never
-reclones or deletes the supplied mirror on failure. Later fetches need no flag.
-Verification can take time for large mirrors.
-
-An ordinary fetch encountering an eligible uninitialized directory offers:
+## Commands
 
 ```text
-Verify and adopt the existing Git mirror, then fetch updates? [y/N]:
+cache22 config root add PATH
+cache22 config root list
+cache22 add URL... [--root PATH] [--case-sensitive] [--json]
+cache22 list [--host HOST] [--local-state STATE] [--remote-status STATUS]
+             [--queued] [--scheduled] [--sort FIELD] [--descending]
+             [--limit N] [--offset N] [--json]
+cache22 show SELECTOR [--json]
+cache22 fetch [SELECTOR...] [--all] [--case-sensitive] [--adopt]
+              [--timeout SECONDS] [--json]
+cache22 check [SELECTOR...] [--all] [--timeout SECONDS] [--json]
+cache22 clean [SELECTOR...] [--all]
+cache22 queue SELECTOR... [--kind check|fetch|convert] [--json]
+cache22 unqueue SELECTOR... [--json]
+cache22 schedule SELECTOR... (--every DURATION | --off) [--json]
+cache22 jobs [SELECTOR]
+             [--state all|running|pending|runnable|deferred|failed|history]
+             [--db PATH] [--limit N] [--offset N] [--json]
+cache22 audit [--fix] [--adopt] [--json]
+cache22 worker [--once] [--timeout-check SECONDS]
+               [--timeout-fetch SECONDS] [--timeout-convert SECONDS] [--json]
+cache22 web [--port PORT]
 ```
 
-The default is No. Acceptance performs the same verification as `--adopt`.
-The prompt appears on stderr only when both stdin and stderr are terminals;
-scripts and redirected sessions must supply `--adopt` explicitly. Locks are
-released while waiting for an answer, and the same target is rechecked afterward.
+A `SELECTOR` is an exact canonical key (such as `github.com/ar-jan/cache22`)
+or a supported Git URL, never a partial name. Check, fetch, and clean require
+selectors or `--all`, exclusively. Queue, unqueue, and schedule require explicit
+selectors; jobs optionally filters one repository. Fetch and clean accept unknown
+URLs; other selector commands require indexed repositories.
 
-Adoption supports the current container layout only. Working checkouts, shallow
-or partial clones, external object alternates, symlinked storage, unrelated files,
-unfinished staging state, and conflicting or malformed metadata are rejected.
-HTTPS and SSH origins are equivalent, but origin path casing must match the
-effective requested source; use `--case-sensitive` when appropriate.
+Check/fetch and batch add/queue/unqueue/schedule continue after individual failures
+and exit 1 if any item fails. Add reports each input, including duplicates; queue,
+unqueue, and schedule act once per resolved repository in input order. Command-wide
+option errors are rejected before work starts. Cleanup retains its existing
+stop-on-error behavior and never removes completed archives.
 
-### Repository Git configuration
+`--json` emits a single JSON value with UTC ISO 8601 timestamps and nulls for
+unknown values. Batch registration and mutation commands return ordered result
+arrays with selector, repository identity, status, job ID where relevant, and
+errors. Continuous worker output is one JSON result per line. Exit codes are 0
+for success, 1 for operational failures/audit discrepancies, and 2 for usage errors.
+Use `cache22 COMMAND --help` for defaults and argument descriptions.
 
-Before adoption verification or an existing-mirror update, Cache22 checks the
-mirror's local configuration without following include directives. Unsupported
-settings and worktree configuration are rejected without rewriting them.
-Use user-level Git configuration for authentication and transport customization;
-normal SSH and credential settings from that trusted configuration remain available.
-Local adoption integrity checks disable system/global Git configuration and
-counted environment overrides, replacement objects, and lazy fetching. Network
-operations retain trusted transport settings.
+List sorting supports `repo_key` (default), `project_name`,
+`local_head_committed_at`, `last_checked_at`, `last_fetched_at`, `last_converted_at`,
+and `remote_status`.
+Its text columns are key, local state, remote status, local HEAD commit date,
+last successful check, storage format, and active archive path.
 
-Allowed local settings are:
-
-- `core.repositoryformatversion`, `core.filemode`, `core.bare`,
-  `core.logallrefupdates`, `core.ignorecase`, `core.precomposeunicode`, and `core.symlinks`
-- `extensions.objectformat` (`sha1` or `sha256`)
-- `remote.origin.url`, `remote.origin.fetch` (`+refs/*:refs/*`), and `remote.origin.mirror`
-- `remote.origin.tagOpt` (`--tags` or `--no-tags`; Git 2.55 mirror clones emit the latter)
-
-The origin must match the requested source and describe a full bare mirror.
-Local includes, additional remotes, SSH commands, credential helpers, and custom
-hook paths are not accepted. Repository hooks are disabled during verification,
-fetching, and HEAD synchronization; fetching does not run automatic maintenance.
-
-### Case-sensitive sources
-
-Use `cache22 repo fetch https://host/Team/Repo --case-sensitive` (or `repo add
---case-sensitive`) to preserve remote path casing on a case-sensitive server when
-registering a new URL. Local identity stays lowercase. Each local path binds to one
-source; conflicting casing is rejected before reuse or Git work. Failed fetches
-release that binding once cleanup leaves no archive or partial state.
-
-### Clean-up
-
-If an interrupted fetch leaves a complete Git mirror without Cache22 metadata,
-try `--adopt` to verify and retain it. To discard incomplete import state instead:
+## Queue and schedules
 
 ```sh
-# Clean one or more repositories by key or URL
-cache22 repo clean github.com/ar-jan/cache22
-
-# Clean all configured archive directories
-cache22 repo clean --all
+cache22 add https://host/team/one https://host/team/two
+cache22 queue host/team/one host/team/two
+cache22 queue host/team/one --kind check
+cache22 schedule host/team/one host/team/two --every 6h
+cache22 worker --once
+cache22 schedule host/team/one --off
+cache22 unqueue host/team/two
 ```
 
-## Details
+Queue defaults to fetch. Repeated requests coalesce under the existing ordering
+rules. `unqueue` cancels pending work without changing recurring policy. `--off`
+disables recurring checks and their pending automatic work, preserving manual
+jobs. Durations are positive integers with `s`, `m`, `h`, `d`, or `w` suffixes.
 
-The entire configured archive directory is managed by Cache22.
-For `https://Git.Example.ORG/Team/Project.git`, files are stored directly under `ARCHIVE/git.example.org/team/project/`, including `project.git`, the `.clone-complete` marker, and the persistent `.lock` file.
-Repository directories are terminal containers. For example, fetching both
-`host/team/project` and `host/team/project/child` into the same archive is rejected
-in either order, including simultaneous fetches. Subgroup namespaces and sibling
-repositories remain supported.
-Previous layouts are unsupported and are not migrated.
+Offline conversion uses `queue SELECTOR --kind convert`. It returns a job ID and
+requires a worker. Conversion does not fetch; it preserves ordering barriers and
+cannot be overtaken by immediate operations. Mirrors remain the default.
 
-Fetches and cleanup report a repository-busy error on repository or namespace
-reservation contention. Acquiring the brief archive-root lock can wait.
-Verification reserves the candidate directory and its namespace ancestors using
-inode locks. It creates no reservation files and does not hold the archive-wide
-root lock during the integrity check. Sibling fetches and targeted cleanup can
-continue while verification runs; conflicting reservations fail immediately.
-Reservations release on process exit, including interrupted adoption before any
-Cache22 metadata has been published.
-Cleanup keeps completed archives and lock files.
-It only cleans recognized Cache22 storage; unowned mirrors are left untouched.
-A completion marker must contain exactly `complete\n` for fetches to reuse the
-archive. A malformed marker causes a fetch error without changing the mirror.
-Cleanup preserves a mirror beside such a marker, but can remove an orphan marker
-when no mirror exists.
-The retained lock keeps the path reserved as a repository even after its archive data is removed.
-`repo clean --all` visits subgroup namespaces, stops traversal at repository boundaries,
-skips directory symlinks, and stops on a busy repository without rolling back earlier cleanup.
-Targeted operations reject symlinked storage paths.
-Missing archive roots are errors and must be restored before fetching or cleaning.
-
-Fetching a new URL uses the first configured archive root; `repo add --archive-dir`
-chooses another root before the first fetch. Cleanup by selector searches all
-configured roots.
-
-Repository inputs reject ASCII control characters and DEL before normalization,
-and reject literal `?` and `#` in HTTPS, SSH, and scp-style forms. Surrounding
-ordinary spaces are trimmed.
-
-Configuration writers lock the configuration-directory inode across loading,
-changing, and atomically replacing settings, so concurrent commands preserve
-each other's changes. Readers see complete files without taking the lock.
-A failed write preserves the previous configuration; locks release on failure
-or process exit.
-
-Exit codes are 0 for success, 1 for operational or configuration errors, and 2
-for CLI usage errors.
-
-## Repository index and scheduled updates
-
-The index is stored at `$XDG_DATA_HOME/cache22/index.sqlite3` (default:
-`~/.local/share/cache22/index.sqlite3`). Keep this database on local storage.
-It covers all archive roots and remains browsable when drives are disconnected.
+## Job inspection
 
 ```sh
-# Register without downloading; the first configured archive root is the default
-cache22 repo add https://github.com/ar-jan/cache22.git
-
-# Read inventory without scanning archives or contacting remotes
-cache22 repo list
-cache22 repo list --remote-status updates_available --json
-cache22 repo show github.com/ar-jan/cache22
-
-# Check refs, then fetch explicitly
-cache22 repo check github.com/ar-jan/cache22
-cache22 repo fetch github.com/ar-jan/cache22
-
-# Queue one download, or enable recurring check-then-fetch updates
-cache22 repo queue github.com/ar-jan/cache22
-cache22 repo schedule github.com/ar-jan/cache22 --every 6h
-cache22 worker run --once
-cache22 repo jobs github.com/ar-jan/cache22 --json
-
-# Disable automatic updates or cancel pending work independently
-cache22 repo schedule github.com/ar-jan/cache22 --disable
-cache22 repo unqueue github.com/ar-jan/cache22
-
-# Discover existing managed mirrors and refresh local observations
-cache22 repo audit
-cache22 repo audit --fix
+cache22 jobs
+cache22 jobs host/team/one --state failed
+cache22 jobs --state deferred --limit 50
+cache22 jobs --state history --limit 50 --offset 50
+cache22 jobs --db /path/to/index.sqlite3 --json
 ```
 
-Run `cache22 worker run --continuous` for a persistent worker, or schedule
-`cache22 worker run --once` with cron or a system timer, for example every minute.
-Cache22 does not install a timer or service automatically. Run-once drains due
-work and exits; retries wait for a later invocation. Continuous mode keeps waiting
-for future schedules and retries.
+| State view | Contents |
+| --- | --- |
+| `all` (default) | All retained jobs, newest job ID first |
+| `running` | Running jobs, including expired claims awaiting recovery |
+| `pending` | All pending jobs |
+| `runnable` | Due pending jobs with no blocking predecessor |
+| `deferred` | Pending jobs waiting for their due time or a predecessor |
+| `failed` | Problem jobs with a latest completed failed/interrupted attempt, including active retries |
+| `history` | Succeeded, failed, and cancelled jobs, newest completion first |
 
-The local commit date is the committer timestamp at local HEAD. No remote commit
-date is collected. Remote status compares the last observed remote refs and HEAD
-with the local mirror: `unknown`, `not_fetched`, `current`, or `updates_available`.
-Force pushes, deleted refs, tags, and non-default branches all participate. Status
-is an observation, not a live guarantee.
+Failed diagnostics are ordered by completion time and attempt ID, newest first.
+Active views use manual priority, due time, and job ID. Success or cancellation
+removes a job from the failed view; a different successful job does not hide an
+older failure. The diagnostic's kind describes the completed attempt, even when
+its job has since been promoted from check to fetch.
 
-Inventory's `last_checked_at`, `last_fetched_at`, and `last_converted_at` are
-completion times of successful whole job attempts, derived from history. Running,
-failed, and interrupted attempts do not advance them, even if local Git work
-finished before the failure. Unknown timestamps are null. Only check jobs advance
-`last_checked_at`: fetch can refresh remote refs without advancing that timestamp.
-A transport failure in fetch's optional final remote probe preserves the previous
-remote snapshot and does not fail the fetch or create a separate check diagnostic.
-Detailed attempt outcomes are available through `repo jobs` and the manager;
-per-kind outcome/error fields are no longer exposed by inventory.
+Inspection reads an existing index without initializing it, starting workers,
+recovering claims, scanning archives, or contacting Git. Missing and unsupported
+databases are errors. Default limit is 100 (range 1–500); offsets are nonnegative.
+Errors in jobs and unavailable workers do not make inspection exit unsuccessfully.
 
-`repo add --fetch` downloads immediately; `--queue` queues a one-off fetch.
-Schedules are disabled until explicitly enabled. A successful scheduled check
-fetches only if needed. Structural errors block a schedule until corrected by a
-successful manual operation or re-enabled. Transport failures retry after 1, 5,
-30, and 120 minutes; unavailable roots and busy repositories defer for one minute.
+JSON contains `database`, `observed_at`, `state`, `counts`, `workers`, `jobs`, and
+`next_offset` (null on the last page). Counts cover all views within the selected
+repository scope and overlap; workers are global. Each job includes its current
+attempt/progress, blocking predecessor, full retained `attempts`, and a separate
+`diagnostic` for its latest completed problem, or null. During a retry these may
+refer to different attempts. Text output includes full diagnostics and a next-page
+hint.
 
-Check/fetch accept multiple exact keys or URLs, or explicit `--all`. Default
-operation timeouts are 120 seconds for checks and 7200 seconds for fetching;
-use `--timeout` on check/fetch, or `--check-timeout`/`--fetch-timeout` on the worker.
-JSON output uses UTC ISO 8601 timestamps; unknown values are null. List pagination
-uses `--limit` and `--offset` (default limit 100).
+## Web and worker
 
-Cleanup also maintains the index. Existing mirrors are discovered through their
-next operation or `repo audit --fix`. Audit never adopts unowned storage or
-deletes archives, and cannot recover old scheduling or fetch/check timestamps from
-disk.
-
-
-## Inspecting queue errors and status
+In one terminal:
 
 ```sh
-cache22 manager errors
-cache22 manager queue --section deferred
-cache22 manager errors --db /path/to/index.sqlite3 --json
+cache22 web
+# Open http://127.0.0.1:8001/
 ```
 
-`manager errors` shows the latest failed or interrupted completed attempt per
-problem job, including retries. Its diagnostic stays visible while another attempt
-runs; succeeded and cancelled jobs are excluded. A separate successful job does
-not hide an older failed job. Inventory's `has_error` follows the same rule;
-`last_error`, `last_error_kind`, `last_error_category`, and `last_error_at` describe
-the most recent such problem, ordered by completion time and then attempt ID.
-The error kind belongs to the completed attempt, even if its job has since been
-promoted from check to fetch. These fields are null when no problem job remains.
+In another:
 
-Terminal history is retained for 30 days, except the latest successful job per
-repository and kind. Those jobs and their attempts remain until a newer success
-replaces them; this preserves last-success timestamps for inactive repositories.
-Pending and running jobs do not expire through history cleanup. Old failed jobs
-still expire after 30 days, removing their diagnostics from inventory.
+```sh
+cache22 worker
+```
 
-`manager queue` shows queue counts, worker availability, and job progress. Choose
-`--section running|runnable|deferred|history` (default: `running`).
+The web server only serves the browser manager; it never starts a worker. It binds
+to loopback and accepts `--port` (default 8001). The browser can register repositories
+and queue jobs while workers are stopped. Each process can restart independently;
+closing the browser does not stop jobs.
 
-Both commands read the default index without requiring a running manager or
-access to archives. `--db PATH` selects another existing database read-only;
-missing databases are errors and are never created. Use `--json` for structured
-output and `--limit N --offset N` for pagination (default limit 100, maximum 500).
-Listing errors or unavailable workers still exits 0; inspection failures exit 1.
+Worker runs continuously by default. `--once` drains currently runnable work,
+including follow-up fetches, and exits; deferred retries wait for another run.
+Check/fetch/convert timeouts default to 120/7200/7200 seconds. Use `--timeout` for
+immediate check/fetch, or the per-kind worker options shown above.
 
-## Browser manager
+For unattended operation, use separate user services with these service sections
+and `[Install] WantedBy=default.target`:
 
-Run `cache22 manager run` and open `http://127.0.0.1:8001/`. Use `--port` to choose
-another port, or `--web-only` when running an independent continuous worker.
-The manager supports inventory filters, explicit bulk selection, registration,
-checks/fetches, schedules, and queue/progress monitoring. Closing a tab does not
-stop jobs. Stopping the combined launcher stops its worker; an external worker
-continues when a web-only manager stops. Use SSH port forwarding for remote use.
+```ini
+# cache22-web.service
+[Service]
+ExecStart=/absolute/path/to/cache22/.venv/bin/cache22 web
+Restart=on-failure
+TimeoutStopSec=20
+```
 
-Full index data can be inspected through Datasette; generic writes are disabled.
-Only Cache22's forms/API perform mutations through shared services. Keep the
-inventory ID column visible for live row updates and selection.
+```ini
+# cache22-worker.service
+[Service]
+ExecStart=/absolute/path/to/cache22/.venv/bin/cache22 worker
+Restart=on-failure
+TimeoutStopSec=20
+```
 
-The index uses schema version 3; other versions are rejected without migration.
-Before using an older index, stop all Cache22 processes, back it up, and discard that index
-and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
-This discards schedules, queued work, registrations, and history, but never archive
-files. `cache22 repo audit --fix` can rediscover managed mirrors and bundles. There is no
-migration and no automatic reset during normal startup.
+Both services must use the same configuration/data environment. Alternatively,
+invoke `cache22 worker --once` from cron or a user timer. Cache22 installs no
+services or timers automatically.
+
+See [Guarantees and edge cases](guarantees.md) for adoption, locking, Git
+configuration, bundle publication, inventory observations, recovery, and retention.

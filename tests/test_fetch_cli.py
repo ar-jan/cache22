@@ -27,16 +27,16 @@ def test_fetch_url_reports_missing_archive_dir_without_traceback(
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
-    result = runner.invoke(app, ["repo", "fetch", URL])
+    result = runner.invoke(app, ["fetch", URL])
 
     assert result.exit_code == 1
-    assert "No archive directories configured" in result.output
+    assert "No archive roots configured" in result.output
     assert "Traceback" not in result.output
 
 
 def test_fetch_unknown_key_is_rejected_without_registration(runner: CliRunner) -> None:
     with patch("cache22.repo_cli.import_repository", side_effect=AssertionError) as call:
-        result = runner.invoke(app, ["repo", "fetch", KEY])
+        result = runner.invoke(app, ["fetch", KEY])
 
     assert result.exit_code == 1
     assert f"Repository is not indexed: {KEY}" in result.output
@@ -45,7 +45,7 @@ def test_fetch_unknown_key_is_rejected_without_registration(runner: CliRunner) -
 
 def test_fetch_new_url_registers_and_passes_options(runner: CliRunner, tmp_path: Path) -> None:
     with patch("cache22.repo_cli.import_repository", return_value=ImportResult(tmp_path)) as call:
-        result = runner.invoke(app, ["repo", "fetch", URL, "--case-sensitive"])
+        result = runner.invoke(app, ["fetch", URL, "--case-sensitive"])
 
     # The mocked import registers nothing, so the summary row falls back to the selector.
     assert result.exit_code == 1
@@ -74,7 +74,7 @@ def test_fetch_indexed_key_uses_stored_binding_and_reports_info(
             archive_path, info_messages=(f"INFO: updated Git mirror: {archive_path}",)
         ),
     ) as call:
-        result = runner.invoke(app, ["repo", "fetch", KEY])
+        result = runner.invoke(app, ["fetch", KEY])
 
     assert result.exit_code == 0, result.output
     call.assert_called_once()
@@ -91,7 +91,7 @@ def test_fetch_json_suppresses_info_messages(runner: CliRunner, tmp_path: Path) 
         "cache22.repo_cli.import_repository",
         return_value=ImportResult(tmp_path, info_messages=("INFO: noise",)),
     ):
-        result = runner.invoke(app, ["repo", "fetch", KEY, "--json"])
+        result = runner.invoke(app, ["fetch", KEY, "--json"])
 
     assert result.exit_code == 0, result.output
     assert "INFO" not in result.output
@@ -99,8 +99,8 @@ def test_fetch_json_suppresses_info_messages(runner: CliRunner, tmp_path: Path) 
 
 
 def test_fetch_requires_selectors_or_all(runner: CliRunner) -> None:
-    assert runner.invoke(app, ["repo", "fetch"]).exit_code == 2
-    assert runner.invoke(app, ["repo", "fetch", KEY, "--all"]).exit_code == 2
+    assert runner.invoke(app, ["fetch"]).exit_code == 2
+    assert runner.invoke(app, ["fetch", KEY, "--all"]).exit_code == 2
 
 
 def test_clean_url_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_clean_url_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> N
     with patch(
         "cache22.repo_cli.clean_repository_import_state", return_value=removed_paths
     ) as call:
-        result = runner.invoke(app, ["repo", "clean", URL])
+        result = runner.invoke(app, ["clean", URL])
 
     assert result.exit_code == 0
     call.assert_called_once_with(URL)
@@ -125,7 +125,7 @@ def test_clean_url_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> N
 def test_clean_indexed_key_uses_stored_source_url(runner: CliRunner, tmp_path: Path) -> None:
     register(tmp_path / "archive")
     with patch("cache22.repo_cli.clean_repository_import_state", return_value=()) as call:
-        result = runner.invoke(app, ["repo", "clean", KEY])
+        result = runner.invoke(app, ["clean", KEY])
 
     assert result.exit_code == 0
     call.assert_called_once_with(URL)
@@ -134,7 +134,7 @@ def test_clean_indexed_key_uses_stored_source_url(runner: CliRunner, tmp_path: P
 
 def test_clean_unknown_key_is_rejected(runner: CliRunner) -> None:
     with patch("cache22.repo_cli.clean_repository_import_state") as call:
-        result = runner.invoke(app, ["repo", "clean", KEY])
+        result = runner.invoke(app, ["clean", KEY])
 
     assert result.exit_code == 1
     assert f"Repository is not indexed: {KEY}" in result.output
@@ -143,7 +143,7 @@ def test_clean_unknown_key_is_rejected(runner: CliRunner) -> None:
 
 def test_clean_all_reports_no_partial_state(runner: CliRunner) -> None:
     with patch("cache22.repo_cli.clean_all_import_state", return_value=()) as call:
-        result = runner.invoke(app, ["repo", "clean", "--all"])
+        result = runner.invoke(app, ["clean", "--all"])
 
     assert result.exit_code == 0
     call.assert_called_once_with()

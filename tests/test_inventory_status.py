@@ -7,7 +7,7 @@ import pytest
 
 from cache22.index import Index
 from cache22.job_queue import Kind, Queue
-from cache22.manager_service import detail, error_snapshot
+from cache22.manager_service import detail, jobs_snapshot
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
 
@@ -112,7 +112,7 @@ def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None
     assert detail(index, repo_id)["attempts"][0]["kind"] == "check"
     retry = scheduler.claim()
     assert retry is not None and retry["kind"] == "fetch"
-    assert error_snapshot(index)["errors"][0]["kind"] == "check"
+    assert jobs_snapshot(index, state="failed")["jobs"][0]["diagnostic"]["kind"] == "check"
     record = index.get(repo_id)
     assert record["last_error_kind"] == "check"
     assert record["last_error"] == "Check unavailable"

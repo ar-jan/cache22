@@ -388,7 +388,7 @@ def test_cli_offers_adoption_and_releases_locks_before_prompt(
         patch("cache22.import_service.default_archive_dir", return_value=mirror.root),
         patch("cache22.repo_cli._is_interactive", side_effect=terminal),
     ):
-        result = CliRunner().invoke(app, ["repo", "fetch", URL], input=answer)
+        result = CliRunner().invoke(app, ["fetch", URL], input=answer)
     assert (result.exit_code == 0) == success, result.output
     assert "[y/N]" in result.stderr
     assert "Verify and adopt" not in result.stdout
@@ -406,10 +406,10 @@ def test_cli_noninteractive_requires_flag_and_explicit_adoption_never_prompts(
         patch("cache22.repo_cli.typer.confirm", side_effect=AssertionError("must not prompt")),
     ):
         runner = CliRunner()
-        result = runner.invoke(app, ["repo", "fetch", URL])
+        result = runner.invoke(app, ["fetch", URL])
         assert result.exit_code == 1
         assert "--adopt" in result.stderr
-        result = runner.invoke(app, ["repo", "fetch", URL, "--adopt"])
+        result = runner.invoke(app, ["fetch", URL, "--adopt"])
         assert result.exit_code == 0, result.output
 
 
@@ -427,7 +427,7 @@ def test_ineligible_conflicts_never_offer_adoption(mirror: Mirror, problem: str)
         patch("cache22.repo_cli._is_interactive", return_value=True),
         patch("cache22.repo_cli.typer.confirm", side_effect=AssertionError("must not prompt")),
     ):
-        result = CliRunner().invoke(app, ["repo", "fetch", URL])
+        result = CliRunner().invoke(app, ["fetch", URL])
     assert result.exit_code == 1
     assert "[y/N]" not in result.stderr
     assert not isinstance(result.exception, AssertionError)
@@ -446,7 +446,7 @@ def test_prompt_retry_pins_configuration_and_revalidates_state(mirror: Mirror) -
         patch("cache22.repo_cli._is_interactive", return_value=True),
         patch("cache22.repo_cli.typer.confirm", side_effect=confirm) as prompt,
     ):
-        result = CliRunner().invoke(app, ["repo", "fetch", URL])
+        result = CliRunner().invoke(app, ["fetch", URL])
     assert result.exit_code == 1
     assert "source conflict" in result.stderr
     assert prompt.call_count == 1
@@ -781,7 +781,7 @@ def test_audit_adopts_all_mirrors_offline(audit_mirror: Mirror) -> None:
         return run(args, **kwargs)
 
     with patch("subprocess.run", side_effect=offline):
-        result = CliRunner().invoke(app, ["repo", "audit", "--adopt", "--json"])
+        result = CliRunner().invoke(app, ["audit", "--adopt", "--json"])
     assert result.exit_code == 0, result.output
     issues = json.loads(result.stdout)
     assert len(issues) == 3
@@ -850,7 +850,7 @@ def test_audit_adoption_continues_after_failure(audit_mirror: Mirror, problem: s
     try:
         if problem == "busy":
             fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = CliRunner().invoke(app, ["repo", "audit", "--adopt", "--json"])
+        result = CliRunner().invoke(app, ["audit", "--adopt", "--json"])
     finally:
         os.close(directory_fd)
     assert result.exit_code == 1, result.output

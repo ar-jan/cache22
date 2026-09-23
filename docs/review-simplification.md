@@ -201,26 +201,13 @@ contextvar can go away if the `Repository` object owns the fds and passes them
 directly. Split `sanitize`/`failure_message`/`git_progress` into a small
 `diagnostics.py`.
 
-### 1.6 Manager process supervision
+### 1.6 Independent web and worker processes
 
-`manager_cli.run` (`manager_cli.py:146-210`, 65 lines) is a small process
-supervisor: pipes for readiness, selector loop, SIGTERM fan-out, kill after
-10 s. `manager/web.py` subclasses `uvicorn.Server` only to fire the readiness
-fd. This exists so that `cache22 manager run` starts both web and worker.
-
-This is worth questioning. Simpler alternatives:
-
-- Run the worker as a thread inside the web process. The worker is already
-  thread-safe (heartbeat thread, `stop` event, SQLite per-connection). Loss:
-  a crash in Git handling takes down the UI; gain: 90 lines removed and one
-  process to supervise.
-- Or: drop the combined launcher, document `cache22 worker run --continuous`
-  and `cache22 web` as two commands, and ship an example systemd unit file.
-  The README already recommends `--web-only` plus an independent worker as
-  the robust setup.
-
-Either way the readiness-fd protocol (`CACHE22_READY_FD`, `notify_ready`)
-disappears.
+**Implemented (review steps 6–7).** `cache22 web` directly serves Datasette through
+standard Uvicorn; `cache22 worker` runs continuously unless `--once` is supplied.
+The combined child-process supervisor, readiness pipes, `CACHE22_READY_FD`, and
+readiness-only Uvicorn subclass have been removed. The processes restart and stop
+independently. Usage documents two-terminal operation and separate user services.
 
 ### 1.7 Datasette as the UI substrate
 
@@ -243,82 +230,49 @@ deadline).
 
 ## 2. CLI design
 
-### 2.1 Current surface
+**Implemented (review step 6).** The final surface is:
 
-```
-cache22 config archive add|list
-cache22 config archive-type show|set
-cache22 import repo URL [--case-sensitive] [--adopt]
-cache22 import clean repo URL | all
-cache22 repo add|list|show|check|fetch|convert|queue|unqueue|schedule|jobs|audit
-cache22 worker run --once|--continuous
-cache22 manager run|errors|queue
-```
-
-Six top-level groups, some with a single sub-command.
-
-### 2.2 Overlaps and inconsistencies
-
-| Issue | Where |
-| --- | --- |
-| Three ways to fetch: `import repo`, `repo fetch`, `repo add --fetch` | see §1.2 |
-| Two ways to queue: `repo queue`, `repo add --queue` | `repo_cli.py:87-111, 235-239` |
-| `repo queue --check` vs `repo convert --to bundle` vs implicit `fetch`: job kind is expressed three different ways | `repo_cli.py:219-239` |
-| `repo jobs` and `manager queue` and `manager errors` all list jobs, with different shapes and filters | `repo_cli.py:263-267`, `manager_cli.py:121-143` |
-| `--json` declared as `typer.Option(False, "--json")` in every command; `as_json` parameter name leaks | every command |
-| Argument called `selector` in some commands, `url` in others, `selectors` (list) in check/fetch; `Index.get` accepts both keys and URLs but this is undocumented in `--help` | `repo_cli.py` |
-| `import clean repo` takes a URL only; `repo *` take key-or-URL | `cli.py:130` |
-| Two nearly identical error-wrapping decorators (`cli._user_command`, `repo_cli.command`) with different exception tuples | `cli.py:45-53`, `repo_cli.py:29-44` |
-| `manager run` is a service, `manager errors|queue` are queries; same group | `manager_cli.py` |
-| `worker run --once|--continuous` requires exactly one flag; a boolean default would do (`worker run` = continuous, `worker run --once`) | `repo_cli.py:285-296` |
-| `--timeout` on check/fetch but `--check-timeout/--fetch-timeout/--convert-timeout` on worker | `repo_cli.py:201,213,290-292` |
-
-### 2.3 Proposed surface
-
-```
-cache22 config root add|list                      # "archive dir" → "root" (matches archive_root column)
-cache22 add       URL... [--root PATH] [--case-sensitive] [--fetch|--queue]
-cache22 list      [filters] [--json]
-cache22 show      SELECTOR [--json]
-cache22 fetch     SELECTOR... | --all  [--adopt] [--timeout] [--json]
-cache22 check     SELECTOR... | --all  [--timeout] [--json]
-cache22 queue     SELECTOR... [--kind check|fetch|convert]   # default fetch
-cache22 unqueue   SELECTOR...
-cache22 schedule  SELECTOR... --every 6h | --off
-cache22 jobs      [SELECTOR] [--state running|pending|failed|history] [--json]
-cache22 audit     [--fix] [--adopt]
-cache22 clean     [SELECTOR|--all]
-cache22 worker    [--once] [--timeout-check N] [--timeout-fetch N]
-cache22 web       [--port N]
+```text
+cache22 config root add PATH
+cache22 config root list
+cache22 add URL... [--root PATH] [--case-sensitive] [--json]
+cache22 list [--host HOST] [--local-state STATE] [--remote-status STATUS]
+             [--queued] [--scheduled] [--sort FIELD] [--descending]
+             [--limit N] [--offset N] [--json]
+cache22 show SELECTOR [--json]
+cache22 fetch [SELECTOR...] [--all] [--case-sensitive] [--adopt]
+              [--timeout SECONDS] [--json]
+cache22 check [SELECTOR...] [--all] [--timeout SECONDS] [--json]
+cache22 clean [SELECTOR...] [--all]
+cache22 queue SELECTOR... [--kind check|fetch|convert] [--json]
+cache22 unqueue SELECTOR... [--json]
+cache22 schedule SELECTOR... (--every DURATION | --off) [--json]
+cache22 jobs [SELECTOR]
+             [--state all|running|pending|runnable|deferred|failed|history]
+             [--db PATH] [--limit N] [--offset N] [--json]
+cache22 audit [--fix] [--adopt] [--json]
+cache22 worker [--once] [--timeout-check SECONDS]
+               [--timeout-fetch SECONDS] [--timeout-convert SECONDS] [--json]
+cache22 web [--port PORT]
 ```
 
-Rationale:
+`list` retains its filters, sorting, and pagination. Selectors are exact keys or
+supported Git URLs. Registration is register-only: the earlier proposal to keep
+`add --fetch|--queue` was dropped. Queue defaults to fetch and replaces the separate
+conversion command. Batch mutations continue after individual errors and report
+ordered results; queue/unqueue/schedule deduplicate resolved repositories.
 
-- The application manages repositories; `repo` as a prefix on every verb adds
-  nothing. Top-level verbs are conventional (`git fetch`, not `git repo fetch`).
-- `queue --kind` replaces `queue --check`, `convert --to bundle`, and the
-  implicit default. The `convert` verb can stay as an alias if preferred, but
-  it is just a job kind.
-- `jobs --state` replaces `manager queue --section` and `manager errors`. The
-  "errors" view is `jobs --state failed` with the latest attempt joined in.
-- `worker` and `web` are the two long-running processes; naming them as such
-  is clearer than `worker run` and `manager run`.
-- One `--json` option, one error decorator, one selector convention
-  (key or URL, everywhere, documented in `--help`).
-- `add` accepts multiple URLs. `register_batch` already exists for the web UI;
-  the CLI should get it too (it is the natural way to paste a list).
+Jobs inspect an existing index read-only, with optional repository scope. All is
+the default view; pending includes runnable/deferred and history includes all
+terminal states. Failed retains diagnostics for active retries. JSON includes
+counts, global worker availability, current attempts/progress, retained attempt
+history, separate completed diagnostics, and pagination. Limits remain 1–500.
 
-### 2.4 Output formatting
-
-`repo_cli.output()` (`repo_cli.py:57-84`) hardcodes a seven-column tab layout
-when it sees a dict with `repo_key`, otherwise dumps JSON lines, otherwise
-`key: value`. `manager_cli._report_snapshot` has a separate 60-line
-pretty-printer. `_json_value` exists in both `repo_cli` and `manager_service`
-(`json_value`) with identical bodies.
-
-**Recommendation.** One `render(rows, *, columns, json)` helper. Let the
-caller name columns. Delete the duplicate timestamp converter. Consider
-`--format table|json|tsv`.
+The CLI shares error handling, one --json option definition, explicit rendering
+columns, and timestamp conversion. No --format option or legacy aliases were
+added. Worker defaults to continuous operation with --once for timers. Configuration
+commands use root terminology; the TOML representation and schema remain unchanged.
+See [Usage](use.md) and [Guarantees and edge cases](guarantees.md).
 
 ---
 
@@ -532,9 +486,8 @@ shared with manager queue reporting so displayed blockers match normal claims.
 - `ImportResult.info_messages` carries `"INFO: updated Git mirror: ..."`
   strings from `git_mirror` back to `cli` for printing. Return a structured
   result (`adopted: bool`, `updated: bool`) and let the CLI phrase it.
-- `docs/use.md` is 312 lines of dense behavioural guarantees. After the CLI
-  consolidation, a short "Commands" reference plus a separate
-  "Guarantees and edge cases" page would read better than one long file.
+- Implemented with step 6: `docs/use.md` is a command reference and startup guide;
+  `docs/guarantees.md` contains storage, adoption, recovery, and retention details.
 - `utils/editor/` (a browser YAML editor with its own `package.json`) and
   `docs/related-works.*` are unrelated to the Python package. Consider a
   separate repository, or at least a top-level `experiments/` to make the
@@ -577,12 +530,10 @@ Things that look like over-engineering but are earning their keep:
 5. ~~Split `Queue` into queue + scheduler.~~ Done. Queue persistence,
    scheduler policy, and running-operation lifecycle are separate; atomic
    completion/recovery/admission and existing CLI/schema behavior are preserved.
-6. CLI flattening (`repo` prefix removal, `jobs` replaces `manager
-   errors|queue`, `web`/`worker`). This is the most user-visible change; do
-   it last so the docs are rewritten once.
-7. Decide on the process model for `web` + `worker` (thread vs two commands)
-   and delete the supervisor.
+6. ~~Flatten the CLI, unify jobs inspection, and rewrite active documentation.~~
+   Done. Batch verbs, register-only add, root terminology, and --json are implemented.
+7. ~~Choose the web/worker process model and delete the supervisor.~~ Done together
+   with step 6: two independent commands, with no readiness-fd protocol.
 
 Steps 1–2 are safe warm-ups. Step 3 is the one that most improves the code's
-readability. Step 4 is the biggest schema change. Steps 5–7 are independent
-of each other.
+readability. Step 4 is the biggest schema change. Steps 6–7 were implemented together after steps 1–5.

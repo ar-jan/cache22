@@ -196,10 +196,10 @@ def test_missing_configured_root_fails_before_clone_or_cleanup(tmp_path: Path) -
         patch("cache22.import_state.list_archive_dirs", return_value=[missing]),
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
     ):
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
+        with pytest.raises(ValueError, match="Archive root does not exist"):
             import_repository("https://host/team/project")
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
+        with pytest.raises(ValueError, match="Archive root does not exist"):
             clean_all_import_state()
-        with pytest.raises(ValueError, match="Archive directory does not exist"):
+        with pytest.raises(ValueError, match="Archive root does not exist"):
             clean_repository_import_state("https://host/team/project")
     assert not missing.exists()

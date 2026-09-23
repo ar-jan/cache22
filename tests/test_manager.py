@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -68,13 +69,12 @@ def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
 def test_worker_idle_registry_and_shutdown(tmp_path: Path) -> None:
     index = Index(tmp_path / "index.db")
     stop = threading.Event()
-    ready = threading.Event()
-    thread = threading.Thread(
-        target=run_continuous, kwargs={"index": index, "stop": stop, "ready": ready.set}
-    )
+    thread = threading.Thread(target=run_continuous, kwargs={"index": index, "stop": stop})
     thread.start()
     try:
-        assert ready.wait(3)
+        deadline = time.monotonic() + 3
+        while not queue_snapshot(index)["workers"] and time.monotonic() < deadline:
+            time.sleep(0.01)
         worker = queue_snapshot(index)["workers"][0]
         assert worker["available"] and worker["current_job_id"] is None
         with index.transaction() as db:

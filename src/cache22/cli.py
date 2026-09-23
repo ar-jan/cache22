@@ -4,39 +4,37 @@ from pathlib import Path
 
 import typer
 
+from .cli_support import command
 from .config import add_archive_dir, list_archive_dirs
-from .manager_cli import manager_app
-from .repo_cli import command, repo_app, worker_app
+from .jobs_cli import jobs
+from .manager.web import serve
+from .repo_cli import repo_app
 
-app = typer.Typer(
-    help="Archive Git repositories as Git mirrors or bundles.",
-    no_args_is_help=True,
-)
+app = repo_app
+app.command("jobs")(jobs)
+app.command("web")(serve)
 config_app = typer.Typer(help="Manage cache22 configuration.", no_args_is_help=True)
-archive_app = typer.Typer(help="Manage archive directories.", no_args_is_help=True)
+root_app = typer.Typer(help="Manage archive roots.", no_args_is_help=True)
 
-app.add_typer(repo_app, name="repo")
-app.add_typer(worker_app, name="worker")
-app.add_typer(manager_app, name="manager")
 app.add_typer(config_app, name="config")
-config_app.add_typer(archive_app, name="archive")
+config_app.add_typer(root_app, name="root")
 
 
-@archive_app.command("add")
+@root_app.command("add")
 @command
-def config_archive_add(path: Path) -> None:
+def config_root_add(path: Path) -> None:
     archive_dir, added = add_archive_dir(path)
 
     if added:
-        typer.echo(f"Added archive directory: {archive_dir}")
+        typer.echo(f"Added archive root: {archive_dir}")
         return
 
-    typer.echo(f"Archive directory already configured: {archive_dir}")
+    typer.echo(f"Archive root already configured: {archive_dir}")
 
 
-@archive_app.command("list")
+@root_app.command("list")
 @command
-def config_archive_list() -> None:
+def config_root_list() -> None:
     for archive_dir in list_archive_dirs():
         typer.echo(str(archive_dir))
 

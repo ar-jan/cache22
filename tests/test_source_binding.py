@@ -200,7 +200,7 @@ def test_bulk_cleanup_skips_unowned_and_invalid_names(tmp_path: Path, marker: st
 
 def test_cli_passes_case_sensitive_option(tmp_path: Path) -> None:
     with patch("cache22.repo_cli.import_repository", return_value=ImportResult(tmp_path)) as call:
-        CliRunner().invoke(app, ["repo", "fetch", URL, "--case-sensitive"])
+        CliRunner().invoke(app, ["fetch", URL, "--case-sensitive"])
     assert call.call_args.args == (URL,)
     assert call.call_args.kwargs["case_sensitive"] is True
     assert call.call_args.kwargs["adopt"] is False

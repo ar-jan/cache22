@@ -135,7 +135,7 @@ def test_git_failure_details_reach_cli_and_history(
     monkeypatch.setattr(git_mirror, "run_git", fail_transport)
     monkeypatch.setattr(operation, "run", fail_transport)
     command = "check" if stage == "ls-remote" else "fetch"
-    result = CliRunner().invoke(app, ["repo", command, URL])
+    result = CliRunner().invoke(app, [command, URL])
     assert result.exit_code == 1, result.output
     job = Queue(r.index).list(r.id)[0]
     assert job["state"] == "pending" and job["error_category"] == "transport"
@@ -198,7 +198,7 @@ def test_listing_is_database_only_with_disconnected_root(
     monkeypatch.setattr(os, "scandir", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
     assert r.index.list()[0] == before
-    result = CliRunner().invoke(app, ["repo", "list", "--json"])
+    result = CliRunner().invoke(app, ["list", "--json"])
     assert result.exit_code == 0, result.output
     listed = json.loads(result.output)[0]
     assert listed["last_fetched_at"] == "1970-01-01T00:16:40Z"
@@ -403,13 +403,13 @@ def test_publication_failure_requires_reconciliation(
 
 def test_cli_selection_and_scheduling(repository: Repository) -> None:
     runner = CliRunner()
-    assert runner.invoke(app, ["repo", "check"]).exit_code == 2
-    assert runner.invoke(app, ["repo", "fetch", URL, "--all"]).exit_code == 2
+    assert runner.invoke(app, ["check"]).exit_code == 2
+    assert runner.invoke(app, ["fetch", URL, "--all"]).exit_code == 2
     assert runner.invoke(app, ["worker", "run"]).exit_code == 2
-    result = runner.invoke(app, ["repo", "schedule", URL, "--every", "6h"])
+    result = runner.invoke(app, ["schedule", URL, "--every", "6h"])
     assert result.exit_code == 0, result.output
     assert repository.index.get(repository.id)["interval_seconds"] == 21600
-    result = runner.invoke(app, ["repo", "show", URL, "--json"])
+    result = runner.invoke(app, ["show", URL, "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["scheduled"] is True
 

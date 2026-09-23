@@ -288,9 +288,9 @@ def test_retry_and_expired_claim_do_not_cross_conversion(repo: Repo) -> None:
 
 
 def test_cli_conversion_enqueues_without_reading_archive(repo: Repo) -> None:
-    result = CliRunner().invoke(app, ["repo", "convert", URL, "--to", "bundle", "--json"])
+    result = CliRunner().invoke(app, ["queue", URL, "--kind", "convert", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["status"] == "queued"
+    assert json.loads(result.output)[0]["status"] == "accepted"
     assert Queue(repo.index).list()[0]["kind"] == "convert"
     assert not repo.paths.repository_dir.exists()
 

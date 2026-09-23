@@ -115,7 +115,7 @@ def _version_error(version: int) -> str:
     return (
         f"Unsupported repository index version: {version}; expected {SCHEMA_VERSION}. "
         "Stop Cache22 processes, back up and remove the old index and its WAL/SHM sidecars, "
-        "then run 'cache22 repo audit --fix'. Schedules and job history are not migrated."
+        "then run 'cache22 audit --fix'. Schedules and job history are not migrated."
     )
 
 
