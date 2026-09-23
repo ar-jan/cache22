@@ -11,10 +11,12 @@ import pytest
 
 from cache22 import operation
 from cache22.index import Index
+from cache22.job_operation import running_job
 from cache22.job_queue import Queue
 from cache22.manager.app import create_datasette
 from cache22.manager_service import bulk_command, detail, queue_snapshot, register_batch
 from cache22.repo_service import add_repository
+from cache22.scheduler import Scheduler
 from cache22.worker import run_continuous
 
 
@@ -41,24 +43,25 @@ def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
     index = Index(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
-    queue.schedule(repository["id"], 60)
-    queue.materialize()
-    job = queue.claim()
+    scheduler = Scheduler(index)
+    scheduler.schedule(repository["id"], 60)
+    scheduler.tick()
+    job = scheduler.claim()
     assert job
-    with queue.running(job, 60):
+    with running_job(queue, job, 60):
         operation.progress("fetching", completed=1, total=2)
     assert queue_snapshot(index)["jobs"][0]["live"] == 1
     queue.enqueue(repository["id"], "fetch")
-    queue.schedule(repository["id"], None)
-    queue.interrupt(job)
+    scheduler.schedule(repository["id"], None)
+    scheduler.interrupt(job)
     record = detail(index, repository["id"])
     assert record["attempts"][0]["outcome"] == "interrupted"
     assert queue_snapshot(index)["counts"]["runnable"] == 1
-    recovered = queue.claim()
+    recovered = scheduler.claim()
     assert recovered and recovered["kind"] == "fetch" and recovered["origin"] == "manual"
     assert recovered["attempt_id"] != job["attempt_id"]
     assert queue_snapshot(index)["jobs"][0]["phase"] is None
-    with pytest.raises(operation.ClaimLostError), queue.running(job, 60):
+    with pytest.raises(operation.ClaimLostError), running_job(queue, job, 60):
         operation.progress("stale owner")
 
 
@@ -88,9 +91,10 @@ def test_streaming_progress_drains_both_pipes_and_preserves_output(tmp_path: Pat
     index = Index(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
-    job = queue.immediate(repository["id"], "fetch")
+    scheduler = Scheduler(index)
+    job = scheduler.immediate(repository["id"], "fetch")
     script = "import os; os.write(1,b'x'*200000); os.write(2,b'noise'*20000+b'\\rReceiving objects: 50% (5/10)\\r')"
-    with queue.running(job, 10):
+    with running_job(queue, job, 10):
         result = operation.run(
             [sys.executable, "-c", script],
             capture_output=True,
@@ -102,7 +106,7 @@ def test_streaming_progress_drains_both_pipes_and_preserves_output(tmp_path: Pat
     assert len(result.stderr) <= 65536
     progress = queue_snapshot(index)["jobs"][0]
     assert progress["percentage"] == 50 and progress["completed"] == 5
-    queue.finish(job)
+    scheduler.finish(job)
     assert queue_snapshot(index, section="history")["jobs"][0]["live"] == 0
 
 
@@ -157,9 +161,9 @@ def test_datasette_browsing_selection_commands_and_boundaries(tmp_path: Path) ->
             )
             assert response.status_code == 400
             assert len(index.list()) == 3
-            queue = Queue(index)
-            failed = queue.immediate(ids[1], "check")
-            queue.finish(failed, category="structural", error="Invalid storage")
+            scheduler = Scheduler(index)
+            failed = scheduler.immediate(ids[1], "check")
+            scheduler.finish(failed, category="structural", error="Invalid storage")
             response = await ds.client.post(
                 "/-/cache22/api/selection", json={"query": "has_error=1"}
             )

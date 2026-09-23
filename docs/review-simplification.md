@@ -63,7 +63,11 @@ archive_storage / archive_layout / git_config / git_layout / repository_ref
 
 `git_bundle` uses mirror and snapshot helpers; mirror-only adoption remains
 below the facade. Remote observation remains available directly to services.
-Services also use index, queue, and operation fencing as before.
+Services use `Scheduler` for claims, immediate admission, finalization, and
+schedule changes, and `Queue` for enqueue/cancel/history. `Scheduler` composes
+transaction-aware queue primitives. `job_operation.running_job` binds a claim
+to the existing operation fence, heartbeat, deadline, and progress callbacks;
+`operation` does not import the queue or scheduler.
 
 `repo_service` owns `fetch_locked`, `ImportResult`, and `registration_target`.
 `import_service` and `manager_service` import those shared service operations;
@@ -172,7 +176,7 @@ and operation contexts, schema, queue policy, and CLI behavior are unchanged.
 `operation.py` holds:
 
 1. A `ContextVar`-based operation fence (`guard`, `Operation`, `current_operation`)
-   used by `Queue.running` to inject claim validation and deadlines into
+   installed by `job_operation.running_job` to inject claim validation and deadlines into
    arbitrarily deep Git calls.
 2. `lock_fds` inheritance so child `git` processes keep flock descriptors alive
    (`inherited_lock`, `pass_fds=`).
@@ -184,6 +188,10 @@ write without threading a `job` through 30 signatures (`index.py:308-310`),
 which is a reasonable trade. But it makes the control flow invisible: reading
 `git_mirror.fetch_git_repository` gives no hint that it may raise
 `ClaimLostError` from inside `operation.run`.
+
+**Step 5 update.** Running-job lifecycle management now lives in
+`job_operation.py`, outside the queue. The context variables and subprocess
+implementation remain unchanged. Explicit propagation below is separate work.
 
 **Recommendation.** Keep the fence but make it explicit at the boundary:
 `execute_job` passes an `Operation` object into `Repository`, and `Repository`
@@ -385,8 +393,8 @@ without retaining all history.
 Fresh indexes use `user_version=3`; other versions are rejected without migration
 or automatic deletion. Rebuilding through offline audit restores archive identity
 and observations, but cannot restore schedules or execution history. Queue and
-scheduler separation remains step 5; `jobs.error*`, progress storage, and local
-observation state are unchanged.
+scheduler separation is implemented in step 5; `jobs.error*`, progress storage,
+and local observation state are unchanged.
 
 The remaining derived columns (`project_name`, `display_path`, and `archive_file`)
 are still candidates for removal as recommended in the summary. Their storage
@@ -431,42 +439,66 @@ This is well designed. Small points:
   but consider whether `jobs.lease_until` on the running job already conveys
   liveness; the UI could show "N running jobs with live leases" instead.
 
-### 3.5 The `Queue` class does too much
+### 3.5 Queue persistence, scheduling policy, and running operations
 
-`job_queue.py` (373 lines) is: enqueue with coalescing rules
-(`enqueue_in`), cancel, schedule/unschedule, `materialize()` (scheduler tick
-+ 30-day GC), lease recovery, claim, heartbeat thread, progress publication
-with rate limiting, the `Operation` fence installer (`running()`), retry
-policy + schedule-advance + follow-up-fetch (`finish()`), and a special
-"immediate" path for synchronous CLI use.
+**Implemented (review step 5).** Responsibilities now have separate owners:
 
-Suggested split:
+- `job_queue.Queue` owns job/attempt persistence, pending-job coalescing,
+  cancellation, ordered claims, lease validation and renewal, fenced progress
+  writes, and history pruning. Its transaction-aware primitives accept the
+  scheduler's decisions; it neither reads schedules nor chooses retries.
+- `scheduler.Scheduler` owns schedule configuration, due-check materialization,
+  retry/defer policy, schedule advancement/blocking, follow-up fetches, recovery,
+  and immediate-job admission. `tick()` also chooses the history cutoff and
+  removes old worker records. Worker claims and direct CLI operations both use
+  this policy layer.
+- `job_operation.running_job` installs the existing `Operation`, manages the
+  heartbeat thread and cancellation, and throttles observational progress.
+  `operation.py` retains context variables, diagnostics, inherited locks, and
+  subprocess handling. It has no reverse dependency on queue or scheduler.
 
-- `queue.py`: `enqueue`, `cancel`, `claim`, `heartbeat`, `finish(outcome)`.
-  Pure CRUD on `jobs`/`job_attempts`. No knowledge of schedules or retries.
-- `scheduler.py`: `tick()` — materialise due schedules, apply retry policy,
-  advance `next_due_at`, block on structural error, enqueue follow-up fetch.
-  Runs after `finish`. Knows the policy tables (`RETRIES`, 60 s busy defer).
-- `operation.py` (or `Repository`): the fence and progress. `Queue.running()`
-  becomes `with Operation(job, queue, timeout) as op:`.
+Completion validates the live claim, finalizes the attempt, applies retry state,
+updates the schedule, and enqueues any follow-up fetch in one transaction.
+There is no commit between finalization and policy application. Claim recovery
+likewise records interruption, marks inventory for reconciliation, checks whether
+scheduled work is still enabled, and claims the next job atomically. Explicit
+interruption uses the same policy without consuming retry budget.
 
-`immediate()` (`job_queue.py:322-353`) is a claimed-on-insert job. It could
-be `enqueue(...); claim(job_id)` with a `prefer` flag; the "refuse if convert
-pending" rule is really a scheduler/policy rule.
+Transport retries remain 60, 300, 1,800, and 7,200 seconds. Busy/unavailable
+operations defer for 60 seconds without consuming retries. Disabling a schedule
+cancels pending scheduled work; a running job can finish, but cannot create a
+scheduled retry or follow-up after disable. Manual work survives disable.
+Conversion outcomes do not change schedules.
+
+Immediate admission checks contention, cancels superseded work, inserts a fresh
+job, and claims it in one transaction. It shares claim-token and attempt creation
+with ordinary claims. An immediate check can overtake a pending fetch, but no
+immediate operation overtakes pending conversion or running work. This preserves
+behavior that a plain `enqueue(); claim()` sequence would lose.
+
+The 120-second lease, 20-second heartbeat, progress throttling, and stale-owner
+fencing remain. Progress database errors are observational; lease renewal errors
+invalidate the operation. Context exit stops/joins the heartbeat and restores
+the previous fence, including exception and thread-start failure paths.
+
+Schema version 3, CLI commands, queue/error reporting, and retention semantics
+are unchanged. Latest successful jobs per repository and immutable attempt kind
+survive 30-day cleanup. Tests cover rollback at completion/recovery/admission,
+concurrent ticks and claims, disable races, conversion barriers, stale-owner
+writes, and operation context cleanup.
 
 ### 3.6 Coalescing rules in `enqueue_in`
 
-`enqueue_in` (`job_queue.py:29-62`) merges a new request into an existing
-pending job: kind promotes `check→fetch`, origin promotes `scheduled→manual`,
-`due_at` moves earlier, and `convert` never merges with non-convert. These
-rules are correct but encoded in nested conditionals. A small table would be
-clearer:
+`enqueue_in` retains the existing ordering rule: inspect the newest active job
+for a repository and merge only if it is pending and in the same conversion
+class. Check/fetch requests promote to fetch; scheduled/manual requests promote
+to manual; the due time can only move earlier. Conversion merges only with
+conversion.
 
-```python
-MERGE = {("check","fetch"): "fetch", ("fetch","check"): "fetch", ...}
-```
-
-or simply: "at most one pending non-convert job per repo, kind = max(kinds)".
+There can be multiple pending non-convert jobs separated by a conversion or
+running job. Coalescing must not cross those barriers, and deferred retries
+continue to block later jobs for that repository. `BLOCKING_JOB_SQL` remains
+shared with manager queue reporting so displayed blockers match normal claims.
 
 ---
 
@@ -542,7 +574,9 @@ Things that look like over-engineering but are earning their keep:
 4. ~~Drop the 18 per-kind outcome columns; derive inventory status from
    attempts and bump `user_version` to 3.~~ Done. Latest successful jobs survive
    history expiry; manager and inventory share job-scoped error semantics.
-5. Split `Queue` into queue + scheduler.
+5. ~~Split `Queue` into queue + scheduler.~~ Done. Queue persistence,
+   scheduler policy, and running-operation lifecycle are separate; atomic
+   completion/recovery/admission and existing CLI/schema behavior are preserved.
 6. CLI flattening (`repo` prefix removal, `jobs` replaces `manager
    errors|queue`, `web`/`worker`). This is the most user-visible change; do
    it last so the docs are rewritten once.

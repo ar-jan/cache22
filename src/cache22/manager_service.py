@@ -13,6 +13,7 @@ from .index import Index, repository_key
 from .job_queue import BLOCKING_JOB_SQL, Queue
 from .operation import sanitize
 from .repo_service import registration_target
+from .scheduler import Scheduler
 
 MAX_BATCH = 10_000
 
@@ -127,7 +128,7 @@ def bulk_command(
             elif action == "unqueue":
                 queue.unqueue(repository_id)
             else:
-                queue.schedule(repository_id, interval)
+                Scheduler(index).schedule(repository_id, interval)
             result["status"] = "accepted"
         except (ValueError, OSError, sqlite3.Error) as exc:
             result.update(status="error", error=sanitize(str(exc)))

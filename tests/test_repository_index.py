@@ -18,9 +18,11 @@ from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.index import Index
+from cache22.job_operation import running_job
 from cache22.job_queue import Queue
 from cache22.repo_audit import audit
 from cache22.repo_service import add_repository, check_repository
+from cache22.scheduler import Scheduler
 from cache22.worker import run_worker
 
 URL = "https://example.test/team/project"
@@ -207,10 +209,11 @@ def test_schedule_checks_then_fetches_and_coalesces(repository: Repository) -> N
     r = repository
     r.commit("first")
     queue = Queue(r.index)
+    scheduler = Scheduler(r.index)
     assert run_worker(index=r.index) == []
-    queue.schedule(r.id, 3600)
-    queue.materialize()
-    queue.materialize()
+    scheduler.schedule(r.id, 3600)
+    scheduler.tick()
+    scheduler.tick()
     assert len(queue.list()) == 1
     assert [result["outcome"] for result in run_worker(index=r.index)] == ["succeeded", "succeeded"]
     assert r.index.get(r.id)["remote_status"] == "current"
@@ -218,56 +221,58 @@ def test_schedule_checks_then_fetches_and_coalesces(repository: Repository) -> N
     assert run_worker(index=r.index) == []
     r.clock[0] += 10 * 3600
     assert len(run_worker(index=r.index)) == 1
-    queue.schedule(r.id, None)
+    scheduler.schedule(r.id, None)
     r.clock[0] += 10 * 3600
     assert run_worker(index=r.index) == []
 
 
 def test_disable_running_schedule_prevents_followup(repository: Repository) -> None:
     r = repository
-    queue = Queue(r.index)
-    queue.schedule(r.id, 3600)
-    queue.materialize()
-    job = queue.claim()
+    scheduler = Scheduler(r.index)
+    scheduler.schedule(r.id, 3600)
+    scheduler.tick()
+    job = scheduler.claim()
     assert job
     r.index.update(r.id, local_state="absent", remote_ref_digest="known")
-    queue.schedule(r.id, None)
-    queue.finish(job)
-    assert queue.claim() is None
+    scheduler.schedule(r.id, None)
+    scheduler.finish(job)
+    assert scheduler.claim() is None
 
 
 def test_queue_deduplicates_and_manual_work_survives_disable(repository: Repository) -> None:
     r = repository
     queue = Queue(r.index)
-    queue.schedule(r.id, 3600)
-    queue.materialize()
+    scheduler = Scheduler(r.index)
+    scheduler.schedule(r.id, 3600)
+    scheduler.tick()
     job_id = queue.enqueue(r.id, "fetch")
     assert queue.enqueue(r.id, "check") == job_id
-    queue.schedule(r.id, None)
-    job = queue.claim()
+    scheduler.schedule(r.id, None)
+    job = scheduler.claim()
     assert job and job["kind"] == "fetch" and job["origin"] == "manual"
-    queue.finish(job)
-    assert queue.claim() is None
+    scheduler.finish(job)
+    assert scheduler.claim() is None
 
 
 def test_claims_are_exclusive_and_expired_owners_are_fenced(repository: Repository) -> None:
     r = repository
     queue = Queue(r.index)
+    scheduler = Scheduler(r.index)
     queue.enqueue(r.id)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        claims = list(pool.map(lambda _: Queue(r.index).claim(), range(2)))
+        claims = list(pool.map(lambda _: Scheduler(r.index).claim(), range(2)))
     assert sum(job is not None for job in claims) == 1
     old = next(job for job in claims if job)
-    with queue.running(old, 120):
+    with running_job(queue, old, 120):
         r.clock[0] += 121
-        new = queue.claim()
+        new = scheduler.claim()
         assert new and new["id"] == old["id"] and new["claim_token"] != old["claim_token"]
         with pytest.raises(operation.ClaimLostError):
             r.index.update(r.id, local_state="ready")
     assert r.index.get(r.id)["reconciliation_required"]
     with pytest.raises(operation.ClaimLostError):
-        queue.finish(old)
-    queue.finish(new)
+        scheduler.finish(old)
+    scheduler.finish(new)
     assert queue.list()[0]["attempts"][0]["outcome"] == "interrupted"
 
 
@@ -411,19 +416,19 @@ def test_cli_selection_and_scheduling(repository: Repository) -> None:
 
 def test_structural_failure_blocks_schedule_until_intervention(repository: Repository) -> None:
     r = repository
-    queue = Queue(r.index)
-    queue.schedule(r.id, 60)
-    queue.materialize()
-    job = queue.claim()
+    scheduler = Scheduler(r.index)
+    scheduler.schedule(r.id, 60)
+    scheduler.tick()
+    job = scheduler.claim()
     assert job
-    queue.finish(job, category="structural", error="Explicit adoption needed")
+    scheduler.finish(job, category="structural", error="Explicit adoption needed")
     r.clock[0] += 3600
-    queue.materialize()
-    assert queue.claim() is None
+    scheduler.tick()
+    assert scheduler.claim() is None
     assert r.index.get(r.id)["schedule_blocked"]
-    queue.schedule(r.id, 60)
-    queue.materialize()
-    assert queue.claim() is not None
+    scheduler.schedule(r.id, 60)
+    scheduler.tick()
+    assert scheduler.claim() is not None
 
 
 def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
@@ -432,11 +437,12 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     r = repository
     r.commit("first")
     queue = Queue(r.index)
+    scheduler = Scheduler(r.index)
     queue.enqueue(r.id)
     result = import_repository(URL, index=r.index)
     assert result.repository is not None
     assert result.repository["archive_root"] == str(r.root)
-    assert queue.claim() is None
+    assert scheduler.claim() is None
     other_root = tmp_path / "other-root"
     other_root.mkdir()
     # A new default does not move a repository already assigned to a root.
@@ -500,12 +506,13 @@ def test_operation_timeout_terminates_child_and_releases_locks(
 
     r = repository
     queue = Queue(r.index)
-    job = queue.immediate(r.id, "check")
+    scheduler = Scheduler(r.index)
+    job = scheduler.immediate(r.id, "check")
     paths = archive_paths_for_repository(r.root, parse_repository_url(URL))
     pidfile = tmp_path / "child-pid"
     with (
         pytest.raises(operation.TransportError, match="timed out"),
-        queue.running(job, 0.3),
+        running_job(queue, job, 0.3),
         repository_operation(r.root, paths, create=True),
     ):
         operation.run(
@@ -521,4 +528,4 @@ def test_operation_timeout_terminates_child_and_releases_locks(
         os.kill(pid, 0)
     with repository_operation(r.root, paths):
         pass
-    queue.finish(job, category="transport", error="Operation timed out")
+    scheduler.finish(job, category="transport", error="Operation timed out")

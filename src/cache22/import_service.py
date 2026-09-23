@@ -5,9 +5,9 @@ from pathlib import Path
 
 from .config import default_archive_dir, normalize_archive_dir
 from .index import Index, repository_key
-from .job_queue import Queue
 from .repo_service import ImportResult, execute_job
 from .repository_ref import parse_repository_url
+from .scheduler import Scheduler
 
 
 def import_repository(
@@ -33,7 +33,7 @@ def import_repository(
         else _resolve_archive_dir(archive_dir)
     )
     record = index.add(repository, root, importing=True)
-    job = Queue(index).immediate(record["id"], "fetch")
+    job = Scheduler(index).immediate(record["id"], "fetch")
     result = execute_job(
         index,
         job,

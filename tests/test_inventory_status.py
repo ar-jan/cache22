@@ -9,6 +9,7 @@ from cache22.index import Index
 from cache22.job_queue import Kind, Queue
 from cache22.manager_service import detail, error_snapshot
 from cache22.repo_service import add_repository
+from cache22.scheduler import Scheduler
 
 
 def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -> None:
@@ -67,27 +68,27 @@ def test_success_timestamps_require_completed_attempts(
     now = 1000
     index = Index(tmp_path / "index.db", clock=lambda: now)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
-    queue = Queue(index)
+    scheduler = Scheduler(index)
     column = f"last_{past}_at"
-    first = queue.immediate(repo_id, kind)
+    first = scheduler.immediate(repo_id, kind)
     assert index.get(repo_id)[column] is None
     now += 1
-    queue.finish(first)
+    scheduler.finish(first)
     success_at = now
     assert index.get(repo_id)[column] == success_at
     now += 1
-    failed = queue.immediate(repo_id, kind)
-    queue.finish(failed, category="structural", error="Failure after prior success")
+    failed = scheduler.immediate(repo_id, kind)
+    scheduler.finish(failed, category="structural", error="Failure after prior success")
     assert index.get(repo_id)[column] == success_at
     now += 1
-    interrupted = queue.immediate(repo_id, kind)
-    queue.interrupt(interrupted)
+    interrupted = scheduler.immediate(repo_id, kind)
+    scheduler.interrupt(interrupted)
     assert index.get(repo_id)[column] == success_at
-    retry = queue.claim()
+    retry = scheduler.claim()
     assert retry is not None
     assert index.get(repo_id)[column] == success_at
     now += 1
-    queue.finish(retry)
+    scheduler.finish(retry)
     record = index.get(repo_id)
     assert record[column] == now
     assert all(
@@ -95,7 +96,7 @@ def test_success_timestamps_require_completed_attempts(
     )
     other_id = add_repository("https://host/team/other", tmp_path, index=index)["id"]
     now += 1
-    queue.finish(queue.immediate(other_id, kind))
+    scheduler.finish(scheduler.immediate(other_id, kind))
     assert [r["id"] for r in index.list(sort=column, descending=True)] == [other_id, repo_id]
 
 
@@ -103,18 +104,19 @@ def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None
     index = Index(tmp_path / "index.db", clock=lambda: 1000)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
     queue = Queue(index)
-    check = queue.immediate(repo_id, "check")
-    queue.finish(check, category="transport", error="Check unavailable")
+    scheduler = Scheduler(index)
+    check = scheduler.immediate(repo_id, "check")
+    scheduler.finish(check, category="transport", error="Check unavailable")
     assert queue.enqueue(repo_id, "fetch") == check["id"]
     assert queue.list(repo_id)[0]["kind"] == "fetch"
     assert detail(index, repo_id)["attempts"][0]["kind"] == "check"
-    retry = queue.claim()
+    retry = scheduler.claim()
     assert retry is not None and retry["kind"] == "fetch"
     assert error_snapshot(index)["errors"][0]["kind"] == "check"
     record = index.get(repo_id)
     assert record["last_error_kind"] == "check"
     assert record["last_error"] == "Check unavailable"
-    queue.finish(retry)
+    scheduler.finish(retry)
     record = index.get(repo_id)
     assert record["last_checked_at"] is None
     assert record["last_fetched_at"] == 1000
@@ -128,17 +130,18 @@ def test_retention_keeps_latest_success_per_repository_and_kind(tmp_path: Path) 
     first_id = add_repository("https://host/team/first", tmp_path, index=index)["id"]
     second_id = add_repository("https://host/team/second", tmp_path, index=index)["id"]
     queue = Queue(index)
+    scheduler = Scheduler(index)
     retained: set[int] = set()
     kinds: tuple[Kind, ...] = ("check", "fetch", "convert")
     for repo_id in (first_id, second_id):
         for kind in kinds:
             # Same-time successes select the newer attempt deterministically.
-            queue.finish(queue.immediate(repo_id, kind))
-            job = queue.immediate(repo_id, kind)
-            queue.finish(job)
+            scheduler.finish(scheduler.immediate(repo_id, kind))
+            job = scheduler.immediate(repo_id, kind)
+            scheduler.finish(job)
             retained.add(job["id"])
-    failed = queue.immediate(first_id, "fetch")
-    queue.finish(failed, category="structural", error="Old failure")
+    failed = scheduler.immediate(first_id, "fetch")
+    scheduler.finish(failed, category="structural", error="Old failure")
     cancelled = queue.enqueue(first_id, "fetch")
     queue.unqueue(first_id)
     assert index.get(first_id)["has_error"]
@@ -149,9 +152,9 @@ def test_retention_keeps_latest_success_per_repository_and_kind(tmp_path: Path) 
         )
     before = index.get(first_id)
     now += 31 * 86400
-    active = queue.immediate(first_id, "fetch")
+    active = scheduler.immediate(first_id, "fetch")
     pending = queue.enqueue(first_id, "check")
-    queue.materialize()
+    scheduler.tick()
     assert {job["id"] for job in queue.list()} == retained | {active["id"], pending}
     assert cancelled not in {job["id"] for job in queue.list()}
     after = index.get(first_id)
@@ -161,10 +164,10 @@ def test_retention_keeps_latest_success_per_repository_and_kind(tmp_path: Path) 
     with index.connect() as db:
         assert db.execute("SELECT count(*) FROM attempt_progress").fetchone()[0] == 6
         assert db.execute("SELECT count(*) FROM job_attempts").fetchone()[0] == 7
-    queue.finish(active)
+    scheduler.finish(active)
     retained_fetch = next(
         j["id"] for j in queue.list(first_id) if j["kind"] == "fetch" and j["id"] in retained
     )
-    queue.materialize()
+    scheduler.tick()
     assert retained_fetch not in {j["id"] for j in queue.list()}
     assert index.get(first_id)["last_fetched_at"] == now

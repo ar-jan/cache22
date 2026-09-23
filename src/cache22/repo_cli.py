@@ -24,6 +24,7 @@ from .manager_service import duration
 from .repo_audit import audit
 from .repo_service import ImportResult, add_repository, check_repository
 from .repository_ref import is_repository_url
+from .scheduler import Scheduler
 from .worker import notify_ready, run_continuous, run_worker, shutdown_signals
 
 repo_app = typer.Typer(help="Browse the repository index and manage updates.", no_args_is_help=True)
@@ -350,7 +351,7 @@ def schedule(selector: str, every: str | None = None, disable: bool = False) -> 
         interval = duration(every) if every else None
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    Queue(index).schedule(index.get(selector)["id"], interval)
+    Scheduler(index).schedule(index.get(selector)["id"], interval)
     output(index.get(selector), False)
 
 

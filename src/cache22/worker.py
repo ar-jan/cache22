@@ -13,9 +13,9 @@ from contextlib import contextmanager
 from typing import Any
 
 from .index import Index
-from .job_queue import Queue
 from .operation import OperationInterrupted
 from .repo_service import error_text, execute_job
+from .scheduler import Scheduler
 
 
 def notify_ready() -> None:
@@ -100,14 +100,14 @@ def run_continuous(
 
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
-    queue = Queue(index)
+    scheduler = Scheduler(index)
     try:
         ready()
         while not stop.is_set():
-            queue.materialize()
+            scheduler.tick()
             if stop.is_set():
                 break
-            job = queue.claim()
+            job = scheduler.claim()
             if job is None:
                 if once:
                     break

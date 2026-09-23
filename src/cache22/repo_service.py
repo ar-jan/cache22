@@ -14,8 +14,9 @@ from .archive_storage import RepositoryBusyError
 from .config import default_archive_dir, normalize_archive_dir
 from .git_observation import remote_fields, remote_snapshot
 from .index import Index, repository_key
-from .job_queue import Queue
+from .job_operation import running_job
 from .repository_ref import RepositoryRef, parse_repository_url
+from .scheduler import Scheduler
 from .storage import Repository, absent_fields
 
 
@@ -98,8 +99,8 @@ def check_repository(
         raise ValueError("Operation timeout must be positive")
     index = index or Index()
     record = index.get(selector)
-    queue = Queue(index)
-    job = queue.immediate(record["id"], "check")
+    scheduler = Scheduler(index)
+    job = scheduler.immediate(record["id"], "check")
     execute_job(index, job, check_timeout=timeout)
     return index.get(record["id"])
 
@@ -195,13 +196,13 @@ def execute_job(
     source_url: str | None = None,
     cancel: threading.Event | None = None,
 ) -> Any:
-    queue = Queue(index)
+    scheduler = Scheduler(index)
     record = index.get(job["repository_id"])
     kind = job["kind"]
     result: Any = None
     try:
         timeout = {"check": check_timeout, "fetch": fetch_timeout, "convert": convert_timeout}[kind]
-        with queue.running(job, timeout, cancel):
+        with running_job(scheduler.queue, job, timeout, cancel):
             operation.progress("validation")
             if kind == "check":
                 check_locked(index, record)
@@ -217,17 +218,17 @@ def execute_job(
                     adopt=adopt,
                 )
     except operation.OperationInterrupted, KeyboardInterrupt:
-        queue.interrupt(job)
+        scheduler.interrupt(job)
         raise
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
         category = category_for(exc)
         message = error_text(exc, record["source_url"])
         if not isinstance(exc, operation.ClaimLostError):
             # Queue finalization validates the claim after the operation context exits.
-            queue.finish(job, category=category, error=message)
+            scheduler.finish(job, category=category, error=message)
         raise
     else:
-        queue.finish(job)
+        scheduler.finish(job)
     return result
 
 

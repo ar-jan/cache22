@@ -25,6 +25,7 @@ from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
 from cache22.repo_service import check_repository, execute_job
 from cache22.repository_ref import parse_repository_url
+from cache22.scheduler import Scheduler
 from cache22.worker import run_worker
 
 URL = "https://example.test/team/project"
@@ -56,8 +57,9 @@ class Repo:
 
     def convert(self) -> Path:
         queue = Queue(self.index)
+        scheduler = Scheduler(self.index)
         job_id = queue.enqueue(self.id, "convert")
-        job = queue.claim(job_id)
+        job = scheduler.claim(job_id)
         assert job is not None
         return execute_job(self.index, job)
 
@@ -248,6 +250,7 @@ def test_missing_manifest_never_recreates_mirror(repo: Repo) -> None:
 def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
     repo.commit("first")
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     fetch = queue.enqueue(repo.id)
     conversion = bulk_command(repo.index, [repo.id], "convert")[0]["job_id"]
     assert queue.enqueue(repo.id, "convert") == conversion
@@ -256,7 +259,7 @@ def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
     deferred = queue_snapshot(repo.index, section="deferred")
     assert {job["id"] for job in deferred["jobs"]} == {conversion, check}
     assert all(job["blocking_job_id"] == fetch for job in deferred["jobs"])
-    assert queue.claim(conversion) is None
+    assert scheduler.claim(conversion) is None
     with pytest.raises(RepositoryBusyError):
         repo.fetch()
     results = run_worker(index=repo.index)
@@ -267,18 +270,19 @@ def test_ordered_conversion_jobs_and_manager_queue(repo: Repo) -> None:
 
 def test_retry_and_expired_claim_do_not_cross_conversion(repo: Repo) -> None:
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     first = queue.enqueue(repo.id, "fetch")
-    job = queue.claim(first)
+    job = scheduler.claim(first)
     assert job is not None
     conversion = queue.enqueue(repo.id, "convert")
     last = queue.enqueue(repo.id, "fetch")
     repo.clock[0] += 121
-    recovered = queue.claim()
+    recovered = scheduler.claim()
     assert recovered is not None and recovered["id"] == first
-    queue.finish(recovered, category="transport", error="offline")
-    assert queue.claim(conversion) is None
-    assert queue.claim(last) is None
-    assert queue.claim() is None
+    scheduler.finish(recovered, category="transport", error="offline")
+    assert scheduler.claim(conversion) is None
+    assert scheduler.claim(last) is None
+    assert scheduler.claim() is None
     queue.unqueue(repo.id)
     assert all(j["state"] == "cancelled" for j in queue.list())
 
@@ -431,8 +435,8 @@ def test_direct_import_updates_existing_bundle(repo: Repo) -> None:
 def test_scheduled_fetch_updates_bundle_and_conversion_does_not_change_schedule(repo: Repo) -> None:
     repo.commit("first")
     repo.fetch()
-    queue = Queue(repo.index)
-    queue.schedule(repo.id, 60)
+    scheduler = Scheduler(repo.index)
+    scheduler.schedule(repo.id, 60)
     with repo.index.connect() as db:
         before = dict(db.execute("SELECT * FROM schedules").fetchone())
     repo.convert()
@@ -448,15 +452,16 @@ def test_scheduled_fetch_updates_bundle_and_conversion_does_not_change_schedule(
 
 def test_claim_waits_for_running_immediate_check_even_with_older_fetch(repo: Repo) -> None:
     queue = Queue(repo.index)
+    scheduler = Scheduler(repo.index)
     first = queue.enqueue(repo.id, "fetch")
-    running = queue.immediate(repo.id, "check")
-    other_worker = Queue(Index(repo.index.path, clock=lambda: repo.clock[0]))
+    running = scheduler.immediate(repo.id, "check")
+    other_worker = Scheduler(Index(repo.index.path, clock=lambda: repo.clock[0]))
     assert other_worker.claim() is None
     assert (
         queue_snapshot(repo.index, section="deferred")["jobs"][0]["blocking_job_id"]
         == running["id"]
     )
-    queue.finish(running)
+    scheduler.finish(running)
     claimed = other_worker.claim()
     assert claimed is not None and claimed["id"] == first
 
