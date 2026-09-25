@@ -184,14 +184,12 @@ class Queue:
         now = self.index.now()
         db.execute(
             """UPDATE jobs SET state=?,due_at=?,retry_count=?,finished_at=?,claim_token=NULL,
-            lease_until=NULL,error_category=?,error=? WHERE id=?""",
+            lease_until=NULL WHERE id=?""",
             (
                 state,
                 due_at,
                 retry_count,
                 None if state == "pending" else now,
-                category,
-                error,
                 job["id"],
             ),
         )

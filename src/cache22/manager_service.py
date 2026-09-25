@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .index import Index, repository_key
+from .inventory_service import public_record
 from .job_queue import BLOCKING_JOB_SQL, Queue
 from .operation import sanitize
 from .repo_service import registration_target
@@ -136,22 +136,6 @@ def bulk_command(
     return results
 
 
-def selected_ids(index: Index, where: list[str], params: dict[str, Any]) -> list[int]:
-    """SQL fragments come from the Datasette filter adapter, never from a command body."""
-    clause = " WHERE " + " AND ".join(f"({term})" for term in where) if where else ""
-    with index.connect() as db:
-        db.execute("PRAGMA query_only=ON")
-        deadline = time.monotonic() + 2
-        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
-        db.execute("BEGIN")
-        rows = db.execute(
-            f"SELECT id FROM inventory{clause} ORDER BY id LIMIT {MAX_BATCH + 1}", params
-        ).fetchall()
-    if len(rows) > MAX_BATCH:
-        raise ValueError(f"Selection exceeds {MAX_BATCH} repositories; narrow the filters")
-    return [row[0] for row in rows]
-
-
 def _page(limit: int, offset: int) -> None:
     if not 1 <= limit <= 500 or offset < 0:
         raise ValueError("Limit must be 1–500 and offset must be nonnegative")
@@ -164,9 +148,7 @@ def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0
         row = db.execute("SELECT * FROM inventory WHERE id=?", (repository_id,)).fetchone()
         if row is None:
             raise ValueError("Repository not found")
-        repository = index._record(row)
-        # Details emphasize identity; the native Datasette record exposes the full source URL.
-        repository.pop("source_url")
+        repository = public_record(index._record(row))
         attempts = [
             dict(row)
             for row in db.execute(
@@ -240,7 +222,7 @@ def jobs_snapshot(
             dict(row)
             for row in db.execute(
                 f"""SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,j.due_at,
-            j.finished_at,j.retry_count,j.error_category,j.error,
+            j.finished_at,j.retry_count,
             CASE WHEN j.state='pending' THEN ({BLOCKING_JOB_SQL}) END AS blocking_job_id,
             a.id AS attempt_id,a.started_at,
             a.finished_at AS attempt_finished_at,a.outcome,

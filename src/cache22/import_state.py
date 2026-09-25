@@ -22,6 +22,8 @@ from .storage import Repository
 def clean_repository_import_state(
     url: str,
     archive_dirs: Sequence[Path] | None = None,
+    *,
+    index: Index,
 ) -> tuple[Path, ...]:
     repository = parse_repository_url(url)
     removed_paths: list[Path] = []
@@ -29,16 +31,18 @@ def clean_repository_import_state(
     for archive_dir in _resolve_archive_dirs(archive_dirs):
         with Repository.open(archive_dir, repository) as repo:
             if repo is not None:
-                removed_paths.extend(_clean_repository_storage(repo))
+                removed_paths.extend(_clean_repository_storage(repo, index=index))
 
     return tuple(sorted(removed_paths, key=str))
 
 
-def clean_all_import_state(archive_dirs: Sequence[Path] | None = None) -> tuple[Path, ...]:
+def clean_all_import_state(
+    archive_dirs: Sequence[Path] | None = None, *, index: Index
+) -> tuple[Path, ...]:
     removed_paths: list[Path] = []
 
     for archive_dir in _resolve_archive_dirs(archive_dirs):
-        removed_paths.extend(_clean_partial_state_under(archive_dir))
+        removed_paths.extend(_clean_partial_state_under(archive_dir, index=index))
 
     return tuple(sorted(removed_paths, key=str))
 
@@ -53,7 +57,7 @@ def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ..
     return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)
 
 
-def _clean_partial_state_under(root: Path) -> list[Path]:
+def _clean_partial_state_under(root: Path, *, index: Index) -> list[Path]:
     removed_paths: list[Path] = []
     directories_to_visit = [Path()]
 
@@ -86,16 +90,15 @@ def _clean_partial_state_under(root: Path) -> list[Path]:
                 else nullcontext(None) as repo
             ):
                 if repo is not None:
-                    removed_paths.extend(_clean_repository_storage(repo))
+                    removed_paths.extend(_clean_repository_storage(repo, index=index))
             continue
         directories_to_visit.extend(relative / name for name in children if _valid_component(name))
 
     return removed_paths
 
 
-def _clean_repository_storage(repo: Repository) -> list[Path]:
+def _clean_repository_storage(repo: Repository, *, index: Index) -> list[Path]:
     paths = repo.paths
-    index = Index()
     with index.connect() as db:
         row = db.execute(
             "SELECT id FROM inventory WHERE repository_dir=?", (str(paths.repository_dir),)

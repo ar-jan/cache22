@@ -27,6 +27,7 @@ from .cli_support import (
 from .import_service import import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
+from .inventory_service import InventoryQuery, list_inventory
 from .manager_service import bulk_command, duration, json_value, register_batch
 from .repo_audit import audit
 from .repo_service import ImportResult, check_repository
@@ -53,7 +54,7 @@ def add(
     as_json: JsonOption = False,
 ) -> None:
     """Register Git URLs without downloading or queueing work."""
-    results = register_batch(Index(), urls, root=root, case_sensitive=case_sensitive)
+    results = register_batch(Index.initialize(), urls, root=root, case_sensitive=case_sensitive)
     for result in results:
         result["selector"] = urls[result["line"] - 1]
     output(results, as_json, columns=RESULT_COLUMNS)
@@ -64,11 +65,18 @@ def add(
 @repo_app.command("list")
 @command
 def list_repositories(
-    host: str | None = None,
-    local_state: str | None = None,
-    remote_status: str | None = None,
-    queued: bool = False,
-    scheduled: bool = False,
+    q: str = "",
+    host: list[str] | None = None,
+    archive_root: list[str] | None = None,
+    local_state: list[str] | None = None,
+    remote_status: list[str] | None = None,
+    storage_format: list[str] | None = None,
+    queued: bool | None = None,
+    running: bool | None = None,
+    scheduled: bool | None = None,
+    schedule_blocked: bool | None = None,
+    has_error: bool | None = None,
+    reconciliation_required: bool | None = None,
     sort: str = "repo_key",
     descending: bool = False,
     limit: int = 100,
@@ -76,18 +84,24 @@ def list_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """List indexed repositories without scanning storage or contacting remotes."""
+    query = InventoryQuery(
+        q=q,
+        host=tuple(host or ()),
+        archive_root=tuple(archive_root or ()),
+        local_state=tuple(local_state or ()),
+        remote_status=tuple(remote_status or ()),
+        storage_format=tuple(storage_format or ()),
+        queued=queued,
+        running=running,
+        scheduled=scheduled,
+        schedule_blocked=schedule_blocked,
+        has_error=has_error,
+        reconciliation_required=reconciliation_required,
+        sort=sort,
+        descending=descending,
+    )
     output(
-        Index().list(
-            host=host,
-            local_state=local_state,
-            remote_status=remote_status,
-            queued=queued,
-            scheduled=scheduled,
-            sort=sort,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-        ),
+        list_inventory(Index(read_only=True), query, limit=limit, offset=offset),
         as_json,
         columns=REPOSITORY_COLUMNS,
     )
@@ -97,7 +111,7 @@ def list_repositories(
 @command
 def show(selector: Selector, as_json: JsonOption = False) -> None:
     """Show indexed repository details by key or URL."""
-    output(Index().get(selector), as_json)
+    output(Index(read_only=True).get(selector), as_json)
 
 
 def selected(index: Index, selectors: list[str] | None, all_repositories: bool) -> list[str]:
@@ -165,7 +179,7 @@ def _batch(
     timeout: float,
     as_json: bool,
 ) -> None:
-    index = Index()
+    index = Index.initialize()
     results: list[dict[str, Any]] = []
     failed = False
     for selector in selected(index, selectors, all_repositories):
@@ -238,17 +252,19 @@ def clean(
     all_repositories: bool = typer.Option(False, "--all"),
 ) -> None:
     """Remove partial import state; completed archives and lock files are kept."""
-    index = Index()
+    index = Index.initialize()
     removed: list[Path] = []
     if all_repositories and not selectors:
-        removed.extend(clean_all_import_state())
+        removed.extend(clean_all_import_state(index=index))
     else:
         for selector in selected(index, selectors, all_repositories):
             record = index.find(selector)
             if record is None and not is_repository_url(selector):
                 raise ValueError(f"Repository is not indexed: {selector}")
             removed.extend(
-                clean_repository_import_state(record["source_url"] if record else selector)
+                clean_repository_import_state(
+                    record["source_url"] if record else selector, index=index
+                )
             )
     if not removed:
         typer.echo("No partial import state found.")
@@ -263,7 +279,7 @@ class JobKind(StrEnum):
 
 
 def _mutate(selectors: list[str], action: str, as_json: bool, *, every: str | None = None) -> None:
-    index = Index()
+    index = Index.initialize()
     seen: set[int] = set()
     results: list[dict[str, Any]] = []
     for selector in dict.fromkeys(selectors):
@@ -324,7 +340,8 @@ def audit_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """Inspect archive storage and optionally repair inventory or adopt mirrors."""
-    issues = audit(fix=fix, adopt=adopt)
+    index = Index.initialize() if fix or adopt else Index(read_only=True)
+    issues = audit(index=index, fix=fix, adopt=adopt)
     output(issues, as_json)
     if any(not issue["fixed"] for issue in issues):
         raise typer.Exit(1)
@@ -342,6 +359,7 @@ def worker(
     """Process jobs continuously, or drain currently runnable work with --once."""
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
         raise typer.BadParameter("Timeouts must be positive")
+    index = Index.initialize()
     if not once:
         stop = threading.Event()
 
@@ -353,6 +371,7 @@ def worker(
 
         with shutdown_signals(stop):
             run_continuous(
+                index=index,
                 stop=stop,
                 check_timeout=check_timeout,
                 fetch_timeout=fetch_timeout,
@@ -363,6 +382,7 @@ def worker(
     stop = threading.Event()
     with shutdown_signals(stop):
         results = run_worker(
+            index=index,
             check_timeout=check_timeout,
             fetch_timeout=fetch_timeout,
             convert_timeout=convert_timeout,

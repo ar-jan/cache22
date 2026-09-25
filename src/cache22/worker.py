@@ -32,7 +32,7 @@ def shutdown_signals(stop: threading.Event) -> Iterator[None]:
 
 def run_worker(
     *,
-    index: Index | None = None,
+    index: Index,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
     convert_timeout: float = 7200,
@@ -53,7 +53,7 @@ def run_worker(
 
 def run_continuous(
     *,
-    index: Index | None = None,
+    index: Index,
     stop: threading.Event | None = None,
     check_timeout: float = 120,
     fetch_timeout: float = 7200,
@@ -63,7 +63,6 @@ def run_continuous(
 ) -> None:
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
         raise ValueError("Timeouts must be positive")
-    index = index or Index()
     stop = stop or threading.Event()
     heartbeat_stop = threading.Event()
     heartbeat_failed = threading.Event()

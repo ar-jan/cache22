@@ -29,10 +29,7 @@ def register_storage(index: Index, root: Path, repo: Repository) -> dict[str, An
     return index.add(ref, root)
 
 
-def audit(
-    *, index: Index | None = None, fix: bool = False, adopt: bool = False
-) -> list[dict[str, Any]]:
-    index = index or Index()
+def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[str, Any]]:
     fix = fix or adopt
     issues: list[dict[str, Any]] = []
     seen: set[str] = set()

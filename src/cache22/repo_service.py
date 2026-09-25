@@ -1,4 +1,4 @@
-"""Noninteractive services shared by the CLI and Datasette manager."""
+"""Noninteractive services shared by the CLI and Cache22 web application."""
 
 from __future__ import annotations
 
@@ -42,9 +42,8 @@ def registration_target(
 
 
 def add_repository(
-    url: str, root: Path | None = None, *, case_sensitive: bool = False, index: Index | None = None
+    url: str, root: Path | None = None, *, case_sensitive: bool = False, index: Index
 ) -> dict[str, Any]:
-    index = index or Index()
     ref, target = registration_target(index, url, root, case_sensitive)
     return index.add(ref, target)
 
@@ -92,12 +91,9 @@ def publish_remote(index: Index, record: dict[str, Any]) -> None:
     index.update(record["id"], **remote_fields(snapshot))
 
 
-def check_repository(
-    selector: str | int, *, index: Index | None = None, timeout: float = 120
-) -> dict[str, Any]:
+def check_repository(selector: str | int, *, index: Index, timeout: float = 120) -> dict[str, Any]:
     if timeout <= 0:
         raise ValueError("Operation timeout must be positive")
-    index = index or Index()
     record = index.get(selector)
     scheduler = Scheduler(index)
     job = scheduler.immediate(record["id"], "check")

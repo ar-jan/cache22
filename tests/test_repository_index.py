@@ -18,6 +18,7 @@ from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
 from cache22.job_queue import Queue
 from cache22.repo_audit import audit
@@ -72,7 +73,7 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Repository:
     root.mkdir()
     add_archive_dir(root)
     clock = [1000.0]
-    index = Index(clock=lambda: clock[0])
+    index = Index.initialize(clock=lambda: clock[0])
     record = add_repository(URL, root, index=index)
     return Repository(source, root, index, clock, record["id"])
 
@@ -138,16 +139,16 @@ def test_git_failure_details_reach_cli_and_history(
     result = CliRunner().invoke(app, [command, URL])
     assert result.exit_code == 1, result.output
     job = Queue(r.index).list(r.id)[0]
-    assert job["state"] == "pending" and job["error_category"] == "transport"
+    attempt = job["attempts"][0]
+    assert job["state"] == "pending" and attempt["error_category"] == "transport"
     for message in (
         result.output,
-        job["error"],
-        job["attempts"][0]["error"],
+        attempt["error"],
         r.index.get(r.id)["last_error"],
     ):
         assert diagnostic in message
         assert "secret" not in message and "\x1b" not in message
-    assert len(job["error"]) <= 4000
+    assert len(attempt["error"]) <= 4000
     assert r.index.get(r.id)["last_error_kind"] == command
 
 
@@ -197,12 +198,14 @@ def test_listing_is_database_only_with_disconnected_root(
 
     monkeypatch.setattr(os, "scandir", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
-    assert r.index.list()[0] == before
+    assert list_inventory(r.index)[0] == before
     result = CliRunner().invoke(app, ["list", "--json"])
     assert result.exit_code == 0, result.output
     listed = json.loads(result.output)[0]
     assert listed["last_fetched_at"] == "1970-01-01T00:16:40Z"
     assert listed["last_checked_at"] is None
+    assert listed["project_name"] == "project"
+    assert listed["archive_path"] == before["archive_path"]
 
 
 def test_schedule_checks_then_fetches_and_coalesces(repository: Repository) -> None:
@@ -349,7 +352,7 @@ def test_unavailable_root_defers_fetch_without_losing_inventory(repository: Repo
     run_worker(index=r.index)
     job = queue.list()[0]
     assert job["state"] == "pending" and job["retry_count"] == 0
-    assert job["error_category"] == "unavailable"
+    assert job["attempts"][0]["error_category"] == "unavailable"
     after = r.index.get(r.id)
     assert after["local_head_oid"] == before["local_head_oid"]
     assert after["local_state"] == "ready"
@@ -361,12 +364,12 @@ def test_audit_bootstraps_owned_mirrors_without_network(
     r = repository
     r.commit("first")
     before = r.fetch()
-    other = Index(tmp_path / "other.sqlite3", clock=lambda: 2000)
+    other = Index.initialize(tmp_path / "other.sqlite3", clock=lambda: 2000)
     monkeypatch.setattr(
         repo_service, "remote_snapshot", lambda url: pytest.fail("Audit must be offline")
     )
     assert any("not indexed" in issue["problem"] for issue in audit(index=other))
-    assert other.list() == []
+    assert list_inventory(other) == []
     assert all(issue["fixed"] for issue in audit(index=other, fix=True))
     record = other.get(before["repo_key"])
     assert record["local_head_oid"] == before["local_head_oid"]
@@ -466,7 +469,7 @@ def test_default_branch_rename_and_cleanup_refresh_inventory(repository: Reposit
     assert after["remote_status"] == "current"
     marker = Path(after["repository_dir"]) / ".clone-complete"
     marker.unlink()
-    clean_repository_import_state(URL, [r.root])
+    clean_repository_import_state(URL, [r.root], index=r.index)
     cleaned = r.index.get(r.id)
     assert cleaned["local_state"] == "missing"
     assert cleaned["local_head_oid"] is None

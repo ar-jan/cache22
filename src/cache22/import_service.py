@@ -16,13 +16,12 @@ def import_repository(
     *,
     case_sensitive: bool = False,
     adopt: bool = False,
-    index: Index | None = None,
+    index: Index,
     timeout: float = 7200,
 ) -> ImportResult:
     if timeout <= 0:
         raise ValueError("Operation timeout must be positive")
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
-    index = index or Index()
     with index.connect() as db:
         existing = db.execute(
             "SELECT archive_root FROM repositories WHERE repo_key=?", (repository_key(repository),)

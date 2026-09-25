@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.operation import ClaimLostError
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
@@ -15,14 +16,14 @@ from cache22.scheduler import Scheduler
 
 @pytest.fixture
 def scheduler(tmp_path: Path) -> Scheduler:
-    index = Index(tmp_path / "index.db", clock=lambda: 1000)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: 1000)
     add_repository("https://host/team/repo", tmp_path, index=index)
     return Scheduler(index)
 
 
 @pytest.fixture
 def repo_id(scheduler: Scheduler) -> int:
-    return scheduler.index.list()[0]["id"]
+    return list_inventory(scheduler.index)[0]["id"]
 
 
 @pytest.mark.parametrize("stage", ["schedule", "followup"])

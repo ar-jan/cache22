@@ -4,7 +4,7 @@
   const $ = (selector, parent = document) => parent.querySelector(selector);
   const page = $("#c22-page"), inventory = $("#c22-inventory");
   if (!page && !inventory) return;
-  const prefix = "/-/cache22/api/";
+  const prefix = "/api/";
   const connection = $("#c22-connection");
   const element = (tag, text) => {
     const node = document.createElement(tag);
@@ -88,67 +88,68 @@
   }
 
   if (inventory) {
-    let selected;
-    try { selected = new Set(JSON.parse(sessionStorage.getItem("cache22-selection") || "[]")); }
-    catch { selected = new Set(); }
+    const maxSelection = 10000;
+    const storageKey = "cache22-selection";
+    let selected = new Set();
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(storageKey) || "[]");
+      if (Array.isArray(saved)) selected = new Set(saved.filter(id => Number.isSafeInteger(id) && id > 0).slice(0, maxSelection));
+    } catch { /* An unavailable store still permits selection for this page. */ }
     function syncSelection() {
-      sessionStorage.setItem("cache22-selection", JSON.stringify([...selected]));
-      $("#c22-selection-count").textContent = `${selected.size} selected (IDs captured; selection survives filters)`;
-      document.querySelectorAll(".c22-select").forEach(box => { box.checked = selected.has(Number(box.value)); });
+      try { sessionStorage.setItem(storageKey, JSON.stringify([...selected])); }
+      catch { showError(new Error("Selection cannot be saved in this tab; keep this page open.")); }
+      let visible = 0;
+      document.querySelectorAll(".c22-select").forEach(box => {
+        box.checked = selected.has(Number(box.value));
+        if (box.checked) visible++;
+      });
+      $("#c22-selection-count").textContent = `${selected.size} selected · ${visible} on this page (captured IDs)`;
+    }
+    function addIds(ids) {
+      const next = new Set([...selected, ...ids]);
+      if (next.size > maxSelection) {
+        showError(new Error("Selection exceeds 10,000 repositories; clear or narrow your selection."));
+      } else selected = next;
+      syncSelection();
     }
     document.addEventListener("change", event => {
       if (!event.target.matches(".c22-select")) return;
       const id = Number(event.target.value);
-      if (event.target.checked) selected.add(id); else selected.delete(id);
-      syncSelection();
+      if (event.target.checked) addIds([id]);
+      else { selected.delete(id); syncSelection(); }
     });
-    $("#c22-page-select").onclick = () => { document.querySelectorAll(".c22-select").forEach(box => selected.add(Number(box.value))); syncSelection(); };
+    $("#c22-page-select").onclick = () => addIds([...document.querySelectorAll(".c22-select")].map(box => Number(box.value)));
     $("#c22-clear-select").onclick = () => { selected.clear(); syncSelection(); };
     $("#c22-all-select").onclick = async event => {
       event.target.disabled = true;
       try { selected = new Set((await api("selection", {query: location.search.slice(1)})).ids); syncSelection(); }
       catch (error) { showError(error); } finally { event.target.disabled = false; }
     };
-    function search() {
-      const url = new URL(location.href); url.searchParams.set("_q", $("#c22-search").value); url.searchParams.delete("_next"); location.href = url;
-    }
-    $("#c22-search-apply").onclick = search;
-    $("#c22-search").onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); search(); } };
+    $("#c22-filters").onsubmit = event => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const values = new URLSearchParams(new FormData(form));
+      form.querySelectorAll("[data-multi-filter]").forEach(input => {
+        values.delete(input.name);
+        input.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean).forEach(value => values.append(input.name, value));
+      });
+      for (const [key, value] of [...values]) if (!value) values.delete(key);
+      location.href = "/?" + values.toString();
+    };
     async function refresh() {
-      const response = await fetch(location.href, {cache: "no-store", signal: AbortSignal.timeout(15000)});
+      const query = location.search;
+      const response = await fetch("/inventory/fragment" + query, {cache: "no-store", signal: AbortSignal.timeout(15000)});
       if (!response.ok) throw new Error(`Inventory HTTP ${response.status}`);
-      const next = new DOMParser().parseFromString(await response.text(), "text/html");
-      const currentBody = $(".rows-and-columns tbody"), nextBody = $(".rows-and-columns tbody", next);
-      if (currentBody && nextBody) {
-        if ([...nextBody.rows].some(row => !$(".c22-select", row))) {
-          throw new Error("Include the id column to enable live inventory refresh and row selection.");
-        }
-        const oldRows = new Map([...currentBody.rows].map(row => [$(".c22-select", row)?.value, row]));
-        const wanted = new Set();
-        for (const nextRow of nextBody.rows) {
-          const id = $(".c22-select", nextRow)?.value; wanted.add(id);
-          const old = oldRows.get(id);
-          if (old) {
-            if (!old.contains(document.activeElement)) old.replaceChildren(...[...nextRow.cells].map(cell => document.importNode(cell, true)));
-            currentBody.append(old);
-          } else currentBody.append(document.importNode(nextRow, true));
-        }
-        for (const [id, row] of oldRows) if (!wanted.has(id)) row.remove();
-      } else if (!currentBody && nextBody) {
-        const oldWrapper = $(".above-table-panel");
-        oldWrapper?.after(document.importNode(nextBody.closest(".table-wrapper"), true));
-      } else if (currentBody && !nextBody) currentBody.replaceChildren();
-      for (const selector of [".table-summary", ".facet-results", ".pagination", ".zero-results"]) {
-        const current = $(selector), replacement = $(selector, next);
-        if (current && replacement) current.replaceWith(document.importNode(replacement, true));
-        else if (current && !replacement) current.remove();
-      }
-      const nextLink = doc => [...doc.querySelectorAll("a")].find(link => link.textContent.trim() === "Next page");
-      const oldNext = nextLink(document), newNext = nextLink(next);
-      if (oldNext && newNext) oldNext.href = newNext.getAttribute("href");
-      else if (oldNext) oldNext.parentElement.remove();
-      else if (newNext) $(".table-wrapper")?.after(document.importNode(newNext.parentElement, true));
+      const html = await response.text();
+      if (query !== location.search) return;
+      const target = $("#c22-inventory-data");
+      const focused = target.contains(document.activeElement) ? document.activeElement.id : null;
+      const openFacets = [...target.querySelectorAll(".c22-facets details")].map(node => node.open);
+      // This endpoint returns only Cache22's own escaped results partial.
+      target.innerHTML = html;
+      target.querySelectorAll(".c22-facets details").forEach((node, index) => { node.open = openFacets[index]; });
       syncSelection();
+      if (focused) (document.getElementById(focused) || connection).focus({preventScroll: true});
     }
     syncSelection();
     const update = polling(refresh, 5000);
@@ -175,7 +176,7 @@
     let offset = 0, nextOffset = null, generation = 0;
     const size = queue ? 100 : 50;
     function repositoryLink(row) {
-      const link = element("a", row.repo_key || row.repository_id); link.href = `/-/cache22/repository/${row.repository_id}`; return link;
+      const link = element("a", row.repo_key || row.repository_id); link.href = `/repositories/${row.repository_id}`; return link;
     }
     function progress(row) {
       const div = element("div", row.phase || "Waiting for phase");

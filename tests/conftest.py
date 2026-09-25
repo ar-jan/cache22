@@ -1,11 +1,19 @@
 import pytest
 
+from cache22.index import Index
+
 
 @pytest.fixture(autouse=True)
 def isolated_index(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("index")))
+
+
+@pytest.fixture
+def inventory_index() -> Index:
+    """An explicitly requested inventory for service tests."""
+    return Index.initialize()
 
 
 @pytest.fixture

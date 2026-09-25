@@ -1,0 +1,32 @@
+<p class="c22-summary">{{ snapshot.total }} matching repositories. {% if rows %}Showing {{ selection.offset + 1 }}–{{ selection.offset + rows|length }}.{% endif %}
+<a id="c22-export-json" href="{{ selection.url('/inventory.json') }}">Export JSON</a> · <a id="c22-export-csv" href="{{ selection.url('/inventory.csv') }}">Export CSV</a></p>
+<div class="c22-facets" aria-label="Inventory facets">
+{% for field, values in snapshot.facets.items() %}
+<details><summary id="facet-{{ field }}-summary">{{ field|replace('_', ' ')|capitalize }}</summary><ul>
+{% for facet in values %}
+<li><a id="facet-{{ field }}-{{ facet.value|urlencode }}" href="{{ selection.url(**{field: (query|attr(field)|reject('equalto', facet.value)|list) if facet.value in query|attr(field) else (query|attr(field)|list + [facet.value]), 'offset': 0}) }}" {% if facet.value in query|attr(field) %}aria-current="true"{% endif %}>{{ facet.value|replace('_', ' ') }} ({{ facet.count }}){% if facet.value in query|attr(field) %} ✓{% endif %}</a></li>
+{% endfor %}
+</ul></details>
+{% endfor %}
+</div>
+<div class="c22-scroll">
+<table class="c22-table"><caption class="c22-visually-hidden">Matching repositories</caption>
+<thead><tr>{% for heading in ['Select', 'Repository', 'Archive', 'State', 'Schedule', 'Activity', 'Diagnostic'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead>
+<tbody>
+{% for row in rows %}<tr data-id="{{ row.id }}">
+<td><input id="repository-{{ row.id }}-select" type="checkbox" class="c22-select" value="{{ row.id }}" aria-label="Select {{ row.repo_key }}"></td>
+<td><a id="repository-{{ row.id }}-link" href="/repositories/{{ row.id }}">{{ row.project_name }}</a><small>{{ row.repo_key }}</small></td>
+<td>{{ row.storage_format }}<small>{{ row.archive_root }}</small></td>
+<td>{{ row.local_state|replace('_', ' ') }} · {{ row.remote_status|replace('_', ' ') }}{% if row.reconciliation_required %}<small>Reconciliation required</small>{% endif %}<small>Checked: {{ row.last_checked_at or 'never' }}</small></td>
+<td>{% if row.scheduled %}Every {{ row.interval_seconds }}s<small>Due: {{ row.next_due_at or 'unknown' }}</small>{% else %}Disabled{% endif %}{% if row.schedule_blocked %}<small>Blocked</small>{% endif %}</td>
+<td>{% if row.running %}Running{% endif %}{% if row.queued %} Queued{% endif %}{% if not row.running and not row.queued %}Idle{% endif %}</td>
+<td>{% if row.has_error %}<span class="c22-error">{{ row.last_error }}</span><small>{{ row.last_error_kind }} · {{ row.last_error_at }}</small>{% else %}—{% endif %}</td>
+</tr>{% else %}<tr><td colspan="7">{% if snapshot.total %}No repositories on this page. Use Previous or First page to return to results.{% else %}No matching repositories. Adjust or reset the filters.{% endif %}</td></tr>{% endfor %}
+</tbody></table>
+</div>
+<nav class="c22-pager" aria-label="Inventory pages">
+{% if selection.offset %}<a id="c22-first" href="{{ selection.url(offset=0) }}">First page</a>{% endif %}
+{% if snapshot.previous_offset is not none %}<a id="c22-prev" href="{{ selection.url(offset=snapshot.previous_offset) }}">Previous</a>{% endif %}
+<span>Page {{ selection.offset // selection.limit + 1 }}</span>
+{% if snapshot.next_offset is not none %}<a id="c22-next" href="{{ selection.url(offset=snapshot.next_offset) }}">Next</a>{% endif %}
+</nav>

@@ -20,6 +20,7 @@ from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_queue import Queue
 from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
@@ -87,7 +88,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
     root.mkdir()
     add_archive_dir(root)
     clock = [1000.0]
-    index = Index(clock=lambda: clock[0])
+    index = Index.initialize(clock=lambda: clock[0])
     ref = parse_repository_url(URL)
     record = index.add(ref, root)
     return Repo(source, root, index, record["id"], archive_paths_for_repository(root, ref), clock)
@@ -96,7 +97,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
 @pytest.mark.parametrize("repo", ["sha1", "sha256"], indirect=True)
 @pytest.mark.parametrize("detached", [False, True])
 def test_offline_conversion_roundtrip_and_audit(
-    repo: Repo, detached: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    repo: Repo,
+    detached: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     first = repo.commit("first")
     git(repo.source, "branch", "other")
@@ -132,13 +136,16 @@ def test_offline_conversion_roundtrip_and_audit(
         git_bundle.restore(state, tmp_path / "restored.git")
     assert git(tmp_path / "restored.git", "rev-parse", "refs/notes/example") == first
     assert repo.convert() == bundle
-    assert clean_repository_import_state(URL) == ()
-    new_index = Index(tmp_path / "rebuilt.sqlite")
+    assert clean_repository_import_state(URL, index=repo.index) == ()
+    new_index = Index.initialize(tmp_path / "rebuilt.sqlite")
     assert any(item["fixed"] for item in audit(index=new_index, fix=True))
     rebuilt = new_index.get(URL)
     assert rebuilt["storage_format"] == "bundle"
     assert rebuilt["archive_path"] == str(bundle)
     assert rebuilt["local_ref_digest"] == before["local_ref_digest"]
+    repo.root.rename(repo.root.with_name("disconnected"))
+    assert list_inventory(new_index)[0]["archive_path"] == str(bundle)
+    assert new_index.get(URL)["project_name"] == after["project_name"]
 
 
 def test_bundle_checks_and_fetches_follow_remote_refs(repo: Repo) -> None:
@@ -316,7 +323,7 @@ def test_index_failure_after_publication_retains_source_and_audit_recovers(
     monkeypatch.setattr(repo.index, "update", update)
     audit(index=repo.index, fix=True)
     assert repo.index.get(repo.id)["storage_format"] == "bundle"
-    clean_repository_import_state(URL)
+    clean_repository_import_state(URL, index=repo.index)
     assert not repo.paths.mirror_repository.exists()
 
 
@@ -354,7 +361,7 @@ def test_bundle_fetch_index_failure_retains_generation_and_recovers_offline(
     assert record["local_head_oid"] == latest
     assert record["archive_path"] == str(published)
     assert not record["reconciliation_required"]
-    assert previous in clean_repository_import_state(URL)
+    assert previous in clean_repository_import_state(URL, index=repo.index)
     assert not previous.exists()
     assert published.is_file()
     assert audit(index=repo.index) == []
@@ -417,7 +424,7 @@ def test_invalid_active_bundle_never_falls_back_to_retained_mirror(
         repo.fetch()
     assert repo.paths.mirror_repository.is_dir()
     with pytest.raises(ValueError, match="[Bb]undle|Unsafe archive entry"):
-        clean_repository_import_state(URL)
+        clean_repository_import_state(URL, index=repo.index)
     assert repo.paths.mirror_repository.is_dir()
 
 

@@ -8,163 +8,131 @@ compatibility migrations or silently reset data.
 
 ## Recommended order
 
-1. Separate index initialization from ordinary access and remove repeated schema
-   introspection.
-2. Make attempts the sole source of job diagnostics and derive `project_name`;
-   combine these justified schema edits into one version bump.
-3. Establish a shared inventory query model, then replace Datasette with a focused
-   Cache22 web application.
+1. **Completed:** separate index initialization from ordinary access and remove
+   repeated schema introspection.
+2. **Completed:** make attempts the sole source of job diagnostics and derive
+   `project_name`; combine these schema edits in version 4.
+3. **Completed:** establish a shared inventory query model and replace Datasette
+   with a focused Cache22 web application.
 4. Improve domain errors and operation results, extract pure diagnostics, and
    centralize observation-state interpretation.
 
 Storage defaults and on-disk metadata deserve separate decisions. Neither should
 block the index or web work. Naming and repository organization are lower priority.
 
-## 1. Index construction takes unnecessary write locks
+## 1. Index initialization is explicit — completed
 
-**Evidence.** In [index.py](../src/cache22/index.py), writable `Index.__init__`
-checks/initializes the schema inside `BEGIN IMMEDIATE` even for an existing index.
-CLI commands create instances independently, and
-[import_state.py](../src/cache22/import_state.py) creates another during each
-repository cleanup. `Index.update_in` also runs `PRAGMA table_info(repositories)`
-on every update to validate field names.
+`Index.initialize` owns transactional schema creation at CLI/web entry points;
+the worker CLI initializes once before starting its worker lifecycle. Ordinary
+`Index` construction validates an existing database using SQLite's existing-file
+modes, without a schema write transaction. Initialization of a supported index
+also avoids schema writes and journal-mode changes.
 
-**Recommendation — address next.** Separate explicit, transactional database
-initialization from opening an existing index. Initialize once at an appropriate
-CLI/web/worker entry point and pass that index through the work. Use an explicit
-allowed-field definition for updates instead of querying the schema each time.
-Keep claim validation in the same transaction as inventory writes.
+Services require a supplied index, including cleanup traversal. `Index.update_in`
+validates fields against an explicit allowed-field set and retains claim validation
+inside the inventory-write transaction. This step retained schema version 3;
+the diagnostic and project-name cleanup below advances it to version 4.
 
-The benefit is clearer ownership of database creation and less avoidable write-lock
-contention. Do not put unconditional initialization in a global CLI callback:
-`jobs --db` must still open an existing index read-only. Read-only entry points
-must never create directories, initialize schema, or recover claims.
+`list`, `show`, `jobs` (including `--db`), and audit without repair open read-only.
+Missing indexes fail with creation/rebuild guidance without creating directories
+or databases. Repairing audit, other inventory mutations, and web/worker startup
+initialize explicitly. Help and configuration commands do not access the index.
 
-**Acceptance.** Concurrent initialization produces one valid database; ordinary
-opens of an existing index avoid a schema write transaction; unsupported versions
-fail without reset; missing read-only indexes remain missing. Existing stale-claim
-and transactional rollback checks still pass.
+Lifecycle tests cover concurrent initialization, opening alongside an active writer,
+initialization rollback/retry, missing indexes, unsupported and unrecognized
+content, custom-index cleanup, and inspection without claim recovery. Existing
+fencing and rollback checks remain applicable.
 
-## 2. Job diagnostics have two sources that can diverge
+## 2. Attempts own job diagnostics — completed
 
-**Evidence.** [job_queue.py](../src/cache22/job_queue.py) writes errors to both
-`jobs` and `job_attempts` in `finish_in`, but `interrupt_in` updates attempt errors
-without updating the job's error columns. In
-[manager_service.py](../src/cache22/manager_service.py), `jobs_snapshot` exposes
-both the job's stored errors and a separately derived `diagnostic`. The browser
-queue currently renders the former. An interrupted retry can therefore display
-an older error, or none, while the attempt history has the current interruption.
+Schema version 4 removes `jobs.error_category` and `jobs.error`.
+[job_queue.py](../src/cache22/job_queue.py) persists errors only on attempts,
+eliminating the stale job-level errors previously left behind by interruption.
+[manager_service.py](../src/cache22/manager_service.py) exposes the attempt-derived
+`diagnostic` separately from current attempt/progress in CLI and browser responses,
+without top-level error aliases.
 
-**Recommendation — remove the duplication.** Drop `jobs.error_category` and
-`jobs.error`; use attempt-derived diagnostics consistently in the CLI and browser.
-Separate the current attempt/progress from the latest completed problem. Preserve
-the `job_errors` semantics: pending, running, and failed jobs may have a diagnostic;
-success and cancellation remove the job from the problem view. A different
-successful job does not hide an older failed job.
+`job_errors` retains its existing semantics: pending, running, and failed jobs may
+have a diagnostic from their latest completed attempt. Running retries keep it
+visible; success and cancellation remove that job from the problem view. A separate
+successful job does not hide older failures. Promoting check to fetch retains the
+original attempt kind. Retry, scheduling, and retention policies are unchanged.
 
-This removes redundant writes and resolves a concrete reporting inconsistency.
-It requires updating queue consumers and a schema version bump, not changing retry
-or scheduling policy.
+Existing lifecycle and inspection tests cover failure, retry, interruption,
+promotion, cancellation, success, and history expiry. Inspection assertions also
+check agreement between CLI JSON, browser queue responses, and inventory.
 
-**Acceptance.** After a transport failure, retry, and interruption, all inspection
-surfaces report the same latest completed problem. Running retries keep prior
-diagnostics visible. A check promoted to fetch retains the original attempt kind.
-Cancellation, success, and history retention keep their current semantics.
+## 3. Project names are derived; display paths and bundle filenames remain — completed
 
-## 3. Some repository fields are redundant; others preserve information
+The same version-4 schema change removes stored `repositories.project_name`.
+[index.py](../src/cache22/index.py) derives it from the final component of
+`display_path` in the SQL inventory view using SQLite built-ins. Sorting, search,
+filtering, and presentation continue to use `project_name`; independent writes
+to it are rejected.
 
-**Evidence.** [index.py](../src/cache22/index.py) stores `project_name`,
-`display_path`, and `archive_file`. Registration derives `project_name` directly
-from the final component of `display_path`.
-[repository_ref.py](../src/cache22/repository_ref.py) preserves original path
-casing in `display_path`, while effective source paths can be lowercased.
-[git_bundle.py](../src/cache22/git_bundle.py) publishes a UUID generation filename
-into `archive_file`; inventory uses it without accessing the archive.
+`display_path` preserves the first display spelling, which normalized keys and
+effective clone URLs can lose. `archive_file` retains the selected bundle generation
+filename, which cannot be reconstructed from the key. Neither is removed, and
+inventory needs no archive access, including when drives are disconnected.
 
-**Recommendation — derive only what is actually redundant.** Derive
-`project_name` from retained `display_path`, exposing it through the inventory
-read model so sorting, search, and presentation retain their meaning. Include
-this in the diagnostic schema cleanup.
+Tests cover mixed-case and Unicode names, duplicate registrations, SQL sorting,
+manager filtering/selection, and disconnected inventory reads. Version 3 is rejected
+without migration or automatic reset. The [README](../README.md) and
+[guarantees](guarantees.md#browser-and-index-lifecycle) describe backing up and
+rebuilding the index, including loss of registrations, schedules, and job history.
 
-Keep `display_path`: deriving it from the normalized key or stored clone URL can
-lose the first display spelling. Keep the selected bundle filename: it cannot be
-reconstructed from the key, and consulting the manifest would break inventory
-browsing while archive drives are disconnected. These are not equivalent cases
-of denormalization.
+## 4. Shared inventory queries and focused web application — completed
 
-**Acceptance.** Mixed-case registrations retain their displayed names and sorting;
-bundle paths remain available with disconnected storage; no inventory query reads
-archive files. Document the schema reset/rebuild procedure without implementing
-compatibility migrations.
+`inventory_service` owns typed filters, validated sorting, parameterized predicates,
+page snapshots, disjunctive facet counts, exports, and bounded ID selection. CLI
+listing exposes the same operational filters, including literal name/key search,
+repeatable categorical options, and positive/negative boolean flags. Page defaults
+are 100 rows, capped at 500; ordering uses repository ID to break ties.
 
-## 4. Datasette coupling limits the application-owned web interface
+The Starlette/Jinja application replaces Datasette, its plugin loader/entry point,
+private filter parser, and generated-page scraping. Cache22 owns templates, assets,
+and a dedicated inventory refresh partial. The compact table links to repository
+details, attempts, and existing actions. Tab-local captured IDs survive navigation,
+filter changes, and refreshes; the maximum selection/submission remains 10,000.
+Exports include every match in sort order and explicitly omit `source_url`.
 
-**Evidence.** [manager/__init__.py](../src/cache22/manager/__init__.py) uses the
-private `datasette.views.table._table_filters` function so bulk selection matches
-the displayed inventory. [manager.js](../src/cache22/manager/static/manager.js)
-refreshes inventory by downloading and parsing Datasette HTML and depending on its
-CSS selectors, table structure, and pagination links. Selection and refresh also
-require the ID column to remain visible. The runtime is pinned to
-`datasette==1.0a40` in [pyproject.toml](../pyproject.toml).
+Registration, commands, schedules, conversion, queue monitoring, and worker progress
+reuse existing services. SQLite/configuration work runs outside the event loop.
+Loopback binding, Host/Origin checks, mutation method/Fetch Metadata boundaries,
+local assets, and independent worker lifecycle remain. SQL/table browsing, database
+downloads, and old route/parameter aliases are absent. Schema version remains 4.
 
-Datasette supplies useful browsing, filtering, facets, SQL access, and exports.
-However, Cache22 already owns registration, mutations, details, queue rendering,
-selection, polling, and browser-origin checks. The agreed product direction is a
-focused Cache22 interface, without a general database explorer.
+Focused tests cover filter/list/export/selection agreement, facet counts, concurrent
+snapshot consistency, disconnected roots, selection boundaries, malformed requests,
+and HTTP mutation boundaries. Browser acceptance exercises captured selection,
+pagination and empty pages, focus, refresh failures/recovery, registration, commands,
+progress, attempt details, and no-worker messaging.
 
-**Recommendation — replace Datasette in a bounded web project.** Use Starlette,
-Jinja templates, the existing Uvicorn server, and modest vanilla JavaScript.
-Starlette provides standard [routing](https://starlette.dev/routing/) and
-[Jinja template integration](https://starlette.dev/templates/). The expected
-benefit is control over query and rendering contracts and removal of private-API
-and DOM coupling. It is not a promise of fewer lines: Cache22 would own the
-inventory UI and its accessibility, filtering, pagination, and export behavior.
+A reproducible smoke benchmark is available as
+`python utils/benchmark_inventory.py` in the development environment. On 2026-09-25,
+its temporary fixture had 10,000 repositories across ten hosts, unavailable archive
+storage, 10,000 successful fetch attempts, 1,428 failed check attempts, 2,000 pending
+checks, and 5,000 schedules. Each figure is the median of five local runs; HTTP
+measurements use the in-process ASGI test client, excluding network/browser costs.
 
-### Capability boundary
+| Operation | Median ms |
+| --- | ---: |
+| First page, total and three facets | 48.3 |
+| Deep page (offset 9,900), total and facets | 56.2 |
+| Host/queued/scheduled filter and facets | 17.4 |
+| Successful-fetch date sort and facets | 59.3 |
+| Diagnostic filter and facets | 41.5 |
+| Capture all 10,000 IDs | 3.8 |
+| Search and capture matching IDs | 7.8 |
+| Materialize 10,000 export records | 170.4 |
+| HTTP inventory HTML | 50.2 |
+| HTTP inventory refresh fragment | 52.2 |
+| HTTP JSON export | 328.1 |
+| HTTP CSV export | 367.2 |
 
-Retain:
-
-- Inventory name/key search, explicit filters, sorting, pagination, and useful
-  facet counts, including the current host/local-state/remote-status facets.
-- Filtered inventory exports in JSON and CSV.
-- Page selection and all-filtered selection, with captured repository IDs that
-  survive navigation and refresh rather than reevaluating filters on submission.
-- Registration preview/submission, repository details and attempts, bulk commands,
-  schedules, conversion, and job/worker monitoring.
-- Local bundled assets, clear refresh failures, and independent web/worker
-  lifecycles.
-
-Omit arbitrary SQL, generic browsing of every table, raw database download, and
-Datasette-specific query syntax. Remove the plugin entry point, plugin-loading
-setup, and Datasette dependency once the replacement is complete. Preserve no
-old route or parameter aliases.
-
-### Query ownership and implementation boundary
-
-Build one typed inventory query model in the shared service layer before replacing
-the UI. Today `Index.list` handles a fixed subset of filters while browser
-selection accepts Datasette-produced SQL fragments. Listing, counts, facets,
-exports, and all-filtered selection should instead use one parameterized predicate
-builder and validated sort fields. Pagination applies to displayed rows, not the
-captured all-filtered selection. Retain the 10,000-item selection/submission limit.
-
-Own the inventory markup and refresh response directly; do not scrape generated
-framework pages. Reuse the existing registration, mutation, job, and detail
-services. Keep blocking SQLite work outside the ASGI event loop. Keep the server
-loopback-only and preserve Host/Origin checks and method restrictions; removing
-the Datasette permission wrapper must not remove those boundaries. Generic SQL
-writes are not part of the replacement.
-
-This rewrite does not require a storage-format change, new scheduler, SPA framework,
-or new worker supervision. Evaluate its benefit through simpler dependencies and
-clearer ownership, not framework novelty.
-
-**Acceptance.** Listing, exports, and selection agree on filter semantics; selection
-survives filtering and polling; empty pages, pagination changes, and refresh failures
-are usable. Browser tests cover registration, batch actions, details, progress,
-and no-worker behavior. Service tests cover origin checks and mutation boundaries.
-Measure representative filtering, pagination, and selection on 10,000 repositories
-before making latency claims.
+These are smoke measurements, not latency guarantees. The earlier baseline used
+fewer diagnostics and timed individual reads rather than complete page snapshots;
+it is not a controlled before/after speed comparison.
 
 ## 5. Error classification and result presentation cross layer boundaries
 

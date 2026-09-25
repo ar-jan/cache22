@@ -245,6 +245,10 @@ disk.
 
 ## Job diagnostics and retention
 
+Errors are stored only on job attempts. Job inspection exposes a derived
+`diagnostic` separately from the current attempt and progress, with no duplicate
+job-level `error` or `error_category` fields.
+
 `jobs --state failed` shows the latest failed or interrupted completed attempt per
 problem job, including retries. Its diagnostic stays visible while another attempt
 runs; succeeded and cancelled jobs are excluded. A separate successful job does
@@ -267,13 +271,37 @@ See [job inspection](use.md#job-inspection) for filters, pagination, and output.
 The web server and worker run independently. Closing a browser or stopping the
 web server does not stop a worker. Use SSH port forwarding for remote access.
 
-Full index data can be inspected through Datasette; generic writes are disabled.
-Only Cache22's forms/API perform mutations through shared services. Keep the
-inventory ID column visible for live row updates and selection.
+The focused Cache22 application shares inventory filter semantics with the CLI.
+Listing, counts, facets, exports, and captured selection use parameterized queries.
+All-filtered selection captures IDs once (maximum 10,000); commands never reevaluate
+filters. Tab-local selection survives navigation and polling. Filtered JSON/CSV
+exports include all matching rows, regardless of pagination, and omit source URLs.
+No SQL explorer, generic table access, database download, or generic writes are
+exposed. Only Cache22 forms/API perform mutations through shared services.
+Host/Origin checks apply to every route; mutations require same-origin browser
+requests. Runtime assets are local, and no request launches Git or a worker.
 
-The index uses schema version 3; other versions are rejected without migration.
+The index uses schema version 4; other versions are rejected without migration.
 Before using an older index, stop all Cache22 processes, back it up, and discard that index
-and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
+and its SQLite `-wal`/`-shm` sidecars. A command that modifies inventory, or
+web/worker startup, then initializes the new schema.
 This discards schedules, queued work, registrations, and history, but never archive
-files. `cache22 audit --fix` can rediscover managed mirrors and bundles. There is no
-migration and no automatic reset during normal startup.
+files. With archive roots connected, `cache22 audit --fix` can rediscover managed
+mirrors and bundles. Re-register repositories without discoverable archives with
+`cache22 add URL` and restore desired schedules. There is no migration and no
+automatic reset during normal startup.
+
+`project_name` is derived in the inventory view from the final component of
+`display_path`, preserving the first registration's spelling. It is available for
+sorting, filtering, and search but cannot be written independently. The retained
+`archive_file` identifies the selected bundle generation, so inventory can return
+archive paths even when storage is disconnected.
+
+Index initialization is explicit and transactional. Concurrent initializers produce
+one schema; opening an existing supported index takes no schema write transaction.
+Services receive the entry point's index, including cleanup across archive roots.
+`list`, `show`, `jobs`, and audit without repair open an existing index read-only:
+they never initialize schema or recover expired claims, and a missing index remains
+missing. Ordinary writable opens also require an existing initialized database.
+Explicit initialization can finish an empty version-zero database left by an
+interrupted initializer; it rejects nonempty unversioned and corrupt databases.
