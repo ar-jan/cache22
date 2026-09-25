@@ -142,6 +142,9 @@ def test_offline_conversion_roundtrip_and_audit(
     assert rebuilt["storage_format"] == "bundle"
     assert rebuilt["archive_path"] == str(bundle)
     assert rebuilt["local_ref_digest"] == before["local_ref_digest"]
+    repo.root.rename(repo.root.with_name("disconnected"))
+    assert new_index.list()[0]["archive_path"] == str(bundle)
+    assert new_index.get(URL)["project_name"] == after["project_name"]
 
 
 def test_bundle_checks_and_fetches_follow_remote_refs(repo: Repo) -> None:

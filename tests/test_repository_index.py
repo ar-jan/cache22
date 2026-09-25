@@ -138,16 +138,16 @@ def test_git_failure_details_reach_cli_and_history(
     result = CliRunner().invoke(app, [command, URL])
     assert result.exit_code == 1, result.output
     job = Queue(r.index).list(r.id)[0]
-    assert job["state"] == "pending" and job["error_category"] == "transport"
+    attempt = job["attempts"][0]
+    assert job["state"] == "pending" and attempt["error_category"] == "transport"
     for message in (
         result.output,
-        job["error"],
-        job["attempts"][0]["error"],
+        attempt["error"],
         r.index.get(r.id)["last_error"],
     ):
         assert diagnostic in message
         assert "secret" not in message and "\x1b" not in message
-    assert len(job["error"]) <= 4000
+    assert len(attempt["error"]) <= 4000
     assert r.index.get(r.id)["last_error_kind"] == command
 
 
@@ -203,6 +203,8 @@ def test_listing_is_database_only_with_disconnected_root(
     listed = json.loads(result.output)[0]
     assert listed["last_fetched_at"] == "1970-01-01T00:16:40Z"
     assert listed["last_checked_at"] is None
+    assert listed["project_name"] == "project"
+    assert listed["archive_path"] == before["archive_path"]
 
 
 def test_schedule_checks_then_fetches_and_coalesces(repository: Repository) -> None:
@@ -349,7 +351,7 @@ def test_unavailable_root_defers_fetch_without_losing_inventory(repository: Repo
     run_worker(index=r.index)
     job = queue.list()[0]
     assert job["state"] == "pending" and job["retry_count"] == 0
-    assert job["error_category"] == "unavailable"
+    assert job["attempts"][0]["error_category"] == "unavailable"
     after = r.index.get(r.id)
     assert after["local_head_oid"] == before["local_head_oid"]
     assert after["local_state"] == "ready"

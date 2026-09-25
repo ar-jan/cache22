@@ -240,7 +240,7 @@ def jobs_snapshot(
             dict(row)
             for row in db.execute(
                 f"""SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,j.due_at,
-            j.finished_at,j.retry_count,j.error_category,j.error,
+            j.finished_at,j.retry_count,
             CASE WHEN j.state='pending' THEN ({BLOCKING_JOB_SQL}) END AS blocking_job_id,
             a.id AS attempt_id,a.started_at,
             a.finished_at AS attempt_finished_at,a.outcome,

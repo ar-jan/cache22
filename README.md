@@ -43,17 +43,21 @@ is available. Use `cache22 worker --once` for timer-driven operation. All index
 data is available for inspection; changes go through Cache22 services. Assets
 are bundled locally. See [usage](docs/use.md) for commands and service examples.
 
-The index uses schema version 3. Other versions are rejected without migration
+The index uses schema version 4. Other versions are rejected without migration
 or automatic reset. To replace an older index, stop all Cache22 processes, back
 up the index, and remove it and its `-wal`/`-shm` sidecars. This loses registrations,
 schedules, queued work, and history, but leaves archive files intact. A fresh index
 is created by the next command that modifies inventory, or by web/worker startup.
-`cache22 audit --fix` can rediscover managed mirrors and bundles.
+With archive roots connected, `cache22 audit --fix` can rediscover managed mirrors
+and bundles. Re-register repositories without discoverable archives using
+`cache22 add URL`, then restore any desired schedules.
 
 `list`, `show`, `jobs`, and audit without repair require an existing index;
 they fail without creating files when it is missing.
 
 Inventory success timestamps and error summaries come from job attempts.
+Job records do not store duplicate errors. Inventory project names are derived
+from the retained display path, preserving the first registered spelling.
 Only a successful check job advances the last-check timestamp; fetches and
 conversions have their own success timestamps. Terminal job history expires
 after 30 days, except the latest successful job per repository and kind, which

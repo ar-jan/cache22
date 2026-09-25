@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from cache22.cli import app
 from cache22.index import Index, index_path
 from cache22.job_queue import Queue
-from cache22.manager_service import jobs_snapshot
+from cache22.manager_service import jobs_snapshot, queue_snapshot
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
 
@@ -21,8 +21,23 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
+
+    def assert_problem_surfaces(section: str) -> None:
+        job = jobs_snapshot(index, state="failed")["jobs"][0]
+        browser_job = queue_snapshot(index, section=section)["jobs"][0]
+        assert browser_job["diagnostic"] == job["diagnostic"]
+        assert browser_job["attempt_id"] == job["attempt_id"]
+        result = CliRunner().invoke(app, ["jobs", "--db", str(index.path), "--json"])
+        assert result.exit_code == 0, result.output
+        cli_job = json.loads(result.stdout)["jobs"][0]
+        assert cli_job["diagnostic"]["error"] == job["diagnostic"]["error"]
+        assert index.get(repository["id"])["last_error"] == job["diagnostic"]["error"]
+        for row in (job, browser_job, cli_job, queue.list()[0]):
+            assert {"error", "error_category"}.isdisjoint(row)
+
     job = scheduler.immediate(repository["id"], "fetch")
     scheduler.finish(job, category="transport", error="Connection failed\nDiagnostic detail")
+    assert_problem_surfaces("deferred")
     error = jobs_snapshot(index, state="failed")["jobs"][0]
     assert (error["state"], error["retry_count"], error["due_at"]) == ("pending", 1, 1060)
     assert error["diagnostic"]["attempt_number"] == 1
@@ -30,11 +45,13 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
     now = 1060
     retry = scheduler.claim()
     assert retry is not None
+    assert_problem_surfaces("running")
     error = jobs_snapshot(index, state="failed")["jobs"][0]
     assert error["state"] == "running"
     assert error["diagnostic"]["attempt_id"] == job["attempt_id"]
     assert index.get(repository["id"])["last_error"] == error["diagnostic"]["error"]
     scheduler.interrupt(retry, "Worker stopping")
+    assert_problem_surfaces("runnable")
     error = jobs_snapshot(index, state="failed")["jobs"][0]
     assert (
         error["diagnostic"]["outcome"],
@@ -47,6 +64,7 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
     )
     retry = scheduler.claim()
     assert retry is not None
+    assert_problem_surfaces("running")
     assert (
         jobs_snapshot(index, state="failed")["jobs"][0]["diagnostic"]["error"] == "Worker stopping"
     )

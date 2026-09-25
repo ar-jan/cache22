@@ -13,11 +13,10 @@ from typing import Any
 from .operation import current_operation
 from .repository_ref import RepositoryRef, is_repository_url, parse_repository_url
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 WRITABLE_REPOSITORY_FIELDS = frozenset(
     {
-        "project_name",
         "display_path",
         "host",
         "source_url",
@@ -43,7 +42,7 @@ WRITABLE_REPOSITORY_FIELDS = frozenset(
 SCHEMA = """
 CREATE TABLE repositories (
  id INTEGER PRIMARY KEY, repo_key TEXT NOT NULL UNIQUE,
- project_name TEXT NOT NULL, display_path TEXT NOT NULL, host TEXT NOT NULL,
+ display_path TEXT NOT NULL, host TEXT NOT NULL,
  source_url TEXT NOT NULL, source_path TEXT NOT NULL, archive_root TEXT NOT NULL,
  storage_format TEXT NOT NULL DEFAULT 'git' CHECK(storage_format IN ('git','bundle')),
  archive_file TEXT,
@@ -67,8 +66,7 @@ CREATE TABLE jobs (
  state TEXT NOT NULL DEFAULT 'pending'
    CHECK(state IN ('pending','running','succeeded','failed','cancelled')),
  due_at INTEGER NOT NULL, created_at INTEGER NOT NULL, finished_at INTEGER,
- retry_count INTEGER NOT NULL DEFAULT 0, claim_token TEXT, lease_until INTEGER,
- error_category TEXT, error TEXT
+ retry_count INTEGER NOT NULL DEFAULT 0, claim_token TEXT, lease_until INTEGER
 );
 CREATE UNIQUE INDEX running_repository ON jobs(repository_id) WHERE state='running';
 CREATE INDEX runnable_jobs ON jobs(state,due_at,origin,id);
@@ -101,6 +99,9 @@ CREATE VIEW job_errors AS
    SELECT max(id) FROM job_attempts WHERE job_id=j.id AND finished_at IS NOT NULL)
  WHERE j.state IN ('pending','running','failed') AND a.outcome IN ('failed','interrupted');
 CREATE VIEW inventory AS SELECT r.*,
+ -- Trim non-slash characters to locate the final display-path component.
+ substr(r.display_path, length(rtrim(r.display_path, replace(r.display_path, '/', ''))) + 1)
+   AS project_name,
  (SELECT max(a.finished_at) FROM jobs j JOIN job_attempts a ON a.job_id=j.id
   WHERE j.repository_id=r.id AND a.kind='check' AND a.outcome='succeeded') AS last_checked_at,
  (SELECT max(a.finished_at) FROM jobs j JOIN job_attempts a ON a.job_id=j.id
@@ -290,11 +291,10 @@ class Index:
             return existing["id"]
         cursor = db.execute(
             """INSERT INTO repositories
-            (repo_key,project_name,display_path,host,source_url,source_path,archive_root,created_at,updated_at,archive_file)
-            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (repo_key,display_path,host,source_url,source_path,archive_root,created_at,updated_at,archive_file)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 key,
-                repository.display_path.rsplit("/", 1)[-1],
                 repository.display_path,
                 repository.host,
                 repository.clone_url,

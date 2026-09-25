@@ -10,8 +10,8 @@ compatibility migrations or silently reset data.
 
 1. **Completed:** separate index initialization from ordinary access and remove
    repeated schema introspection.
-2. Make attempts the sole source of job diagnostics and derive `project_name`;
-   combine these justified schema edits into one version bump.
+2. **Completed:** make attempts the sole source of job diagnostics and derive
+   `project_name`; combine these schema edits in version 4.
 3. Establish a shared inventory query model, then replace Datasette with a focused
    Cache22 web application.
 4. Improve domain errors and operation results, extract pure diagnostics, and
@@ -30,7 +30,8 @@ also avoids schema writes and journal-mode changes.
 
 Services require a supplied index, including cleanup traversal. `Index.update_in`
 validates fields against an explicit allowed-field set and retains claim validation
-inside the inventory-write transaction. Schema version remains 3.
+inside the inventory-write transaction. This step retained schema version 3;
+the diagnostic and project-name cleanup below advances it to version 4.
 
 `list`, `show`, `jobs` (including `--db`), and audit without repair open read-only.
 Missing indexes fail with creation/rebuild guidance without creating directories
@@ -42,58 +43,43 @@ initialization rollback/retry, missing indexes, unsupported and unrecognized
 content, custom-index cleanup, and inspection without claim recovery. Existing
 fencing and rollback checks remain applicable.
 
-## 2. Job diagnostics have two sources that can diverge
+## 2. Attempts own job diagnostics — completed
 
-**Evidence.** [job_queue.py](../src/cache22/job_queue.py) writes errors to both
-`jobs` and `job_attempts` in `finish_in`, but `interrupt_in` updates attempt errors
-without updating the job's error columns. In
-[manager_service.py](../src/cache22/manager_service.py), `jobs_snapshot` exposes
-both the job's stored errors and a separately derived `diagnostic`. Commit
-`54d01c1` changed the browser queue to render `diagnostic.error`, fixing its stale
-interruption display. The duplicate job-level fields remain exposed and can still
-disagree with attempt history.
+Schema version 4 removes `jobs.error_category` and `jobs.error`.
+[job_queue.py](../src/cache22/job_queue.py) persists errors only on attempts,
+eliminating the stale job-level errors previously left behind by interruption.
+[manager_service.py](../src/cache22/manager_service.py) exposes the attempt-derived
+`diagnostic` separately from current attempt/progress in CLI and browser responses,
+without top-level error aliases.
 
-**Recommendation — remove the duplication.** Drop `jobs.error_category` and
-`jobs.error`; use attempt-derived diagnostics consistently in the CLI and browser.
-Separate the current attempt/progress from the latest completed problem. Preserve
-the `job_errors` semantics: pending, running, and failed jobs may have a diagnostic;
-success and cancellation remove the job from the problem view. A different
-successful job does not hide an older failed job.
+`job_errors` retains its existing semantics: pending, running, and failed jobs may
+have a diagnostic from their latest completed attempt. Running retries keep it
+visible; success and cancellation remove that job from the problem view. A separate
+successful job does not hide older failures. Promoting check to fetch retains the
+original attempt kind. Retry, scheduling, and retention policies are unchanged.
 
-This removes redundant writes and resolves a concrete reporting inconsistency.
-It requires updating queue consumers and a schema version bump, not changing retry
-or scheduling policy.
+Existing lifecycle and inspection tests cover failure, retry, interruption,
+promotion, cancellation, success, and history expiry. Inspection assertions also
+check agreement between CLI JSON, browser queue responses, and inventory.
 
-**Acceptance.** After a transport failure, retry, and interruption, all inspection
-surfaces report the same latest completed problem. Running retries keep prior
-diagnostics visible. A check promoted to fetch retains the original attempt kind.
-Cancellation, success, and history retention keep their current semantics.
+## 3. Project names are derived; display paths and bundle filenames remain — completed
 
-## 3. Some repository fields are redundant; others preserve information
+The same version-4 schema change removes stored `repositories.project_name`.
+[index.py](../src/cache22/index.py) derives it from the final component of
+`display_path` in the SQL inventory view using SQLite built-ins. Sorting, search,
+filtering, and presentation continue to use `project_name`; independent writes
+to it are rejected.
 
-**Evidence.** [index.py](../src/cache22/index.py) stores `project_name`,
-`display_path`, and `archive_file`. Registration derives `project_name` directly
-from the final component of `display_path`.
-[repository_ref.py](../src/cache22/repository_ref.py) preserves original path
-casing in `display_path`, while effective source paths can be lowercased.
-[git_bundle.py](../src/cache22/git_bundle.py) publishes a UUID generation filename
-into `archive_file`; inventory uses it without accessing the archive.
+`display_path` preserves the first display spelling, which normalized keys and
+effective clone URLs can lose. `archive_file` retains the selected bundle generation
+filename, which cannot be reconstructed from the key. Neither is removed, and
+inventory needs no archive access, including when drives are disconnected.
 
-**Recommendation — derive only what is actually redundant.** Derive
-`project_name` from retained `display_path`, exposing it through the inventory
-read model so sorting, search, and presentation retain their meaning. Include
-this in the diagnostic schema cleanup.
-
-Keep `display_path`: deriving it from the normalized key or stored clone URL can
-lose the first display spelling. Keep the selected bundle filename: it cannot be
-reconstructed from the key, and consulting the manifest would break inventory
-browsing while archive drives are disconnected. These are not equivalent cases
-of denormalization.
-
-**Acceptance.** Mixed-case registrations retain their displayed names and sorting;
-bundle paths remain available with disconnected storage; no inventory query reads
-archive files. Document the schema reset/rebuild procedure without implementing
-compatibility migrations.
+Tests cover mixed-case and Unicode names, duplicate registrations, SQL sorting,
+manager filtering/selection, and disconnected inventory reads. Version 3 is rejected
+without migration or automatic reset. The [README](../README.md) and
+[guarantees](guarantees.md#browser-and-index-lifecycle) describe backing up and
+rebuilding the index, including loss of registrations, schedules, and job history.
 
 ## 4. Datasette coupling limits the application-owned web interface
 

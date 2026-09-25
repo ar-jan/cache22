@@ -115,7 +115,9 @@ def test_datasette_browsing_selection_commands_and_boundaries(tmp_path: Path) ->
         ds = create_datasette(tmp_path / "index.db")
         index = ds.cache22_index
         ids = [
-            add_repository(f"https://user:secret@host/team/repo{i}", tmp_path, index=index)["id"]
+            add_repository(f"https://user:secret@host/Team/Sub/Repo{i}", tmp_path, index=index)[
+                "id"
+            ]
             for i in range(3)
         ]
         try:
@@ -129,7 +131,17 @@ def test_datasette_browsing_selection_commands_and_boundaries(tmp_path: Path) ->
             assert response.status_code == 200 and "c22-inventory" in response.text
             # source_url does not appear among the summary table cells.
             assert 'class="col-source_url type-' not in response.text
+            response = await ds.client.get("/index/inventory.json?_sort_desc=project_name")
+            assert response.status_code == 200
+            assert [row["project_name"] for row in response.json()["rows"]] == [
+                "Repo2",
+                "Repo1",
+                "Repo0",
+            ]
             for query in ("project_name__contains=repo1", "_q=repo1", "_where=id%3D2"):
+                response = await ds.client.get(f"/index/inventory.json?{query}")
+                assert response.status_code == 200
+                assert [row["id"] for row in response.json()["rows"]] == [ids[1]]
                 selected = await ds.client.post("/-/cache22/api/selection", json={"query": query})
                 assert selected.status_code == 200, selected.text
                 assert selected.json()["ids"] == [ids[1]]

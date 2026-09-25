@@ -128,8 +128,10 @@ JSON contains `database`, `observed_at`, `state`, `counts`, `workers`, `jobs`, a
 repository scope and overlap; workers are global. Each job includes its current
 attempt/progress, blocking predecessor, full retained `attempts`, and a separate
 `diagnostic` for its latest completed problem, or null. During a retry these may
-refer to different attempts. Text output includes full diagnostics and a next-page
-hint.
+refer to different attempts. Errors are stored on attempts only: job objects have
+no top-level `error` or `error_category` fields. Read those fields from `diagnostic`
+for the current problem, or from individual `attempts` for history. Text output
+includes full diagnostics and a next-page hint.
 
 ## Web and worker
 

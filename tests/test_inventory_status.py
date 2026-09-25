@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from cache22.index import Index
+from cache22.index import SCHEMA_VERSION, Index
 from cache22.job_queue import Kind, Queue
 from cache22.manager_service import detail, jobs_snapshot
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
 
 
-def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -> None:
+def test_schema_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -> None:
     index = Index.initialize(tmp_path / "index.db")
     record = add_repository("https://host/team/repo", tmp_path, index=index)
     removed = {
@@ -29,8 +29,13 @@ def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path
         )
     }
     with index.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert removed.isdisjoint(row[1] for row in db.execute("PRAGMA table_info(repositories)"))
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+        assert (removed | {"project_name"}).isdisjoint(
+            row[1] for row in db.execute("PRAGMA table_info(repositories)")
+        )
+        assert {"error", "error_category"}.isdisjoint(
+            row[1] for row in db.execute("PRAGMA table_info(jobs)")
+        )
     assert all(record[f"last_{past}_at"] is None for past in ("checked", "fetched", "converted"))
     assert all(
         record[field] is None
@@ -42,7 +47,7 @@ def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path
         index.update(record["id"], last_fetched_at=1)
 
 
-@pytest.mark.parametrize("version", [2, 99])
+@pytest.mark.parametrize("version", [2, 3, 99])
 @pytest.mark.parametrize("access", ["read_only", "read_write", "initialize"])
 def test_unsupported_index_is_rejected_without_reset(
     tmp_path: Path, version: int, access: str
@@ -58,12 +63,37 @@ def test_unsupported_index_is_rejected_without_reset(
         if access == "initialize"
         else partial(Index, read_only=access == "read_only")
     )
-    with pytest.raises(ValueError, match=f"version: {version}; expected 3"):
+    with pytest.raises(ValueError, match=f"version: {version}; expected {SCHEMA_VERSION}"):
         open_index(path)
     with sqlite3.connect(path) as db:
         assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert db.execute("PRAGMA user_version").fetchone()[0] == version
         assert list(db.iterdump()) == before
+
+
+def test_project_names_derive_from_first_display_spelling(tmp_path: Path) -> None:
+    index = Index.initialize(tmp_path / "index.db")
+    paths = ["Team/Sub/MiXeD", "Team/Straße", "Team/İRepo", "Team/name with spaces"]
+    names = [path.rsplit("/", 1)[-1] for path in paths]
+    for path, name in zip(paths, names, strict=True):
+        url = f"https://host/{path}"
+        record = add_repository(url, tmp_path, index=index)
+        assert record["project_name"] == name
+        duplicate = add_repository(url.casefold(), tmp_path, index=index)
+        assert duplicate["id"] == record["id"]
+        assert duplicate["display_path"] == f"host/{path}"
+        assert duplicate["project_name"] == name
+        with pytest.raises(ValueError, match="Unknown or immutable"):
+            index.update(record["id"], project_name="Other")
+    # A plain SQLite reader must support the view without application functions.
+    with sqlite3.connect(index.path) as db:
+        assert [
+            row[0] for row in db.execute("SELECT project_name FROM inventory ORDER BY project_name")
+        ] == sorted(names)
+    assert [row["project_name"] for row in index.list(sort="project_name")] == sorted(names)
+    assert [
+        row["project_name"] for row in index.list(sort="project_name", descending=True)
+    ] == sorted(names, reverse=True)
 
 
 @pytest.mark.parametrize(
