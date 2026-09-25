@@ -273,7 +273,17 @@ inventory ID column visible for live row updates and selection.
 
 The index uses schema version 3; other versions are rejected without migration.
 Before using an older index, stop all Cache22 processes, back it up, and discard that index
-and its SQLite `-wal`/`-shm` sidecars. Normal startup then creates the new schema.
+and its SQLite `-wal`/`-shm` sidecars. A command that modifies inventory, or
+web/worker startup, then initializes the new schema.
 This discards schedules, queued work, registrations, and history, but never archive
 files. `cache22 audit --fix` can rediscover managed mirrors and bundles. There is no
 migration and no automatic reset during normal startup.
+
+Index initialization is explicit and transactional. Concurrent initializers produce
+one schema; opening an existing supported index takes no schema write transaction.
+Services receive the entry point's index, including cleanup across archive roots.
+`list`, `show`, `jobs`, and audit without repair open an existing index read-only:
+they never initialize schema or recover expired claims, and a missing index remains
+missing. Ordinary writable opens also require an existing initialized database.
+Explicit initialization can finish an empty version-zero database left by an
+interrupted initializer; it rejects nonempty unversioned and corrupt databases.

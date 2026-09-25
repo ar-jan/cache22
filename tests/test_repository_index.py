@@ -72,7 +72,7 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Repository:
     root.mkdir()
     add_archive_dir(root)
     clock = [1000.0]
-    index = Index(clock=lambda: clock[0])
+    index = Index.initialize(clock=lambda: clock[0])
     record = add_repository(URL, root, index=index)
     return Repository(source, root, index, clock, record["id"])
 
@@ -361,7 +361,7 @@ def test_audit_bootstraps_owned_mirrors_without_network(
     r = repository
     r.commit("first")
     before = r.fetch()
-    other = Index(tmp_path / "other.sqlite3", clock=lambda: 2000)
+    other = Index.initialize(tmp_path / "other.sqlite3", clock=lambda: 2000)
     monkeypatch.setattr(
         repo_service, "remote_snapshot", lambda url: pytest.fail("Audit must be offline")
     )
@@ -466,7 +466,7 @@ def test_default_branch_rename_and_cleanup_refresh_inventory(repository: Reposit
     assert after["remote_status"] == "current"
     marker = Path(after["repository_dir"]) / ".clone-complete"
     marker.unlink()
-    clean_repository_import_state(URL, [r.root])
+    clean_repository_import_state(URL, [r.root], index=r.index)
     cleaned = r.index.get(r.id)
     assert cleaned["local_state"] == "missing"
     assert cleaned["local_head_oid"] is None

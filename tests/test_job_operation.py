@@ -18,7 +18,7 @@ from cache22.scheduler import Scheduler
 
 @pytest.fixture
 def scheduler(tmp_path: Path) -> Scheduler:
-    index = Index(tmp_path / "index.db", clock=lambda: 1000)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: 1000)
     add_repository("https://host/team/repo", tmp_path, index=index)
     return Scheduler(index)
 

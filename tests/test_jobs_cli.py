@@ -17,7 +17,7 @@ from cache22.scheduler import Scheduler
 
 def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path: Path) -> None:
     now = 1000
-    index = Index(tmp_path / "index.db", clock=lambda: now)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -72,7 +72,7 @@ def test_errors_follow_completed_attempt_through_retry_and_interruption(tmp_path
 
 def test_errors_pagination_and_job_scope(tmp_path: Path) -> None:
     now = 1000
-    index = Index(tmp_path / "index.db", clock=lambda: now)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -107,8 +107,8 @@ def test_errors_pagination_and_job_scope(tmp_path: Path) -> None:
 def test_cli_default_override_text_json_and_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    default = Index()
-    other = Index(tmp_path / "other ?# database.sqlite3")
+    default = Index.initialize()
+    other = Index.initialize(tmp_path / "other ?# database.sqlite3")
     repository = add_repository("https://host/team/other", tmp_path, index=other)
     scheduler = Scheduler(other)
     job = scheduler.immediate(repository["id"], "fetch")
@@ -150,7 +150,7 @@ def test_cli_default_override_text_json_and_read_only(
 def test_queue_cli_counts_progress_and_worker_freshness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    index = Index(clock=lambda: 1000)
+    index = Index.initialize(clock=lambda: 1000)
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -236,7 +236,7 @@ def test_jobs_views_scope_pagination_and_retry_diagnostic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = 1000
-    index = Index(clock=lambda: now)
+    index = Index.initialize(clock=lambda: now)
     monkeypatch.setattr(Index, "now", lambda self: now)
     record = add_repository("https://host/team/repo", tmp_path, index=index)
     other = add_repository("https://host/team/other", tmp_path, index=index)

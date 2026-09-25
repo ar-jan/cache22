@@ -22,7 +22,7 @@ from cache22.worker import run_continuous
 
 
 def test_registration_batch_preview_duplicates_conflicts_and_atomic_enqueue(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     urls = ["https://host/Team/Repo", "https://host/Team/Repo", "invalid", "https://host/team/repo"]
     preview = register_batch(index, urls, root=tmp_path, case_sensitive=True, preview=True)
     assert [r["status"] for r in preview] == ["new", "duplicate", "error", "error"]
@@ -41,7 +41,7 @@ def test_registration_batch_preview_duplicates_conflicts_and_atomic_enqueue(tmp_
 
 
 def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -67,7 +67,7 @@ def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
 
 
 def test_worker_idle_registry_and_shutdown(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     stop = threading.Event()
     thread = threading.Thread(target=run_continuous, kwargs={"index": index, "stop": stop})
     thread.start()
@@ -88,7 +88,7 @@ def test_worker_idle_registry_and_shutdown(tmp_path: Path) -> None:
 
 
 def test_streaming_progress_drains_both_pipes_and_preserves_output(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)

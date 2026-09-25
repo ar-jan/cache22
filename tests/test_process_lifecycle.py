@@ -18,7 +18,7 @@ from cache22.repo_service import add_repository
 
 
 def test_worker_sigterm_stops_git_and_recovers_attempt(tmp_path: Path) -> None:
-    index = Index()
+    index = Index.initialize()
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     queue.enqueue(repository["id"], "check")
@@ -58,7 +58,7 @@ def test_worker_sigterm_stops_git_and_recovers_attempt(tmp_path: Path) -> None:
 
 
 def test_web_runs_without_worker_and_stops_independently(tmp_path: Path) -> None:
-    index = Index()
+    index = Index.initialize()
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     queue.enqueue(repository["id"], "check")

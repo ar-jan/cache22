@@ -91,19 +91,19 @@ def snapshot(directory: Path) -> dict[str, bytes | str | None]:
 
 @pytest.mark.parametrize("owned", [False, True])
 def test_adoption_registers_without_recloning_then_import_updates(
-    mirror: Mirror, owned: bool
+    inventory_index: Index, mirror: Mirror, owned: bool
 ) -> None:
     paths = mirror.paths
     if owned:
         paths.lock_file.write_bytes(LOCK_SIGNATURE)
     before = snapshot(paths.repository_dir)
     with pytest.raises(AdoptionRequiredError, match="--adopt") as error:
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert error.value.archive_dir == mirror.root
     assert snapshot(paths.repository_dir) == before
     inode = paths.mirror_repository.stat().st_ino
     new_commit = mirror.commit("second")
-    result = import_repository(URL, mirror.root, adopt=True)
+    result = import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert "adopted Git mirror" in result.info_messages[0]
     assert paths.mirror_repository.stat().st_ino == inode
     assert paths.lock_file.read_bytes() == LOCK_SIGNATURE
@@ -114,7 +114,7 @@ def test_adoption_registers_without_recloning_then_import_updates(
 
     git(mirror.source, "branch", "later")
     git(mirror.source, "tag", "v1")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     assert paths.lock_file.stat().st_ino == lock_inode
 
@@ -124,10 +124,10 @@ def test_adoption_registers_without_recloning_then_import_updates(
     git(mirror.source, "tag", "--force", "v1", first)
     git(mirror.source, "branch", "--delete", "--force", "later")
     git(mirror.source, "branch", "added")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     git(mirror.source, "tag", "--delete", "v1")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
 
 
@@ -152,7 +152,7 @@ def test_adoption_registers_without_recloning_then_import_updates(
     ],
 )
 def test_invalid_adoption_never_changes_existing_data(
-    mirror: Mirror, problem: str, message: str
+    inventory_index: Index, mirror: Mirror, problem: str, message: str
 ) -> None:
     paths = mirror.paths
     repo = paths.mirror_repository
@@ -194,18 +194,18 @@ def test_invalid_adoption_never_changes_existing_data(
         paths.bundle_staging.mkdir()
     before = snapshot(paths.repository_dir)
     with pytest.raises(ValueError, match=re.escape(message)):
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert snapshot(paths.repository_dir) == before
     assert not paths.lock_file.exists()
 
 
 @pytest.mark.parametrize("case_sensitive", [False, True])
 def test_adoption_matches_transport_but_preserves_source_casing(
-    mirror: Mirror, monkeypatch: pytest.MonkeyPatch, case_sensitive: bool
+    inventory_index: Index, mirror: Mirror, monkeypatch: pytest.MonkeyPatch, case_sensitive: bool
 ) -> None:
     git(mirror.paths.mirror_repository, "config", "remote.origin.url", "git@HOST:Team/Project.git")
     with pytest.raises(ValueError, match="origin host/Team/Project; requested host/team/project"):
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     url = "https://host/Team/Project" if case_sensitive else URL
     if case_sensitive:
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", url)
@@ -216,31 +216,35 @@ def test_adoption_matches_transport_but_preserves_source_casing(
             "remote.origin.url",
             "git@HOST:team/project.git",
         )
-    import_repository(url, mirror.root, adopt=True, case_sensitive=case_sensitive)
+    import_repository(
+        url, mirror.root, adopt=True, case_sensitive=case_sensitive, index=inventory_index
+    )
     # A repeated explicit adoption verifies again without replacing the lock.
     inode = mirror.paths.lock_file.stat().st_ino
-    import_repository(url, mirror.root, adopt=True, case_sensitive=case_sensitive)
+    import_repository(
+        url, mirror.root, adopt=True, case_sensitive=case_sensitive, index=inventory_index
+    )
     assert mirror.paths.lock_file.stat().st_ino == inode
 
 
-def test_empty_mirror_can_be_adopted(mirror: Mirror) -> None:
+def test_empty_mirror_can_be_adopted(inventory_index: Index, mirror: Mirror) -> None:
     for directory in (mirror.source, mirror.paths.mirror_repository):
         git(directory, "update-ref", "-d", "refs/heads/main")
     assert (
-        import_repository(URL, mirror.root, adopt=True).archive_path
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index).archive_path
         == mirror.paths.mirror_repository
     )
 
 
 def test_git_environment_cannot_redirect_adoption_or_updates(
-    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+    inventory_index: Index, mirror: Mirror, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     latest = mirror.commit("update the mirror only")
     source_before = snapshot(mirror.source)
     monkeypatch.setenv("GIT_DIR", str(mirror.source / ".git"))
     monkeypatch.setenv("GIT_COMMON_DIR", str(mirror.source / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(mirror.source))
-    import_repository(URL, mirror.root, adopt=True)
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert snapshot(mirror.source) == source_before
     for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"):
         monkeypatch.delenv(key)
@@ -248,41 +252,41 @@ def test_git_environment_cannot_redirect_adoption_or_updates(
 
 
 def test_adoption_fetch_failure_keeps_initialization_for_retry(
-    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+    inventory_index: Index, mirror: Mirror, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     refs = git(mirror.paths.mirror_repository, "show-ref")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{mirror.root / 'missing'}.insteadOf")
     with pytest.raises(RuntimeError, match="Remote HEAD discovery failed"):
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert mirror.paths.lock_file.exists()
     assert mirror.paths.source_file.exists()
     assert mirror.paths.clone_complete_marker.exists()
-    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert clean_repository_import_state(URL, (mirror.root,), index=inventory_index) == ()
     assert git(mirror.paths.mirror_repository, "show-ref") == refs
     monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{mirror.source}.insteadOf")
     latest = mirror.commit("retry")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
 
 
-def test_failed_fetch_updates_no_refs(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_failed_fetch_updates_no_refs(inventory_index: Index, mirror: Mirror) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     refs = git(mirror.paths.mirror_repository, "show-ref")
     mirror.commit("atomic update")
     git(mirror.source, "branch", "second")
     ref_lock = mirror.paths.mirror_repository / "refs/heads/second.lock"
     ref_lock.touch()
     with pytest.raises(RuntimeError, match="git fetch failed"):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "show-ref") == refs
     ref_lock.unlink()
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
 
 
 @pytest.mark.parametrize("owned,failure", [(False, "source"), (True, "source"), (False, "lock")])
 def test_interrupted_initialization_can_be_retried(
-    mirror: Mirror, owned: bool, failure: str
+    inventory_index: Index, mirror: Mirror, owned: bool, failure: str
 ) -> None:
     if owned:
         mirror.paths.lock_file.write_bytes(LOCK_SIGNATURE)
@@ -295,29 +299,31 @@ def test_interrupted_initialization_can_be_retried(
         patch(target, side_effect=OSError("publication interrupted")),
         pytest.raises(OSError, match="publication interrupted"),
     ):
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert mirror.paths.clone_complete_marker.exists()
-    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert clean_repository_import_state(URL, (mirror.root,), index=inventory_index) == ()
     assert (
-        import_repository(URL, mirror.root, adopt=True).archive_path
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index).archive_path
         == mirror.paths.mirror_repository
     )
 
 
-def test_adoption_obeys_existing_lock_and_blocks_nested_imports(mirror: Mirror) -> None:
+def test_adoption_obeys_existing_lock_and_blocks_nested_imports(
+    inventory_index: Index, mirror: Mirror
+) -> None:
     mirror.paths.lock_file.write_bytes(LOCK_SIGNATURE)
     with repository_operation(mirror.root, mirror.paths):
         with pytest.raises(RepositoryBusyError):
-            import_repository(URL, mirror.root, adopt=True)
+            import_repository(URL, mirror.root, adopt=True, index=inventory_index)
         with pytest.raises(RepositoryBusyError):
-            clean_repository_import_state(URL, (mirror.root,))
-    import_repository(URL, mirror.root, adopt=True)
+            clean_repository_import_state(URL, (mirror.root,), index=inventory_index)
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     with pytest.raises(ValueError, match="Repository path conflict"):
-        import_repository(URL + "/child", mirror.root, adopt=True)
+        import_repository(URL + "/child", mirror.root, adopt=True, index=inventory_index)
 
 
 def test_adoption_reservation_allows_sibling_work_and_rejects_conflicts(
-    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+    inventory_index: Index, mirror: Mirror, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     verified, release = Event(), Event()
     verify = adoption._verify_mirror
@@ -334,26 +340,28 @@ def test_adoption_reservation_allows_sibling_work_and_rejects_conflicts(
             raise RuntimeError("Timed out waiting to publish adoption metadata")
 
     def sibling() -> None:
-        import_repository(sibling_url, mirror.root)
+        import_repository(sibling_url, mirror.root, index=inventory_index)
         sibling_paths.bundle_staging.mkdir()
-        assert clean_repository_import_state(sibling_url, (mirror.root,)) == (
-            sibling_paths.bundle_staging,
-        )
+        assert clean_repository_import_state(
+            sibling_url, (mirror.root,), index=inventory_index
+        ) == (sibling_paths.bundle_staging,)
 
     with (
         patch("cache22.adoption._verify_mirror", side_effect=paused_verify),
         ThreadPoolExecutor(max_workers=2) as pool,
     ):
-        adopting = pool.submit(import_repository, URL, mirror.root, adopt=True)
+        adopting = pool.submit(
+            import_repository, URL, mirror.root, adopt=True, index=inventory_index
+        )
         try:
             assert verified.wait(10)
             assert not mirror.paths.lock_file.exists()
             pool.submit(sibling).result(timeout=5)
             with pytest.raises(RepositoryBusyError):
-                clean_repository_import_state(URL, (mirror.root,))
+                clean_repository_import_state(URL, (mirror.root,), index=inventory_index)
             for url in (URL, URL + "/child"):
                 with pytest.raises(RepositoryBusyError):
-                    import_repository(url, mirror.root)
+                    import_repository(url, mirror.root, index=inventory_index)
         finally:
             release.set()
         adopting.result(timeout=10)
@@ -466,10 +474,10 @@ def test_prompt_retry_pins_configuration_and_revalidates_state(mirror: Mirror) -
     ],
 )
 def test_unsafe_local_configuration_is_rejected_without_execution_or_changes(
-    mirror: Mirror, initialized: bool, key: str
+    inventory_index: Index, mirror: Mirror, initialized: bool, key: str
 ) -> None:
     if initialized:
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     sentinel = mirror.root / "command-executed"
     command = f"touch {shlex.quote(str(sentinel))}; exit 1"
     git(mirror.paths.mirror_repository, "config", key, command)
@@ -480,35 +488,39 @@ def test_unsafe_local_configuration_is_rejected_without_execution_or_changes(
     with pytest.raises(
         (ValueError, RuntimeError), match="Unsupported repository configuration key"
     ) as error:
-        import_repository(url, mirror.root, adopt=not initialized)
+        import_repository(url, mirror.root, adopt=not initialized, index=inventory_index)
     assert command not in str(error.value)
     assert not sentinel.exists()
     assert snapshot(mirror.paths.repository_dir) == before
 
 
-def test_worktree_configuration_is_rejected_before_adoption(mirror: Mirror) -> None:
+def test_worktree_configuration_is_rejected_before_adoption(
+    inventory_index: Index, mirror: Mirror
+) -> None:
     (mirror.paths.mirror_repository / "config.worktree").write_text("[core]\nsshCommand = false\n")
     before = snapshot(mirror.paths.repository_dir)
     with pytest.raises(ValueError, match="worktree configuration"):
-        import_repository(URL, mirror.root, adopt=True)
+        import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     assert snapshot(mirror.paths.repository_dir) == before
 
 
-def test_repository_hooks_are_disabled_during_adoption_and_updates(mirror: Mirror) -> None:
+def test_repository_hooks_are_disabled_during_adoption_and_updates(
+    inventory_index: Index, mirror: Mirror
+) -> None:
     sentinel = mirror.root / "hook-executed"
     hook = mirror.paths.mirror_repository / "hooks/reference-transaction"
     hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(sentinel))}\n")
     hook.chmod(0o755)
     mirror.commit("adoption update")
-    import_repository(URL, mirror.root, adopt=True)
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     latest = mirror.commit("ordinary update")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
     assert not sentinel.exists()
 
 
 def test_trusted_user_ssh_configuration_remains_available(
-    mirror: Mirror, monkeypatch: pytest.MonkeyPatch
+    inventory_index: Index, mirror: Mirror, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sentinel = mirror.root / "trusted-ssh-used"
     ssh = mirror.root / "trusted-ssh"
@@ -524,16 +536,18 @@ def test_trusted_user_ssh_configuration_remains_available(
     url = "git@host:team/project"
     git(mirror.paths.mirror_repository, "config", "remote.origin.url", url)
     latest = mirror.commit("authenticated update")
-    import_repository(url, mirror.root, adopt=True)
+    import_repository(url, mirror.root, adopt=True, index=inventory_index)
     assert sentinel.exists()
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
 
 
-def test_default_branch_rename_updates_head_and_keeps_mirror_cloneable(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_default_branch_rename_updates_head_and_keeps_mirror_cloneable(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     git(mirror.source, "branch", "-m", "renamed")
     latest = mirror.commit("new default branch")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/renamed"
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
     checkout = mirror.root / "checkout"
@@ -541,11 +555,13 @@ def test_default_branch_rename_updates_head_and_keeps_mirror_cloneable(mirror: M
     assert (checkout / "file.txt").read_text() == "new default branch"
 
 
-def test_detached_remote_head_is_fetched_even_without_a_ref(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_detached_remote_head_is_fetched_even_without_a_ref(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     git(mirror.source, "checkout", "--detach")
     detached = mirror.commit("unreferenced HEAD commit")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert (mirror.paths.mirror_repository / "HEAD").read_text().strip() == detached
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD:file.txt") == git(
         mirror.source, "rev-parse", "HEAD:file.txt"
@@ -553,21 +569,25 @@ def test_detached_remote_head_is_fetched_even_without_a_ref(mirror: Mirror) -> N
     # When the source becomes empty, a previous detached HEAD becomes unborn.
     git(mirror.source, "update-ref", "-d", "refs/heads/main")
     git(mirror.source, "symbolic-ref", "HEAD", "refs/heads/unborn")
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/main"
     assert not git(mirror.paths.mirror_repository, "for-each-ref")
 
 
-def test_nonempty_remote_without_advertised_head_is_an_error(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_nonempty_remote_without_advertised_head_is_an_error(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     git(mirror.source, "symbolic-ref", "HEAD", "refs/heads/missing")
     with pytest.raises(RuntimeError, match="HEAD synchronization failed"):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert mirror.paths.clone_complete_marker.exists()
 
 
-def test_head_publication_failure_retains_fetched_refs_for_retry(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_head_publication_failure_retains_fetched_refs_for_retry(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     git(mirror.source, "branch", "-m", "renamed")
     head_lock = mirror.paths.mirror_repository / "HEAD.lock"
     synchronize = git_mirror._synchronize_head
@@ -580,20 +600,22 @@ def test_head_publication_failure_retains_fetched_refs_for_retry(mirror: Mirror)
         patch("cache22.git_mirror._synchronize_head", side_effect=locked_head),
         pytest.raises(RuntimeError, match="refs were fetched, but HEAD synchronization failed"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     head_lock.unlink()
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/renamed"
 
 
 @pytest.mark.parametrize("change", ["rename", "existing_branch", "symbolic_oid", "detached_oid"])
-def test_remote_head_change_during_fetch_is_retryable(mirror: Mirror, change: str) -> None:
+def test_remote_head_change_during_fetch_is_retryable(
+    inventory_index: Index, mirror: Mirror, change: str
+) -> None:
     if change == "existing_branch":
         git(mirror.source, "branch", "release")
     elif change == "detached_oid":
         git(mirror.source, "checkout", "--detach")
-    import_repository(URL, mirror.root, adopt=True)
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
     discover = git_mirror._remote_head
     discoveries = 0
@@ -615,19 +637,21 @@ def test_remote_head_change_during_fetch_is_retryable(mirror: Mirror, change: st
         patch("cache22.git_mirror._remote_head", side_effect=changing_remote),
         pytest.raises(RuntimeError, match="HEAD synchronization failed"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert discoveries == 2  # No automatic retry.
     assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
     assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     assert mirror.paths.clone_complete_marker.exists()
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == (
         mirror.source / ".git/HEAD"
     ).read_bytes()
 
 
-def test_fetched_head_must_match_even_when_advertisements_agree(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_fetched_head_must_match_even_when_advertisements_agree(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
     original = git(mirror.source, "rev-parse", "HEAD")
     discover = git_mirror._remote_head
@@ -649,16 +673,18 @@ def test_fetched_head_must_match_even_when_advertisements_agree(mirror: Mirror) 
         patch("cache22.git_mirror._remote_head", side_effect=changing_remote),
         pytest.raises(RuntimeError, match="HEAD synchronization failed"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
     assert git(mirror.paths.mirror_repository, "rev-parse", "refs/heads/main") == fetched
     assert mirror.paths.clone_complete_marker.exists()
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == original
 
 
-def test_post_fetch_head_discovery_failure_retains_refs_for_retry(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_post_fetch_head_discovery_failure_retains_refs_for_retry(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     previous_head = (mirror.paths.mirror_repository / "HEAD").read_bytes()
     git(mirror.source, "branch", "-m", "renamed")
     discover = git_mirror._remote_head
@@ -675,11 +701,11 @@ def test_post_fetch_head_discovery_failure_retains_refs_for_retry(mirror: Mirror
         patch("cache22.git_mirror._remote_head", side_effect=failing_discovery),
         pytest.raises(RuntimeError, match="refs were fetched, but HEAD synchronization failed"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head
     assert git(mirror.paths.mirror_repository, "show-ref") == git(mirror.source, "show-ref")
     assert mirror.paths.clone_complete_marker.exists()
-    import_repository(URL, mirror.root)
+    import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "symbolic-ref", "HEAD") == "refs/heads/renamed"
 
 
@@ -698,8 +724,10 @@ def test_post_fetch_head_discovery_failure_retains_refs_for_retry(mirror: Mirror
         "missing_refs",
     ],
 )
-def test_unsafe_initialized_layout_is_rejected_before_git(mirror: Mirror, problem: str) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_unsafe_initialized_layout_is_rejected_before_git(
+    inventory_index: Index, mirror: Mirror, problem: str
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     repo = mirror.paths.mirror_repository
     if problem == "symlink_directory":
         (repo / "refs/external").symlink_to(mirror.source / ".git/refs", target_is_directory=True)
@@ -722,33 +750,35 @@ def test_unsafe_initialized_layout_is_rejected_before_git(mirror: Mirror, proble
         patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
         pytest.raises(ValueError, match="Unsafe|self-contained|Partial|nested|bare Git mirror"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert snapshot(mirror.paths.repository_dir) == before
     assert snapshot(mirror.source) == external_before
 
 
-def test_ordinary_update_does_not_repeat_full_object_verification(mirror: Mirror) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+def test_ordinary_update_does_not_repeat_full_object_verification(
+    inventory_index: Index, mirror: Mirror
+) -> None:
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     latest = mirror.commit("ordinary update")
     with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Do not repeat fsck")):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert git(mirror.paths.mirror_repository, "rev-parse", "HEAD") == latest
 
 
 @pytest.mark.parametrize("contents", [b"", b"unfinished\n", b"complete", b"complete\nextra"])
 def test_malformed_completion_marker_blocks_reuse_without_changes(
-    mirror: Mirror, contents: bytes
+    inventory_index: Index, mirror: Mirror, contents: bytes
 ) -> None:
-    import_repository(URL, mirror.root, adopt=True)
+    import_repository(URL, mirror.root, adopt=True, index=inventory_index)
     mirror.paths.clone_complete_marker.write_bytes(contents)
     before = snapshot(mirror.paths.repository_dir)
     with (
         patch("cache22.git_mirror.subprocess.run", side_effect=AssertionError("Git must not run")),
         pytest.raises(ValueError, match="Malformed clone completion marker"),
     ):
-        import_repository(URL, mirror.root)
+        import_repository(URL, mirror.root, index=inventory_index)
     assert snapshot(mirror.paths.repository_dir) == before
-    assert clean_repository_import_state(URL, (mirror.root,)) == ()
+    assert clean_repository_import_state(URL, (mirror.root,), index=inventory_index) == ()
     assert snapshot(mirror.paths.repository_dir) == before
 
 
@@ -797,13 +827,15 @@ def test_audit_adopts_all_mirrors_offline(audit_mirror: Mirror) -> None:
     assert index.get(nested_url)["source_url"] == nested_url
     assert snapshot(mirror.paths.mirror_repository) == before
     with patch("cache22.adoption._verify_mirror", side_effect=AssertionError("Already adopted")):
-        assert audit(adopt=True, fix=True) == []
+        assert audit(adopt=True, fix=True, index=index) == []
 
 
 @pytest.mark.parametrize("fix", [False, True])
-def test_audit_requires_explicit_adoption(audit_mirror: Mirror, fix: bool) -> None:
+def test_audit_requires_explicit_adoption(
+    inventory_index: Index, audit_mirror: Mirror, fix: bool
+) -> None:
     before = snapshot(audit_mirror.paths.repository_dir)
-    issues = audit(fix=fix)
+    issues = audit(fix=fix, index=inventory_index)
     assert len(issues) == 1 and not issues[0]["fixed"]
     assert "--adopt" in issues[0]["problem"]
     assert Index().list() == []
@@ -821,13 +853,13 @@ def test_audit_recovers_partial_adoption(audit_mirror: Mirror, markers: tuple[st
         paths.clone_complete_marker.write_text("complete\n")
     if "source" in markers:
         paths.source_file.write_text(json.dumps({"source_path": "host/team/project"}))
-    index = Index()
+    index = Index.initialize()
     record = index.add(parse_repository_url(URL), audit_mirror.root)
     index.update(record["id"], reconciliation_required=True)
     assert all(issue["fixed"] for issue in audit(index=index, adopt=True))
     assert index.get(URL)["local_state"] == "ready"
     assert not index.get(URL)["reconciliation_required"]
-    assert audit() == []
+    assert audit(index=index) == []
 
 
 @pytest.mark.parametrize("problem", ["origin", "marker", "busy", "source"])
@@ -842,7 +874,7 @@ def test_audit_adoption_continues_after_failure(audit_mirror: Mirror, problem: s
     elif problem == "marker":
         mirror.paths.clone_complete_marker.write_text("broken\n")
     elif problem == "source":
-        Index().add(
+        Index.initialize().add(
             parse_repository_url("https://host/Team/Project", case_sensitive=True), mirror.root
         )
     before = snapshot(mirror.paths.repository_dir)
@@ -869,7 +901,7 @@ def test_audit_adoption_duplicate_roots(
     duplicate = tmp_path / "duplicate"
     shutil.copytree(mirror.root, duplicate)
     add_archive_dir(duplicate)
-    index = Index()
+    index = Index.initialize()
     winner = duplicate if selected else mirror.root
     loser = mirror.root if selected else duplicate
     if selected:
@@ -883,7 +915,7 @@ def test_audit_adoption_duplicate_roots(
 
 
 def test_audit_adoption_inventory_failure_is_retryable(audit_mirror: Mirror) -> None:
-    index = Index()
+    index = Index.initialize()
     with patch.object(index, "update", side_effect=sqlite3.OperationalError("disk full")):
         issues = audit(index=index, adopt=True)
     assert issues and all(not issue["fixed"] for issue in issues)
@@ -895,7 +927,7 @@ def test_audit_adoption_inventory_failure_is_retryable(audit_mirror: Mirror) -> 
 
 
 def test_audit_does_not_recreate_disappeared_candidate(
-    audit_mirror: Mirror, tmp_path: Path
+    inventory_index: Index, audit_mirror: Mirror, tmp_path: Path
 ) -> None:
     mirror = audit_mirror
     moved = tmp_path / "moved"
@@ -906,7 +938,7 @@ def test_audit_does_not_recreate_disappeared_candidate(
         return repository_operation(*args, **kwargs)
 
     with patch("cache22.storage.repository_operation", side_effect=disappear):
-        issues = audit(adopt=True)
+        issues = audit(adopt=True, index=inventory_index)
     assert len(issues) == 1 and not issues[0]["fixed"]
     assert not mirror.paths.repository_dir.exists()
     assert snapshot(moved) == before

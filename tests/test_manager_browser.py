@@ -26,7 +26,7 @@ def test_browser_selection_refresh_registration_and_queue(
     archive = tmp_path / "archive"
     archive.mkdir()
     add_archive_dir(archive)
-    index = Index()
+    index = Index.initialize()
     for i in range(3):
         add_repository(f"https://example.org/team/repo{i}", archive, index=index)
     with sync_playwright() as playwright:

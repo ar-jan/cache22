@@ -53,7 +53,7 @@ def add(
     as_json: JsonOption = False,
 ) -> None:
     """Register Git URLs without downloading or queueing work."""
-    results = register_batch(Index(), urls, root=root, case_sensitive=case_sensitive)
+    results = register_batch(Index.initialize(), urls, root=root, case_sensitive=case_sensitive)
     for result in results:
         result["selector"] = urls[result["line"] - 1]
     output(results, as_json, columns=RESULT_COLUMNS)
@@ -77,7 +77,7 @@ def list_repositories(
 ) -> None:
     """List indexed repositories without scanning storage or contacting remotes."""
     output(
-        Index().list(
+        Index(read_only=True).list(
             host=host,
             local_state=local_state,
             remote_status=remote_status,
@@ -97,7 +97,7 @@ def list_repositories(
 @command
 def show(selector: Selector, as_json: JsonOption = False) -> None:
     """Show indexed repository details by key or URL."""
-    output(Index().get(selector), as_json)
+    output(Index(read_only=True).get(selector), as_json)
 
 
 def selected(index: Index, selectors: list[str] | None, all_repositories: bool) -> list[str]:
@@ -165,7 +165,7 @@ def _batch(
     timeout: float,
     as_json: bool,
 ) -> None:
-    index = Index()
+    index = Index.initialize()
     results: list[dict[str, Any]] = []
     failed = False
     for selector in selected(index, selectors, all_repositories):
@@ -238,17 +238,19 @@ def clean(
     all_repositories: bool = typer.Option(False, "--all"),
 ) -> None:
     """Remove partial import state; completed archives and lock files are kept."""
-    index = Index()
+    index = Index.initialize()
     removed: list[Path] = []
     if all_repositories and not selectors:
-        removed.extend(clean_all_import_state())
+        removed.extend(clean_all_import_state(index=index))
     else:
         for selector in selected(index, selectors, all_repositories):
             record = index.find(selector)
             if record is None and not is_repository_url(selector):
                 raise ValueError(f"Repository is not indexed: {selector}")
             removed.extend(
-                clean_repository_import_state(record["source_url"] if record else selector)
+                clean_repository_import_state(
+                    record["source_url"] if record else selector, index=index
+                )
             )
     if not removed:
         typer.echo("No partial import state found.")
@@ -263,7 +265,7 @@ class JobKind(StrEnum):
 
 
 def _mutate(selectors: list[str], action: str, as_json: bool, *, every: str | None = None) -> None:
-    index = Index()
+    index = Index.initialize()
     seen: set[int] = set()
     results: list[dict[str, Any]] = []
     for selector in dict.fromkeys(selectors):
@@ -324,7 +326,8 @@ def audit_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """Inspect archive storage and optionally repair inventory or adopt mirrors."""
-    issues = audit(fix=fix, adopt=adopt)
+    index = Index.initialize() if fix or adopt else Index(read_only=True)
+    issues = audit(index=index, fix=fix, adopt=adopt)
     output(issues, as_json)
     if any(not issue["fixed"] for issue in issues):
         raise typer.Exit(1)
@@ -342,6 +345,7 @@ def worker(
     """Process jobs continuously, or drain currently runnable work with --once."""
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
         raise typer.BadParameter("Timeouts must be positive")
+    index = Index.initialize()
     if not once:
         stop = threading.Event()
 
@@ -353,6 +357,7 @@ def worker(
 
         with shutdown_signals(stop):
             run_continuous(
+                index=index,
                 stop=stop,
                 check_timeout=check_timeout,
                 fetch_timeout=fetch_timeout,
@@ -363,6 +368,7 @@ def worker(
     stop = threading.Event()
     with shutdown_signals(stop):
         results = run_worker(
+            index=index,
             check_timeout=check_timeout,
             fetch_timeout=fetch_timeout,
             convert_timeout=convert_timeout,

@@ -22,7 +22,7 @@ def create_datasette(path: Path | None = None) -> Any:
     plugin = sys.modules[plugin_name]
     if not any(getattr(p, "register_routes", None) is register_routes for p in pm.get_plugins()):
         pm.register(plugin, name="cache22-manager")
-    index = Index(path)
+    index = Index.initialize(path)
     ds: Any = Datasette(
         default_deny=True,
         cache_headers=False,

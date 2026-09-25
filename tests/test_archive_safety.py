@@ -9,6 +9,7 @@ from cache22.archive_layout import archive_paths_for_repository
 from cache22.archive_storage import repository_operation
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
+from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
 
 
@@ -27,28 +28,31 @@ from cache22.repository_ref import parse_repository_url
         "https://host/team/project\x7f",
     ],
 )
-def test_unsafe_repository_urls_fail_before_filesystem_changes(tmp_path: Path, url: str) -> None:
+def test_unsafe_repository_urls_fail_before_filesystem_changes(
+    inventory_index: Index, tmp_path: Path, url: str
+) -> None:
     with pytest.raises(ValueError, match="Unsafe|reserved"):
-        import_repository(url, tmp_path)
+        import_repository(url, tmp_path, index=inventory_index)
     with pytest.raises(ValueError, match="Unsafe|reserved"):
-        clean_repository_import_state(url, (tmp_path,))
+        clean_repository_import_state(url, (tmp_path,), index=inventory_index)
     assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("prefix", ["https://host/", "ssh://git@host/", "git@host:"])
 @pytest.mark.parametrize("suffix", ["?", "#", "?query=value", "#fragment"])
 def test_query_and_fragment_delimiters_fail_before_storage_changes(
-    tmp_path: Path, prefix: str, suffix: str
+    inventory_index: Index, tmp_path: Path, prefix: str, suffix: str
 ) -> None:
     url = f"{prefix}team/project{suffix}"
     with pytest.raises(ValueError, match="query or fragment"):
-        import_repository(url, tmp_path)
+        import_repository(url, tmp_path, index=inventory_index)
     with pytest.raises(ValueError, match="query or fragment"):
-        clean_repository_import_state(url, (tmp_path,))
+        clean_repository_import_state(url, (tmp_path,), index=inventory_index)
     assert list(tmp_path.iterdir()) == []
 
 
 def test_cleanup_finds_subgroups_and_artifact_named_namespaces(
+    inventory_index: Index,
     tmp_path: Path,
 ) -> None:
     urls = [
@@ -64,7 +68,7 @@ def test_cleanup_finds_subgroups_and_artifact_named_namespaces(
         paths.mirror_repository.mkdir(parents=True)
         paths.lock_file.write_text("cache22-storage-v1\n")
 
-    removed = clean_all_import_state((tmp_path,))
+    removed = clean_all_import_state((tmp_path,), index=inventory_index)
 
     assert set(removed) == {paths.mirror_repository for paths in archives}
     for paths in archives:
@@ -77,7 +81,7 @@ def test_cleanup_finds_subgroups_and_artifact_named_namespaces(
 )
 @pytest.mark.parametrize("child_first", [False, True])
 def test_import_rejects_repository_prefix_conflicts(
-    tmp_path: Path, child: str, child_first: bool
+    inventory_index: Index, tmp_path: Path, child: str, child_first: bool
 ) -> None:
     parent_url = "https://host/Team/Project"
     child_url = f"https://host/team/project/{child}"
@@ -92,16 +96,18 @@ def test_import_rejects_repository_prefix_conflicts(
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(second, tmp_path, case_sensitive=True)
+        import_repository(second, tmp_path, case_sensitive=True, index=inventory_index)
     assert sorted(tmp_path.rglob("*")) == before
     assert (paths.mirror_repository / "HEAD").read_text() == "keep"
-    assert clean_all_import_state((tmp_path,)) == ()
+    assert clean_all_import_state((tmp_path,), index=inventory_index) == ()
     if not child_first:
         with pytest.raises(ValueError, match="Repository path conflict"):
-            clean_repository_import_state(second, (tmp_path,))
+            clean_repository_import_state(second, (tmp_path,), index=inventory_index)
 
 
-def test_cleanup_never_discovers_repositories_inside_complete_mirrors(tmp_path: Path) -> None:
+def test_cleanup_never_discovers_repositories_inside_complete_mirrors(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     paths = archive_paths_for_repository(
         tmp_path, parse_repository_url("https://host/team/project")
     )
@@ -114,13 +120,13 @@ def test_cleanup_never_discovers_repositories_inside_complete_mirrors(tmp_path: 
     stage = nested / ".cache22-bundle"
     stage.mkdir()
     (stage / "keep").write_text("keep")
-    assert clean_all_import_state((tmp_path,)) == ()
+    assert clean_all_import_state((tmp_path,), index=inventory_index) == ()
     assert (stage / "keep").read_text() == "keep"
 
 
 @pytest.mark.parametrize("link_target", ["namespace", "storage", "mirror", "stage", "lock"])
 def test_targeted_operations_reject_symlinks_without_changing_external_data(
-    tmp_path: Path, link_target: str
+    inventory_index: Index, tmp_path: Path, link_target: str
 ) -> None:
     root = tmp_path / "archive"
     root.mkdir()
@@ -143,8 +149,8 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
         paths.lock_file.write_text("cache22-storage-v1\n")
 
     for operation in (
-        lambda: clean_repository_import_state(url, (root,)),
-        lambda: import_repository(url, root),
+        lambda: clean_repository_import_state(url, (root,), index=inventory_index),
+        lambda: import_repository(url, root, index=inventory_index),
     ):
         with pytest.raises((OSError, ValueError), match="directory|symbolic|Unsafe"):
             operation()
@@ -153,7 +159,9 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
         assert list(external.iterdir()) == [sentinel]
 
 
-def test_clean_all_skips_external_and_cyclic_directory_symlinks(tmp_path: Path) -> None:
+def test_clean_all_skips_external_and_cyclic_directory_symlinks(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     root = tmp_path / "archive"
     root.mkdir()
     outside = tmp_path / "outside"
@@ -163,11 +171,13 @@ def test_clean_all_skips_external_and_cyclic_directory_symlinks(tmp_path: Path) 
     (root / "external").symlink_to(outside, target_is_directory=True)
     (root / "cycle").symlink_to(root, target_is_directory=True)
 
-    assert clean_all_import_state((root,)) == ()
+    assert clean_all_import_state((root,), index=inventory_index) == ()
     assert paths.mirror_repository.is_dir()
 
 
-def test_cleanup_unlinks_internal_symlinks_without_following_them(tmp_path: Path) -> None:
+def test_cleanup_unlinks_internal_symlinks_without_following_them(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     root = tmp_path / "archive"
     root.mkdir()
     external = tmp_path / "external"
@@ -180,16 +190,27 @@ def test_cleanup_unlinks_internal_symlinks_without_following_them(tmp_path: Path
     paths.lock_file.write_text("cache22-storage-v1\n")
     (paths.mirror_repository / "link").symlink_to(external, target_is_directory=True)
 
-    assert clean_repository_import_state(url, (root,)) == (paths.mirror_repository,)
+    assert clean_repository_import_state(url, (root,), index=inventory_index) == (
+        paths.mirror_repository,
+    )
     assert sentinel.read_text() == "keep"
 
 
-def test_cleanup_of_absent_repository_does_not_create_storage(tmp_path: Path) -> None:
-    assert clean_repository_import_state("https://host/team/project", (tmp_path,)) == ()
+def test_cleanup_of_absent_repository_does_not_create_storage(
+    inventory_index: Index, tmp_path: Path
+) -> None:
+    assert (
+        clean_repository_import_state(
+            "https://host/team/project", (tmp_path,), index=inventory_index
+        )
+        == ()
+    )
     assert list(tmp_path.iterdir()) == []
 
 
-def test_missing_configured_root_fails_before_clone_or_cleanup(tmp_path: Path) -> None:
+def test_missing_configured_root_fails_before_clone_or_cleanup(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     missing = tmp_path / "missing"
     with (
         patch("cache22.config.list_archive_dirs", return_value=[missing]),
@@ -197,9 +218,9 @@ def test_missing_configured_root_fails_before_clone_or_cleanup(tmp_path: Path) -
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
     ):
         with pytest.raises(ValueError, match="Archive root does not exist"):
-            import_repository("https://host/team/project")
+            import_repository("https://host/team/project", index=inventory_index)
         with pytest.raises(ValueError, match="Archive root does not exist"):
-            clean_all_import_state()
+            clean_all_import_state(index=inventory_index)
         with pytest.raises(ValueError, match="Archive root does not exist"):
-            clean_repository_import_state("https://host/team/project")
+            clean_repository_import_state("https://host/team/project", index=inventory_index)
     assert not missing.exists()

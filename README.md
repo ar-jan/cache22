@@ -45,10 +45,13 @@ are bundled locally. See [usage](docs/use.md) for commands and service examples.
 
 The index uses schema version 3. Other versions are rejected without migration
 or automatic reset. To replace an older index, stop all Cache22 processes, back
-up the index, and remove it and its `-wal`/`-shm` sidecars. A fresh index is created
-on the next command. This loses registrations, schedules, queued work, and
-history, but leaves archive files intact. `cache22 audit --fix` can
-rediscover managed mirrors and bundles.
+up the index, and remove it and its `-wal`/`-shm` sidecars. This loses registrations,
+schedules, queued work, and history, but leaves archive files intact. A fresh index
+is created by the next command that modifies inventory, or by web/worker startup.
+`cache22 audit --fix` can rediscover managed mirrors and bundles.
+
+`list`, `show`, `jobs`, and audit without repair require an existing index;
+they fail without creating files when it is missing.
 
 Inventory success timestamps and error summaries come from job attempts.
 Only a successful check job advances the last-check timestamp; fetches and

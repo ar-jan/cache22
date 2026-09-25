@@ -13,6 +13,13 @@ use their stored root and source URL. To choose a different root before fetching
 use `add URL --root PATH`. The root must already exist. `add` only registers;
 it neither fetches nor queues work. Registration accepts multiple URLs.
 
+Commands that modify inventory, including `audit --fix` and `audit --adopt`,
+initialize the index when needed. Web and worker startup also initialize it.
+`list`, `show`, `jobs`, and `audit` without repair open an existing index read-only
+and fail with exit code 1 if it is missing. Register a repository with `add` or
+`fetch`, or use `audit --fix` to rebuild inventory from managed archives. Help
+and configuration commands do not access the index.
+
 ## Commands
 
 ```text

@@ -30,7 +30,7 @@ def test_register_batch_is_register_only_and_reports_each_input(tmp_path: Path) 
 
 
 def test_batch_mutations_continue_and_deduplicate_resolved_selectors(tmp_path: Path) -> None:
-    index = Index()
+    index = Index.initialize()
     records = [
         add_repository(f"https://host/team/{name}", tmp_path, index=index)
         for name in ("one", "two")
@@ -65,7 +65,7 @@ def test_batch_mutations_continue_and_deduplicate_resolved_selectors(tmp_path: P
 
 
 def test_command_wide_validation_precedes_mutations(tmp_path: Path) -> None:
-    index = Index()
+    index = Index.initialize()
     record = add_repository("https://host/team/one", tmp_path, index=index)
     runner = CliRunner()
     for args in (

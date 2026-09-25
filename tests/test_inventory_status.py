@@ -1,6 +1,7 @@
 """Attempt-derived status and the history needed to keep it meaningful."""
 
 import sqlite3
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ from cache22.scheduler import Scheduler
 
 
 def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     record = add_repository("https://host/team/repo", tmp_path, index=index)
     removed = {
         name
@@ -42,9 +43,9 @@ def test_schema_v3_stores_attempts_instead_of_repository_outcomes(tmp_path: Path
 
 
 @pytest.mark.parametrize("version", [2, 99])
-@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("access", ["read_only", "read_write", "initialize"])
 def test_unsupported_index_is_rejected_without_reset(
-    tmp_path: Path, version: int, read_only: bool
+    tmp_path: Path, version: int, access: str
 ) -> None:
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as db:
@@ -52,9 +53,15 @@ def test_unsupported_index_is_rejected_without_reset(
         db.execute("INSERT INTO preserved VALUES('old inventory')")
         db.execute(f"PRAGMA user_version={version}")
         before = list(db.iterdump())
+    open_index = (
+        Index.initialize
+        if access == "initialize"
+        else partial(Index, read_only=access == "read_only")
+    )
     with pytest.raises(ValueError, match=f"version: {version}; expected 3"):
-        Index(path, read_only=read_only)
+        open_index(path)
     with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         assert db.execute("PRAGMA user_version").fetchone()[0] == version
         assert list(db.iterdump()) == before
 
@@ -66,7 +73,7 @@ def test_success_timestamps_require_completed_attempts(
     tmp_path: Path, kind: Kind, past: str
 ) -> None:
     now = 1000
-    index = Index(tmp_path / "index.db", clock=lambda: now)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
     scheduler = Scheduler(index)
     column = f"last_{past}_at"
@@ -101,7 +108,7 @@ def test_success_timestamps_require_completed_attempts(
 
 
 def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db", clock=lambda: 1000)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: 1000)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -126,7 +133,7 @@ def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None
 
 def test_retention_keeps_latest_success_per_repository_and_kind(tmp_path: Path) -> None:
     now = 1000
-    index = Index(tmp_path / "index.db", clock=lambda: now)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     first_id = add_repository("https://host/team/first", tmp_path, index=index)["id"]
     second_id = add_repository("https://host/team/second", tmp_path, index=index)["id"]
     queue = Queue(index)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -59,7 +59,7 @@ def test_fetch_new_url_registers_and_passes_options(runner: CliRunner, tmp_path:
 
 def register(root: Path) -> dict[str, Any]:
     root.mkdir(exist_ok=True)
-    return Index().add(parse_repository_url(URL), root)
+    return Index.initialize().add(parse_repository_url(URL), root)
 
 
 def test_fetch_indexed_key_uses_stored_binding_and_reports_info(
@@ -115,7 +115,7 @@ def test_clean_url_reports_removed_paths(runner: CliRunner, tmp_path: Path) -> N
         result = runner.invoke(app, ["clean", URL])
 
     assert result.exit_code == 0
-    call.assert_called_once_with(URL)
+    call.assert_called_once_with(URL, index=ANY)
     assert result.output.splitlines() == [
         f"Removed partial import state: {removed_paths[0]}",
         f"Removed partial import state: {removed_paths[1]}",
@@ -128,7 +128,7 @@ def test_clean_indexed_key_uses_stored_source_url(runner: CliRunner, tmp_path: P
         result = runner.invoke(app, ["clean", KEY])
 
     assert result.exit_code == 0
-    call.assert_called_once_with(URL)
+    call.assert_called_once_with(URL, index=ANY)
     assert result.output == "No partial import state found.\n"
 
 
@@ -146,7 +146,7 @@ def test_clean_all_reports_no_partial_state(runner: CliRunner) -> None:
         result = runner.invoke(app, ["clean", "--all"])
 
     assert result.exit_code == 0
-    call.assert_called_once_with()
+    call.assert_called_once_with(index=ANY)
     assert result.output == "No partial import state found.\n"
 
 

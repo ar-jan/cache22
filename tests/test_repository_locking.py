@@ -17,6 +17,7 @@ from cache22.archive_storage import (
 )
 from cache22.import_service import import_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
+from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
 
 pytestmark = pytest.mark.usefixtures("mock_inventory_git")
@@ -44,7 +45,7 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
         patch("cache22.git_mirror._remote_head", return_value=None),
         patch("cache22.git_mirror._synchronize_head"),
     ):
-        import_repository(URL, root)
+        import_repository(URL, root, index=Index.initialize())
 
 
 def _hold_lock(root: Path, entered: Event, release: Event) -> None:
@@ -88,7 +89,7 @@ def _import_conflicting_child(root: Path, entered: Event, finished: Event) -> No
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(URL + "/child", root)
+        import_repository(URL + "/child", root, index=Index.initialize())
     finished.set()
 
 
@@ -118,7 +119,9 @@ def test_concurrent_child_import_cannot_enter_unregistered_parent(tmp_path: Path
     assert list(paths.repository_dir.iterdir()) == [paths.lock_file]
 
 
-def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> None:
+def test_competing_import_and_cleanup_preserve_winning_clone(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     context = multiprocessing.get_context("spawn")
     entered, release = context.Event(), context.Event()
     process = context.Process(target=_paused_import, args=(tmp_path, entered, release))
@@ -130,11 +133,13 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
             patch("cache22.storage.find_git_executable", side_effect=AssertionError),
             pytest.raises(RepositoryBusyError, match="Repository is busy"),
         ):
-            import_repository("https://host/Team/Project", tmp_path, case_sensitive=True)
+            import_repository(
+                "https://host/Team/Project", tmp_path, case_sensitive=True, index=inventory_index
+            )
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
-            clean_repository_import_state(URL, (tmp_path,))
+            clean_repository_import_state(URL, (tmp_path,), index=inventory_index)
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
-            clean_all_import_state((tmp_path,))
+            clean_all_import_state((tmp_path,), index=inventory_index)
         assert (paths.mirror_repository / "HEAD").read_text() == "winner"
         assert not paths.clone_complete_marker.exists()
     finally:
@@ -148,13 +153,18 @@ def test_competing_import_and_cleanup_preserve_winning_clone(tmp_path: Path) -> 
     assert paths.clone_complete_marker.is_file()
     lock_inode = paths.lock_file.stat().st_ino
     with patch("cache22.git_mirror._fetch_git_mirror"):
-        assert import_repository(URL, tmp_path).archive_path == paths.mirror_repository
-    assert clean_repository_import_state(URL, (tmp_path,)) == ()
+        assert (
+            import_repository(URL, tmp_path, index=inventory_index).archive_path
+            == paths.mirror_repository
+        )
+    assert clean_repository_import_state(URL, (tmp_path,), index=inventory_index) == ()
     assert paths.lock_file.stat().st_ino == lock_inode
     assert (paths.mirror_repository / "HEAD").read_text() == "winner"
 
 
-def test_process_exit_releases_lock_without_deleting_lock_file(tmp_path: Path) -> None:
+def test_process_exit_releases_lock_without_deleting_lock_file(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     context = multiprocessing.get_context("spawn")
     entered, release = context.Event(), context.Event()
     process = context.Process(target=_hold_lock, args=(tmp_path, entered, release))
@@ -171,20 +181,24 @@ def test_process_exit_releases_lock_without_deleting_lock_file(tmp_path: Path) -
         process.join(5)
 
     assert not process.is_alive()
-    assert clean_repository_import_state(URL, (tmp_path,)) == ()
+    assert clean_repository_import_state(URL, (tmp_path,), index=inventory_index) == ()
     assert paths.lock_file.stat().st_ino == inode
 
 
-def test_active_descendant_prevents_ancestor_reservation(tmp_path: Path) -> None:
+def test_active_descendant_prevents_ancestor_reservation(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     parent = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     child = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "/child"))
     with repository_operation(tmp_path, child, create=True):
         with pytest.raises(RepositoryBusyError):
-            import_repository(URL, tmp_path, adopt=True)
+            import_repository(URL, tmp_path, adopt=True, index=inventory_index)
         assert not parent.lock_file.exists()
 
 
-def test_process_exit_releases_unowned_reservation_without_initializing(tmp_path: Path) -> None:
+def test_process_exit_releases_unowned_reservation_without_initializing(
+    inventory_index: Index, tmp_path: Path
+) -> None:
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     paths.mirror_repository.mkdir(parents=True)
     sentinel = paths.mirror_repository / "keep"
@@ -196,7 +210,7 @@ def test_process_exit_releases_unowned_reservation_without_initializing(tmp_path
     try:
         assert entered.wait(10)
         with pytest.raises(RepositoryBusyError):
-            clean_repository_import_state(URL, (tmp_path,))
+            clean_repository_import_state(URL, (tmp_path,), index=inventory_index)
         sibling = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "-sibling"))
         with repository_operation(tmp_path, sibling, create=True):
             pass
@@ -204,7 +218,7 @@ def test_process_exit_releases_unowned_reservation_without_initializing(tmp_path
         process.terminate()
         process.join(5)
     assert not process.is_alive()
-    assert clean_repository_import_state(URL, (tmp_path,)) == ()
+    assert clean_repository_import_state(URL, (tmp_path,), index=inventory_index) == ()
     assert not paths.lock_file.exists()
     assert not paths.source_file.exists()
     assert not paths.clone_complete_marker.exists()

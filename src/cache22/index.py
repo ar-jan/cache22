@@ -15,6 +15,31 @@ from .repository_ref import RepositoryRef, is_repository_url, parse_repository_u
 
 SCHEMA_VERSION = 3
 
+WRITABLE_REPOSITORY_FIELDS = frozenset(
+    {
+        "project_name",
+        "display_path",
+        "host",
+        "source_url",
+        "source_path",
+        "archive_root",
+        "storage_format",
+        "archive_file",
+        "created_at",
+        "updated_at",
+        "local_state",
+        "local_observed_at",
+        "reconciliation_required",
+        "local_head_ref",
+        "local_head_oid",
+        "local_head_committed_at",
+        "local_ref_digest",
+        "remote_head_ref",
+        "remote_head_oid",
+        "remote_ref_digest",
+    }
+)
+
 SCHEMA = """
 CREATE TABLE repositories (
  id INTEGER PRIMARY KEY, repo_key TEXT NOT NULL UNIQUE,
@@ -119,6 +144,61 @@ def _version_error(version: int) -> str:
     )
 
 
+@contextmanager
+def _connect(
+    path: Path, *, read_only: bool = False, timeout: float = 5
+) -> Iterator[sqlite3.Connection]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Repository index does not exist: {path}. "
+            "Run 'cache22 add URL' or 'cache22 fetch URL' to register a repository, "
+            "or 'cache22 audit --fix' to rebuild from archives."
+        )
+    db = sqlite3.connect(
+        path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"),
+        uri=True,
+        timeout=timeout,
+        isolation_level=None,
+    )
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        yield db
+    finally:
+        db.close()
+
+
+def _uninitialized(db: sqlite3.Connection) -> bool:
+    """Inspect a single transaction snapshot before attempting schema creation."""
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    if version == SCHEMA_VERSION:
+        return False
+    if version != 0:
+        raise ValueError(_version_error(version))
+    if db.execute("SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1").fetchone():
+        raise ValueError("Cannot initialize a nonempty version-zero repository index")
+    return True
+
+
+def _initialize_schema(db: sqlite3.Connection) -> None:
+    # Check before changing journal mode; normal startup needs no write lock.
+    db.execute("BEGIN")
+    needed = _uninitialized(db)
+    db.commit()
+    if not needed:
+        return
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("BEGIN IMMEDIATE")
+    # Another initializer may have committed while we waited for the lock.
+    if _uninitialized(db):
+        # executescript implicitly commits, so execute statements individually.
+        for statement in SCHEMA.split(";"):
+            if statement.strip():
+                db.execute(statement)
+        db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    db.commit()
+
+
 class Index:
     def __init__(
         self,
@@ -127,54 +207,54 @@ class Index:
         clock: Callable[[], float] = time.time,
         read_only: bool = False,
     ):
-        self.path = path if path is not None else index_path()
+        """Open and validate an existing index without initializing or recovering it."""
+        self.path = (path if path is not None else index_path()).expanduser().resolve()
         self.clock = clock
         self.read_only = read_only
-        if read_only:
-            self.path = self.path.expanduser().resolve()
-            with self.connect() as db:
-                version = db.execute("PRAGMA user_version").fetchone()[0]
-                if version != SCHEMA_VERSION:
-                    raise ValueError(_version_error(version))
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            os.close(fd)
         with self.connect() as db:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
-                # execute statements individually: executescript implicitly commits.
-                for statement in SCHEMA.split(";"):
-                    if statement.strip():
-                        db.execute(statement)
-                db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-            elif version != SCHEMA_VERSION:
+            if version != SCHEMA_VERSION:
                 raise ValueError(_version_error(version))
-            db.commit()
+
+    @classmethod
+    def initialize(
+        cls, path: Path | None = None, *, clock: Callable[[], float] = time.time
+    ) -> Index:
+        """Create an index if needed, once at the owning application entry point."""
+        path = (path if path is not None else index_path()).expanduser().resolve()
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(fd)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                # One retry budget covers all initialization lock acquisitions.
+                with _connect(path, timeout=0) as db:
+                    _initialize_schema(db)
+                break
+            except sqlite3.OperationalError as exc:
+                # Concurrent WAL setup can report BUSY without honoring busy_timeout.
+                remaining = deadline - time.monotonic()
+                if (
+                    exc.sqlite_errorcode & 0xFF not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    or remaining <= 0
+                ):
+                    raise
+                time.sleep(min(0.01, remaining))
+        return cls(path, clock=clock)
 
     def now(self) -> int:
         return int(self.clock())
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        db = sqlite3.connect(
-            self.path.as_uri() + "?mode=ro" if self.read_only else self.path,
-            uri=self.read_only,
-            timeout=5,
-            isolation_level=None,
-        )
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
-        try:
+        with _connect(self.path, read_only=self.read_only) as db:
             yield db
-        finally:
-            db.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -329,8 +409,7 @@ class Index:
         operation = current_operation.get()
         if operation is not None:
             operation.validate_db(db)
-        columns = {row[1] for row in db.execute("PRAGMA table_info(repositories)")}
-        if not fields.keys() <= columns - {"id", "repo_key"}:
+        if not fields.keys() <= WRITABLE_REPOSITORY_FIELDS:
             raise ValueError("Unknown or immutable inventory field")
         fields["updated_at"] = self.now()
         db.execute(

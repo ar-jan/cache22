@@ -8,8 +8,8 @@ compatibility migrations or silently reset data.
 
 ## Recommended order
 
-1. Separate index initialization from ordinary access and remove repeated schema
-   introspection.
+1. **Completed:** separate index initialization from ordinary access and remove
+   repeated schema introspection.
 2. Make attempts the sole source of job diagnostics and derive `project_name`;
    combine these justified schema edits into one version bump.
 3. Establish a shared inventory query model, then replace Datasette with a focused
@@ -20,30 +20,27 @@ compatibility migrations or silently reset data.
 Storage defaults and on-disk metadata deserve separate decisions. Neither should
 block the index or web work. Naming and repository organization are lower priority.
 
-## 1. Index construction takes unnecessary write locks
+## 1. Index initialization is explicit — completed
 
-**Evidence.** In [index.py](../src/cache22/index.py), writable `Index.__init__`
-checks/initializes the schema inside `BEGIN IMMEDIATE` even for an existing index.
-CLI commands create instances independently, and
-[import_state.py](../src/cache22/import_state.py) creates another during each
-repository cleanup. `Index.update_in` also runs `PRAGMA table_info(repositories)`
-on every update to validate field names.
+`Index.initialize` owns transactional schema creation at CLI/web entry points;
+the worker CLI initializes once before starting its worker lifecycle. Ordinary
+`Index` construction validates an existing database using SQLite's existing-file
+modes, without a schema write transaction. Initialization of a supported index
+also avoids schema writes and journal-mode changes.
 
-**Recommendation — address next.** Separate explicit, transactional database
-initialization from opening an existing index. Initialize once at an appropriate
-CLI/web/worker entry point and pass that index through the work. Use an explicit
-allowed-field definition for updates instead of querying the schema each time.
-Keep claim validation in the same transaction as inventory writes.
+Services require a supplied index, including cleanup traversal. `Index.update_in`
+validates fields against an explicit allowed-field set and retains claim validation
+inside the inventory-write transaction. Schema version remains 3.
 
-The benefit is clearer ownership of database creation and less avoidable write-lock
-contention. Do not put unconditional initialization in a global CLI callback:
-`jobs --db` must still open an existing index read-only. Read-only entry points
-must never create directories, initialize schema, or recover claims.
+`list`, `show`, `jobs` (including `--db`), and audit without repair open read-only.
+Missing indexes fail with creation/rebuild guidance without creating directories
+or databases. Repairing audit, other inventory mutations, and web/worker startup
+initialize explicitly. Help and configuration commands do not access the index.
 
-**Acceptance.** Concurrent initialization produces one valid database; ordinary
-opens of an existing index avoid a schema write transaction; unsupported versions
-fail without reset; missing read-only indexes remain missing. Existing stale-claim
-and transactional rollback checks still pass.
+Lifecycle tests cover concurrent initialization, opening alongside an active writer,
+initialization rollback/retry, missing indexes, unsupported and unrecognized
+content, custom-index cleanup, and inspection without claim recovery. Existing
+fencing and rollback checks remain applicable.
 
 ## 2. Job diagnostics have two sources that can diverge
 
@@ -51,9 +48,10 @@ and transactional rollback checks still pass.
 `jobs` and `job_attempts` in `finish_in`, but `interrupt_in` updates attempt errors
 without updating the job's error columns. In
 [manager_service.py](../src/cache22/manager_service.py), `jobs_snapshot` exposes
-both the job's stored errors and a separately derived `diagnostic`. The browser
-queue currently renders the former. An interrupted retry can therefore display
-an older error, or none, while the attempt history has the current interruption.
+both the job's stored errors and a separately derived `diagnostic`. Commit
+`54d01c1` changed the browser queue to render `diagnostic.error`, fixing its stale
+interruption display. The duplicate job-level fields remain exposed and can still
+disagree with attempt history.
 
 **Recommendation — remove the duplication.** Drop `jobs.error_category` and
 `jobs.error`; use attempt-derived diagnostics consistently in the CLI and browser.
