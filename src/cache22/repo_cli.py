@@ -27,6 +27,7 @@ from .cli_support import (
 from .import_service import import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
+from .inventory_service import InventoryQuery, list_inventory
 from .manager_service import bulk_command, duration, json_value, register_batch
 from .repo_audit import audit
 from .repo_service import ImportResult, check_repository
@@ -64,11 +65,18 @@ def add(
 @repo_app.command("list")
 @command
 def list_repositories(
-    host: str | None = None,
-    local_state: str | None = None,
-    remote_status: str | None = None,
-    queued: bool = False,
-    scheduled: bool = False,
+    q: str = "",
+    host: list[str] | None = None,
+    archive_root: list[str] | None = None,
+    local_state: list[str] | None = None,
+    remote_status: list[str] | None = None,
+    storage_format: list[str] | None = None,
+    queued: bool | None = None,
+    running: bool | None = None,
+    scheduled: bool | None = None,
+    schedule_blocked: bool | None = None,
+    has_error: bool | None = None,
+    reconciliation_required: bool | None = None,
     sort: str = "repo_key",
     descending: bool = False,
     limit: int = 100,
@@ -76,18 +84,24 @@ def list_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """List indexed repositories without scanning storage or contacting remotes."""
+    query = InventoryQuery(
+        q=q,
+        host=tuple(host or ()),
+        archive_root=tuple(archive_root or ()),
+        local_state=tuple(local_state or ()),
+        remote_status=tuple(remote_status or ()),
+        storage_format=tuple(storage_format or ()),
+        queued=queued,
+        running=running,
+        scheduled=scheduled,
+        schedule_blocked=schedule_blocked,
+        has_error=has_error,
+        reconciliation_required=reconciliation_required,
+        sort=sort,
+        descending=descending,
+    )
     output(
-        Index(read_only=True).list(
-            host=host,
-            local_state=local_state,
-            remote_status=remote_status,
-            queued=queued,
-            scheduled=scheduled,
-            sort=sort,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-        ),
+        list_inventory(Index(read_only=True), query, limit=limit, offset=offset),
         as_json,
         columns=REPOSITORY_COLUMNS,
     )

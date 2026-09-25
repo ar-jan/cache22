@@ -78,16 +78,14 @@ def test_web_runs_without_worker_and_stops_independently(tmp_path: Path) -> None
             health = None
             while time.monotonic() < deadline and process.poll() is None:
                 try:
-                    with urllib.request.urlopen(
-                        base + "/-/cache22/api/health", timeout=0.2
-                    ) as response:
+                    with urllib.request.urlopen(base + "/api/health", timeout=0.2) as response:
                         health = json.load(response)
                     break
                 except OSError:
                     time.sleep(0.05)
             assert health is not None
             assert health["workers"] == []
-            urllib.request.urlopen(base + "/-/cache22/queue", timeout=2).close()
+            urllib.request.urlopen(base + "/queue", timeout=2).close()
             assert queue.list()[0]["state"] == "pending"
             assert queue.list()[0]["attempts"] == []
             queue.unqueue(repository["id"])
@@ -96,7 +94,7 @@ def test_web_runs_without_worker_and_stops_independently(tmp_path: Path) -> None
             )
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and worker.poll() is None:
-                with urllib.request.urlopen(base + "/-/cache22/api/health", timeout=1) as response:
+                with urllib.request.urlopen(base + "/api/health", timeout=1) as response:
                     health = json.load(response)
                 if health["workers"]:
                     break

@@ -26,6 +26,7 @@ from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.repo_audit import audit
 from cache22.repository_ref import parse_repository_url
 
@@ -817,8 +818,8 @@ def test_audit_adopts_all_mirrors_offline(audit_mirror: Mirror) -> None:
     assert len(issues) == 3
     assert all(issue["fixed"] and issue["problem"] == "Adopted Git mirror" for issue in issues)
     index = Index()
-    assert len(index.list()) == 3
-    for record in index.list():
+    assert len(list_inventory(index)) == 3
+    for record in list_inventory(index):
         assert record["local_state"] == "ready"
         assert record["remote_status"] == "unknown"
         assert record["last_fetched_at"] is None and record["last_checked_at"] is None
@@ -838,7 +839,7 @@ def test_audit_requires_explicit_adoption(
     issues = audit(fix=fix, index=inventory_index)
     assert len(issues) == 1 and not issues[0]["fixed"]
     assert "--adopt" in issues[0]["problem"]
-    assert Index().list() == []
+    assert list_inventory(Index()) == []
     assert snapshot(audit_mirror.paths.repository_dir) == before
 
 
@@ -942,4 +943,4 @@ def test_audit_does_not_recreate_disappeared_candidate(
     assert len(issues) == 1 and not issues[0]["fixed"]
     assert not mirror.paths.repository_dir.exists()
     assert snapshot(moved) == before
-    assert Index().list() == []
+    assert list_inventory(Index()) == []

@@ -271,9 +271,15 @@ See [job inspection](use.md#job-inspection) for filters, pagination, and output.
 The web server and worker run independently. Closing a browser or stopping the
 web server does not stop a worker. Use SSH port forwarding for remote access.
 
-Full index data can be inspected through Datasette; generic writes are disabled.
-Only Cache22's forms/API perform mutations through shared services. Keep the
-inventory ID column visible for live row updates and selection.
+The focused Cache22 application shares inventory filter semantics with the CLI.
+Listing, counts, facets, exports, and captured selection use parameterized queries.
+All-filtered selection captures IDs once (maximum 10,000); commands never reevaluate
+filters. Tab-local selection survives navigation and polling. Filtered JSON/CSV
+exports include all matching rows, regardless of pagination, and omit source URLs.
+No SQL explorer, generic table access, database download, or generic writes are
+exposed. Only Cache22 forms/API perform mutations through shared services.
+Host/Origin checks apply to every route; mutations require same-origin browser
+requests. Runtime assets are local, and no request launches Git or a worker.
 
 The index uses schema version 4; other versions are rejected without migration.
 Before using an older index, stop all Cache22 processes, back it up, and discard that index

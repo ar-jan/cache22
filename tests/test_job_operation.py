@@ -11,6 +11,7 @@ import pytest
 
 from cache22 import job_operation, operation
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
@@ -27,7 +28,7 @@ def scheduler(tmp_path: Path) -> Scheduler:
 def test_heartbeat_and_context_cleanup_on_failure(
     scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch, heartbeat_fails: bool
 ) -> None:
-    repo_id = scheduler.index.list()[0]["id"]
+    repo_id = list_inventory(scheduler.index)[0]["id"]
     job = scheduler.immediate(repo_id, "fetch")
     queue = scheduler.queue
     original_thread = threading.Thread
@@ -79,7 +80,7 @@ def test_heartbeat_and_context_cleanup_on_failure(
 def test_thread_start_failure_restores_context(
     scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    job = scheduler.immediate(scheduler.index.list()[0]["id"], "check")
+    job = scheduler.immediate(list_inventory(scheduler.index)[0]["id"], "check")
 
     def fail_start(self: threading.Thread) -> None:
         raise RuntimeError("thread unavailable")
@@ -97,7 +98,7 @@ def test_thread_start_failure_restores_context(
 def test_progress_throttles_successful_writes_and_retries_database_failures(
     scheduler: Scheduler, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    job = scheduler.immediate(scheduler.index.list()[0]["id"], "fetch")
+    job = scheduler.immediate(list_inventory(scheduler.index)[0]["id"], "fetch")
     queue = scheduler.queue
     now = 10.0
     monkeypatch.setattr(job_operation.time, "monotonic", lambda: now)
@@ -129,7 +130,7 @@ def test_progress_throttles_successful_writes_and_retries_database_failures(
 
 
 def test_cancelled_context_restores_fence(scheduler: Scheduler) -> None:
-    job = scheduler.immediate(scheduler.index.list()[0]["id"], "check")
+    job = scheduler.immediate(list_inventory(scheduler.index)[0]["id"], "check")
     cancel = threading.Event()
     previous = operation.current_operation.get()
 

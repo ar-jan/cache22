@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from cache22.index import SCHEMA_VERSION, Index
+from cache22.inventory_service import InventoryQuery, list_inventory
 from cache22.job_queue import Kind, Queue
 from cache22.manager_service import detail, jobs_snapshot
 from cache22.repo_service import add_repository
@@ -90,9 +91,12 @@ def test_project_names_derive_from_first_display_spelling(tmp_path: Path) -> Non
         assert [
             row[0] for row in db.execute("SELECT project_name FROM inventory ORDER BY project_name")
         ] == sorted(names)
-    assert [row["project_name"] for row in index.list(sort="project_name")] == sorted(names)
     assert [
-        row["project_name"] for row in index.list(sort="project_name", descending=True)
+        row["project_name"] for row in list_inventory(index, InventoryQuery(sort="project_name"))
+    ] == sorted(names)
+    assert [
+        row["project_name"]
+        for row in list_inventory(index, InventoryQuery(sort="project_name", descending=True))
     ] == sorted(names, reverse=True)
 
 
@@ -134,7 +138,9 @@ def test_success_timestamps_require_completed_attempts(
     other_id = add_repository("https://host/team/other", tmp_path, index=index)["id"]
     now += 1
     scheduler.finish(scheduler.immediate(other_id, kind))
-    assert [r["id"] for r in index.list(sort=column, descending=True)] == [other_id, repo_id]
+    assert [
+        r["id"] for r in list_inventory(index, InventoryQuery(sort=column, descending=True))
+    ] == [other_id, repo_id]
 
 
 def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Noninteractive services shared by the CLI and Datasette manager."""
+"""Noninteractive services shared by the CLI and Cache22 web application."""
 
 from __future__ import annotations
 

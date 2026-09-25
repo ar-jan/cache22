@@ -36,11 +36,12 @@ cache22 web
 cache22 worker
 ```
 
-The Datasette manager browses the index, registers repositories, submits bulk
+The Cache22 manager searches and filters inventory, registers repositories, submits bulk
 checks/fetches, changes schedules, and monitors progress. Web and worker run
 independently; stopping either does not stop the other. Jobs wait when no worker
-is available. Use `cache22 worker --once` for timer-driven operation. All index
-data is available for inspection; changes go through Cache22 services. Assets
+is available. Use `cache22 worker --once` for timer-driven operation. Operational
+metadata is available in repository details and filtered JSON/CSV exports, except
+stored clone URLs. Changes go through Cache22 services. Assets
 are bundled locally. See [usage](docs/use.md) for commands and service examples.
 
 The index uses schema version 4. Other versions are rejected without migration

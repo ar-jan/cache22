@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from cache22.cli import app
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_queue import Queue
 from cache22.repo_service import add_repository
 
@@ -24,7 +25,7 @@ def test_register_batch_is_register_only_and_reports_each_input(tmp_path: Path) 
     assert [row["selector"] for row in rows] == [first, "invalid", second, first]
     assert [row["status"] for row in rows] == ["registered", "error", "registered", "duplicate"]
     assert rows[0]["repository_id"] == rows[3]["repository_id"]
-    assert len(Index().list()) == 2
+    assert len(list_inventory(Index())) == 2
     assert Queue(Index()).list() == []
     assert list(root.iterdir()) == []
 

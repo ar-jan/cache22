@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from cache22 import index as index_module
 from cache22.cli import app
 from cache22.index import SCHEMA_VERSION, Index, index_path
+from cache22.inventory_service import list_inventory
 from cache22.repository_ref import parse_repository_url
 from cache22.scheduler import Scheduler
 
@@ -42,7 +43,7 @@ def test_concurrent_initialization(tmp_path: Path) -> None:
                 process.terminate()
                 process.join(5)
     index = Index(path)
-    assert len(index.list()) == 4
+    assert len(list_inventory(index)) == 4
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     with index.connect() as db:
@@ -55,9 +56,9 @@ def test_concurrent_initialization(tmp_path: Path) -> None:
 def test_existing_opens_do_not_wait_for_writer(tmp_path: Path) -> None:
     index = Index.initialize(tmp_path / "inventory.db")
     with index.transaction():
-        assert Index(index.path).list() == []
-        assert Index(index.path, read_only=True).list() == []
-        assert Index.initialize(index.path).list() == []
+        assert list_inventory(Index(index.path)) == []
+        assert list_inventory(Index(index.path, read_only=True)) == []
+        assert list_inventory(Index.initialize(index.path)) == []
 
 
 def test_initialization_rolls_back_and_can_be_retried(
@@ -74,7 +75,7 @@ def test_initialization_rolls_back_and_can_be_retried(
     for read_only in (False, True):
         with pytest.raises(ValueError, match="version: 0"):
             Index(path, read_only=read_only)
-    assert Index.initialize(path).list() == []
+    assert list_inventory(Index.initialize(path)) == []
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -105,7 +106,7 @@ def test_access_never_creates_or_recreates_database(tmp_path: Path, read_only: b
     index = Index(path, read_only=read_only)
     path.unlink()
     with pytest.raises(FileNotFoundError, match="does not exist"):
-        index.list()
+        list_inventory(index)
     assert not path.exists()
 
 

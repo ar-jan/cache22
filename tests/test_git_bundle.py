@@ -20,6 +20,7 @@ from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_queue import Queue
 from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
@@ -143,7 +144,7 @@ def test_offline_conversion_roundtrip_and_audit(
     assert rebuilt["archive_path"] == str(bundle)
     assert rebuilt["local_ref_digest"] == before["local_ref_digest"]
     repo.root.rename(repo.root.with_name("disconnected"))
-    assert new_index.list()[0]["archive_path"] == str(bundle)
+    assert list_inventory(new_index)[0]["archive_path"] == str(bundle)
     assert new_index.get(URL)["project_name"] == after["project_name"]
 
 

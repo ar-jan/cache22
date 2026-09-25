@@ -133,6 +133,43 @@ no top-level `error` or `error_category` fields. Read those fields from `diagnos
 for the current problem, or from individual `attempts` for history. Text output
 includes full diagnostics and a next-page hint.
 
+## Inventory queries
+
+CLI listing and the browser share one inventory query model. Search names and keys
+with `cache22 list --q TEXT`; this is literal substring matching using SQLite's
+`lower()` (ASCII case-insensitive, not Unicode case folding). `%` and `_` are literal.
+Repeat `--host`, `--archive-root`, `--local-state`, `--remote-status`, or
+`--storage-format` for alternatives within a field. Different fields combine with AND.
+
+Boolean filters accept positive and negative flags: `--queued/--no-queued`,
+`--running/--no-running`, `--scheduled/--no-scheduled`,
+`--schedule-blocked/--no-schedule-blocked`, `--has-error/--no-has-error`, and
+`--reconciliation-required/--no-reconciliation-required`. Omission means either value.
+
+```sh
+cache22 list --host github.com --host gitlab.com --no-queued --has-error --json
+cache22 list --q project --storage-format bundle --sort last_fetched_at
+```
+
+Sort field names use underscores (for example `--sort last_fetched_at`). Supported
+fields are `repo_key`, `project_name`, `host`, `archive_root`, `local_state`,
+`remote_status`, `storage_format`, `local_head_committed_at`, `last_checked_at`,
+`last_fetched_at`, `last_converted_at`, and `next_due_at`. Use `--descending` to
+reverse the primary sort; ID breaks ties. SQLite text/NULL ordering applies.
+`--limit` accepts 1–500 (default 100); `--offset` is nonnegative.
+
+Browser query parameters use the same underscore field names, repeated categorical
+parameters, and `true`/`false` booleans. The inventory lives at `/`; old Datasette
+routes and parameters are unsupported. Filter changes return to the first page.
+Host/local-state/remote-status facets count matches under all other filters.
+
+Select this page adds to the tab's captured IDs; Select all filtered replaces the
+selection with every match, up to 10,000. Filtering, pagination, and polling keep
+that selection. Commands use captured IDs even if repository states change later.
+JSON/CSV downloads export all matches in the chosen sort order, ignoring pagination.
+They include details-level inventory metadata except `source_url`, with UTC ISO
+timestamps, JSON booleans/nulls, and CSV true/false/blank values.
+
 ## Web and worker
 
 In one terminal:

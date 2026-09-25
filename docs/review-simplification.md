@@ -12,8 +12,8 @@ compatibility migrations or silently reset data.
    repeated schema introspection.
 2. **Completed:** make attempts the sole source of job diagnostics and derive
    `project_name`; combine these schema edits in version 4.
-3. Establish a shared inventory query model, then replace Datasette with a focused
-   Cache22 web application.
+3. **Completed:** establish a shared inventory query model and replace Datasette
+   with a focused Cache22 web application.
 4. Improve domain errors and operation results, extract pure diagnostics, and
    centralize observation-state interpretation.
 
@@ -81,74 +81,58 @@ without migration or automatic reset. The [README](../README.md) and
 [guarantees](guarantees.md#browser-and-index-lifecycle) describe backing up and
 rebuilding the index, including loss of registrations, schedules, and job history.
 
-## 4. Datasette coupling limits the application-owned web interface
+## 4. Shared inventory queries and focused web application — completed
 
-**Evidence.** [manager/__init__.py](../src/cache22/manager/__init__.py) uses the
-private `datasette.views.table._table_filters` function so bulk selection matches
-the displayed inventory. [manager.js](../src/cache22/manager/static/manager.js)
-refreshes inventory by downloading and parsing Datasette HTML and depending on its
-CSS selectors, table structure, and pagination links. Selection and refresh also
-require the ID column to remain visible. The runtime is pinned to
-`datasette==1.0a40` in [pyproject.toml](../pyproject.toml).
+`inventory_service` owns typed filters, validated sorting, parameterized predicates,
+page snapshots, disjunctive facet counts, exports, and bounded ID selection. CLI
+listing exposes the same operational filters, including literal name/key search,
+repeatable categorical options, and positive/negative boolean flags. Page defaults
+are 100 rows, capped at 500; ordering uses repository ID to break ties.
 
-Datasette supplies useful browsing, filtering, facets, SQL access, and exports.
-However, Cache22 already owns registration, mutations, details, queue rendering,
-selection, polling, and browser-origin checks. The agreed product direction is a
-focused Cache22 interface, without a general database explorer.
+The Starlette/Jinja application replaces Datasette, its plugin loader/entry point,
+private filter parser, and generated-page scraping. Cache22 owns templates, assets,
+and a dedicated inventory refresh partial. The compact table links to repository
+details, attempts, and existing actions. Tab-local captured IDs survive navigation,
+filter changes, and refreshes; the maximum selection/submission remains 10,000.
+Exports include every match in sort order and explicitly omit `source_url`.
 
-**Recommendation — replace Datasette in a bounded web project.** Use Starlette,
-Jinja templates, the existing Uvicorn server, and modest vanilla JavaScript.
-Starlette provides standard [routing](https://starlette.dev/routing/) and
-[Jinja template integration](https://starlette.dev/templates/). The expected
-benefit is control over query and rendering contracts and removal of private-API
-and DOM coupling. It is not a promise of fewer lines: Cache22 would own the
-inventory UI and its accessibility, filtering, pagination, and export behavior.
+Registration, commands, schedules, conversion, queue monitoring, and worker progress
+reuse existing services. SQLite/configuration work runs outside the event loop.
+Loopback binding, Host/Origin checks, mutation method/Fetch Metadata boundaries,
+local assets, and independent worker lifecycle remain. SQL/table browsing, database
+downloads, and old route/parameter aliases are absent. Schema version remains 4.
 
-### Capability boundary
+Focused tests cover filter/list/export/selection agreement, facet counts, concurrent
+snapshot consistency, disconnected roots, selection boundaries, malformed requests,
+and HTTP mutation boundaries. Browser acceptance exercises captured selection,
+pagination and empty pages, focus, refresh failures/recovery, registration, commands,
+progress, attempt details, and no-worker messaging.
 
-Retain:
+A reproducible smoke benchmark is available as
+`python utils/benchmark_inventory.py` in the development environment. On 2026-09-25,
+its temporary fixture had 10,000 repositories across ten hosts, unavailable archive
+storage, 10,000 successful fetch attempts, 1,428 failed check attempts, 2,000 pending
+checks, and 5,000 schedules. Each figure is the median of five local runs; HTTP
+measurements use the in-process ASGI test client, excluding network/browser costs.
 
-- Inventory name/key search, explicit filters, sorting, pagination, and useful
-  facet counts, including the current host/local-state/remote-status facets.
-- Filtered inventory exports in JSON and CSV.
-- Page selection and all-filtered selection, with captured repository IDs that
-  survive navigation and refresh rather than reevaluating filters on submission.
-- Registration preview/submission, repository details and attempts, bulk commands,
-  schedules, conversion, and job/worker monitoring.
-- Local bundled assets, clear refresh failures, and independent web/worker
-  lifecycles.
+| Operation | Median ms |
+| --- | ---: |
+| First page, total and three facets | 48.3 |
+| Deep page (offset 9,900), total and facets | 56.2 |
+| Host/queued/scheduled filter and facets | 17.4 |
+| Successful-fetch date sort and facets | 59.3 |
+| Diagnostic filter and facets | 41.5 |
+| Capture all 10,000 IDs | 3.8 |
+| Search and capture matching IDs | 7.8 |
+| Materialize 10,000 export records | 170.4 |
+| HTTP inventory HTML | 50.2 |
+| HTTP inventory refresh fragment | 52.2 |
+| HTTP JSON export | 328.1 |
+| HTTP CSV export | 367.2 |
 
-Omit arbitrary SQL, generic browsing of every table, raw database download, and
-Datasette-specific query syntax. Remove the plugin entry point, plugin-loading
-setup, and Datasette dependency once the replacement is complete. Preserve no
-old route or parameter aliases.
-
-### Query ownership and implementation boundary
-
-Build one typed inventory query model in the shared service layer before replacing
-the UI. Today `Index.list` handles a fixed subset of filters while browser
-selection accepts Datasette-produced SQL fragments. Listing, counts, facets,
-exports, and all-filtered selection should instead use one parameterized predicate
-builder and validated sort fields. Pagination applies to displayed rows, not the
-captured all-filtered selection. Retain the 10,000-item selection/submission limit.
-
-Own the inventory markup and refresh response directly; do not scrape generated
-framework pages. Reuse the existing registration, mutation, job, and detail
-services. Keep blocking SQLite work outside the ASGI event loop. Keep the server
-loopback-only and preserve Host/Origin checks and method restrictions; removing
-the Datasette permission wrapper must not remove those boundaries. Generic SQL
-writes are not part of the replacement.
-
-This rewrite does not require a storage-format change, new scheduler, SPA framework,
-or new worker supervision. Evaluate its benefit through simpler dependencies and
-clearer ownership, not framework novelty.
-
-**Acceptance.** Listing, exports, and selection agree on filter semantics; selection
-survives filtering and polling; empty pages, pagination changes, and refresh failures
-are usable. Browser tests cover registration, batch actions, details, progress,
-and no-worker behavior. Service tests cover origin checks and mutation boundaries.
-Measure representative filtering, pagination, and selection on 10,000 repositories
-before making latency claims.
+These are smoke measurements, not latency guarantees. The earlier baseline used
+fewer diagnostics and timed individual reads rather than complete page snapshots;
+it is not a controlled before/after speed comparison.
 
 ## 5. Error classification and result presentation cross layer boundaries
 

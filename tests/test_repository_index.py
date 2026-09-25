@@ -18,6 +18,7 @@ from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.import_service import import_repository
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
 from cache22.job_queue import Queue
 from cache22.repo_audit import audit
@@ -197,7 +198,7 @@ def test_listing_is_database_only_with_disconnected_root(
 
     monkeypatch.setattr(os, "scandir", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
-    assert r.index.list()[0] == before
+    assert list_inventory(r.index)[0] == before
     result = CliRunner().invoke(app, ["list", "--json"])
     assert result.exit_code == 0, result.output
     listed = json.loads(result.output)[0]
@@ -368,7 +369,7 @@ def test_audit_bootstraps_owned_mirrors_without_network(
         repo_service, "remote_snapshot", lambda url: pytest.fail("Audit must be offline")
     )
     assert any("not indexed" in issue["problem"] for issue in audit(index=other))
-    assert other.list() == []
+    assert list_inventory(other) == []
     assert all(issue["fixed"] for issue in audit(index=other, fix=True))
     record = other.get(before["repo_key"])
     assert record["local_head_oid"] == before["local_head_oid"]

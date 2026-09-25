@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Cache22 · Inventory{% endblock %}
+{% block content %}
+<main id="c22-inventory">
+<h1>Repository inventory</h1>
+<p>Remote status is the last observed comparison, dated by the last successful check.</p>
+<form class="c22-panel" id="c22-filters" method="get" action="/">
+<label>Search names and keys <input id="c22-search" type="search" name="q" value="{{ query.q }}"></label>
+{% for field in categories %}
+<label>{{ field|replace('_', ' ')|capitalize }}
+{% if field in enums %}
+<select name="{{ field }}" multiple size="{{ enums[field]|length }}" aria-label="{{ field|replace('_', ' ') }} (multiple values)">
+{% for value in enums[field] %}<option value="{{ value }}" {% if value in query|attr(field) %}selected{% endif %}>{{ value|replace('_', ' ') }}</option>{% endfor %}
+</select>
+{% else %}
+<textarea name="{{ field }}" rows="2" data-multi-filter aria-label="{{ field|replace('_', ' ') }} (one per line)" placeholder="One per line">{{ query|attr(field)|join('\n') }}</textarea>
+{% endif %}
+</label>
+{% endfor %}
+<details {% if query.queued is not none or query.running is not none or query.scheduled is not none or query.schedule_blocked is not none or query.has_error is not none or query.reconciliation_required is not none %}open{% endif %}><summary>Activity and status filters</summary>
+{% for field in flags %}<label>{{ field|replace('_', ' ')|capitalize }} <select name="{{ field }}">
+<option value="">Any</option><option value="true" {% if query|attr(field) is sameas true %}selected{% endif %}>Yes</option><option value="false" {% if query|attr(field) is sameas false %}selected{% endif %}>No</option>
+</select></label>{% endfor %}
+</details>
+<label>Sort <select name="sort">{% for field in sorts %}<option value="{{ field }}" {% if query.sort == field %}selected{% endif %}>{{ field|replace('_', ' ') }}</option>{% endfor %}</select></label>
+<label><input type="checkbox" name="descending" value="true" {% if query.descending %}checked{% endif %}> Descending</label>
+<label>Rows <input type="number" name="limit" min="1" max="500" value="{{ selection.limit }}"></label>
+<button id="c22-search-apply" type="submit">Apply filters</button> <a href="/">Reset filters</a>
+</form>
+<section class="c22-panel" aria-label="Selection and actions">
+<button type="button" id="c22-page-select">Select this page</button>
+<button type="button" id="c22-all-select">Select all filtered</button>
+<button type="button" id="c22-clear-select">Clear selection</button>
+<span id="c22-selection-count" aria-live="polite"></span>
+<div id="c22-actions"></div><div id="c22-results" aria-live="polite"></div>
+</section>
+<p id="c22-connection" role="status" tabindex="-1"></p>
+<div id="c22-inventory-data">{% include "inventory_fragment.html" %}</div>
+</main>
+{% endblock %}

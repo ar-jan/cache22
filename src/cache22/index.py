@@ -345,6 +345,7 @@ class Index:
     def _record(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         for field in (
+            "has_error",
             "queued",
             "running",
             "scheduled",
@@ -353,53 +354,6 @@ class Index:
         ):
             result[field] = bool(result[field])
         return result
-
-    def list(
-        self,
-        *,
-        host: str | None = None,
-        local_state: str | None = None,
-        remote_status: str | None = None,
-        queued: bool = False,
-        scheduled: bool = False,
-        sort: str = "repo_key",
-        descending: bool = False,
-        limit: int = 100,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        if sort not in {
-            "repo_key",
-            "project_name",
-            "local_head_committed_at",
-            "last_checked_at",
-            "last_fetched_at",
-            "last_converted_at",
-            "remote_status",
-        }:
-            raise ValueError(f"Unsupported sort column: {sort}")
-        if limit < 1 or offset < 0:
-            raise ValueError("Limit must be positive and offset nonnegative")
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        for key, value in [
-            ("host", host),
-            ("local_state", local_state),
-            ("remote_status", remote_status),
-        ]:
-            if value is not None:
-                clauses.append(f"{key}=?")
-                parameters.append(value)
-        if queued:
-            clauses.append("queued=1")
-        if scheduled:
-            clauses.append("scheduled=1")
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self.connect() as db:
-            rows = db.execute(
-                f"SELECT * FROM inventory{where} ORDER BY {sort} {'DESC' if descending else 'ASC'},id LIMIT ? OFFSET ?",
-                (*parameters, limit, offset),
-            ).fetchall()
-        return [self._record(row) for row in rows]
 
     def update(self, repository_id: int, **fields: Any) -> None:
         with self.transaction() as db:
