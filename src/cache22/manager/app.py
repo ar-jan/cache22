@@ -22,8 +22,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .. import inventory_service as inventory
 from .. import manager_service as service
 from ..config import list_archive_dirs
+from ..diagnostics import sanitize
 from ..index import Index
-from ..operation import sanitize
 
 ASSETS = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=ASSETS / "templates")

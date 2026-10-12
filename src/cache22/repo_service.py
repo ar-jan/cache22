@@ -1,4 +1,8 @@
-"""Noninteractive services shared by the CLI and Cache22 web application."""
+"""Noninteractive services shared by the CLI and Cache22 web application.
+
+Job execution binds an operation context: Index writes validate that claim in
+their transaction, while Git subprocesses consult its deadline and cancellation.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from typing import Any
 from . import operation
 from .archive_storage import RepositoryBusyError
 from .config import default_archive_dir, normalize_archive_dir
+from .diagnostics import sanitize
 from .git_observation import remote_fields, remote_snapshot
 from .index import Index, repository_key
 from .job_operation import running_job
@@ -64,7 +69,7 @@ def category_for(exc: BaseException) -> str:
 
 def error_text(exc: BaseException, url: str) -> str:
     # Do not copy credential-bearing clone URLs into persisted diagnostics.
-    return operation.sanitize(str(exc), url)
+    return sanitize(str(exc), url)
 
 
 def publish_local(index: Index, record: dict[str, Any], repo: Repository | None) -> None:

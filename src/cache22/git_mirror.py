@@ -8,6 +8,7 @@ from pathlib import Path
 from . import operation
 from .archive_layout import ArchivePaths
 from .archive_storage import RepositoryStorage
+from .diagnostics import failure_message
 from .git_config import (
     git_repository_command,
     git_repository_environment,
@@ -57,9 +58,7 @@ def ensure_git_mirror(
     except subprocess.CalledProcessError as exc:
         _clear_incomplete_mirror(storage)
         raise operation.TransportError(
-            operation.failure_message(
-                f"git clone --mirror failed with exit code {exc.returncode}", exc, url
-            )
+            failure_message(f"git clone --mirror failed with exit code {exc.returncode}", exc, url)
         ) from exc
 
     try:
@@ -91,7 +90,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
         head = _remote_head(git_executable, mirror, url)
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
-            operation.failure_message("Remote HEAD discovery failed", exc, url)
+            failure_message("Remote HEAD discovery failed", exc, url)
         ) from exc
     except ValueError as exc:
         raise RuntimeError(
@@ -126,7 +125,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
         )
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
-            operation.failure_message(
+            failure_message(
                 f"git fetch failed with exit code {exc.returncode}; "
                 "the initialized mirror was kept. Retry the import to fetch updates.",
                 exc,
@@ -169,7 +168,7 @@ def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
         advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
-            operation.failure_message("Remote HEAD discovery failed; retry the import", exc, url)
+            failure_message("Remote HEAD discovery failed; retry the import", exc, url)
         ) from exc
     target = oid = None
     for line in advertisement.splitlines():

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import operation
+from .diagnostics import failure_message
 from .git_config import (
     git_local_environment,
     git_repository_command,
@@ -57,7 +58,7 @@ def remote_snapshot(url: str) -> RefSnapshot:
         )
     except subprocess.CalledProcessError as exc:
         raise operation.TransportError(
-            operation.failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
+            failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
         ) from exc
     refs: dict[str, str] = {}
     target = head = None

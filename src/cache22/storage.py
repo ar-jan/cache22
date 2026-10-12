@@ -48,6 +48,9 @@ class Repository:
 
     Use only inside an opening context or its preparation callback. Preparation
     may run before ownership publication and final structural validation.
+    Opening binds inherited lock descriptors to the operation context so Git
+    children retain reservations even if their parent dies. Publication callbacks
+    run under those locks and must preserve the caller's inventory claim fence.
     """
 
     root: Path

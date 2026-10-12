@@ -8,10 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .diagnostics import sanitize
 from .index import Index, repository_key
 from .inventory_service import public_record
 from .job_queue import BLOCKING_JOB_SQL, Queue
-from .operation import sanitize
 from .repo_service import registration_target
 from .scheduler import Scheduler
 
