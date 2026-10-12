@@ -7,7 +7,7 @@ import pytest
 
 from cache22.archive_layout import archive_paths_for_repository
 from cache22.archive_storage import repository_operation
-from cache22.import_service import import_repository
+from cache22.fetch_service import fetch_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
@@ -32,7 +32,7 @@ def test_unsafe_repository_urls_fail_before_filesystem_changes(
     inventory_index: Index, tmp_path: Path, url: str
 ) -> None:
     with pytest.raises(ValueError, match="Unsafe|reserved"):
-        import_repository(url, tmp_path, index=inventory_index)
+        fetch_repository(url, tmp_path, index=inventory_index)
     with pytest.raises(ValueError, match="Unsafe|reserved"):
         clean_repository_import_state(url, (tmp_path,), index=inventory_index)
     assert list(tmp_path.iterdir()) == []
@@ -45,7 +45,7 @@ def test_query_and_fragment_delimiters_fail_before_storage_changes(
 ) -> None:
     url = f"{prefix}team/project{suffix}"
     with pytest.raises(ValueError, match="query or fragment"):
-        import_repository(url, tmp_path, index=inventory_index)
+        fetch_repository(url, tmp_path, index=inventory_index)
     with pytest.raises(ValueError, match="query or fragment"):
         clean_repository_import_state(url, (tmp_path,), index=inventory_index)
     assert list(tmp_path.iterdir()) == []
@@ -96,7 +96,7 @@ def test_import_rejects_repository_prefix_conflicts(
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(second, tmp_path, case_sensitive=True, index=inventory_index)
+        fetch_repository(second, tmp_path, case_sensitive=True, index=inventory_index)
     assert sorted(tmp_path.rglob("*")) == before
     assert (paths.mirror_repository / "HEAD").read_text() == "keep"
     assert clean_all_import_state((tmp_path,), index=inventory_index) == ()
@@ -150,7 +150,7 @@ def test_targeted_operations_reject_symlinks_without_changing_external_data(
 
     for operation in (
         lambda: clean_repository_import_state(url, (root,), index=inventory_index),
-        lambda: import_repository(url, root, index=inventory_index),
+        lambda: fetch_repository(url, root, index=inventory_index),
     ):
         with pytest.raises((OSError, ValueError), match="directory|symbolic|Unsafe"):
             operation()
@@ -218,7 +218,7 @@ def test_missing_configured_root_fails_before_clone_or_cleanup(
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
     ):
         with pytest.raises(ValueError, match="Archive root does not exist"):
-            import_repository("https://host/team/project", index=inventory_index)
+            fetch_repository("https://host/team/project", index=inventory_index)
         with pytest.raises(ValueError, match="Archive root does not exist"):
             clean_all_import_state(index=inventory_index)
         with pytest.raises(ValueError, match="Archive root does not exist"):

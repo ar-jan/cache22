@@ -15,7 +15,7 @@ from cache22.archive_storage import (
     repository_operation,
 )
 from cache22.errors import RepositoryBusyError
-from cache22.import_service import import_repository
+from cache22.fetch_service import fetch_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
@@ -45,7 +45,7 @@ def _paused_import(root: Path, entered: Event, release: Event) -> None:
         patch("cache22.git_mirror._remote_head", return_value=None),
         patch("cache22.git_mirror._synchronize_head"),
     ):
-        import_repository(URL, root, index=Index.initialize())
+        fetch_repository(URL, root, index=Index.initialize())
 
 
 def _hold_lock(root: Path, entered: Event, release: Event) -> None:
@@ -89,7 +89,7 @@ def _import_conflicting_child(root: Path, entered: Event, finished: Event) -> No
         patch("cache22.storage.find_git_executable", side_effect=AssertionError),
         pytest.raises(ValueError, match="Repository path conflict"),
     ):
-        import_repository(URL + "/child", root, index=Index.initialize())
+        fetch_repository(URL + "/child", root, index=Index.initialize())
     finished.set()
 
 
@@ -133,7 +133,7 @@ def test_competing_import_and_cleanup_preserve_winning_clone(
             patch("cache22.storage.find_git_executable", side_effect=AssertionError),
             pytest.raises(RepositoryBusyError, match="Repository is busy"),
         ):
-            import_repository(
+            fetch_repository(
                 "https://host/Team/Project", tmp_path, case_sensitive=True, index=inventory_index
             )
         with pytest.raises(RepositoryBusyError, match="Repository is busy"):
@@ -154,7 +154,7 @@ def test_competing_import_and_cleanup_preserve_winning_clone(
     lock_inode = paths.lock_file.stat().st_ino
     with patch("cache22.git_mirror._fetch_git_mirror"):
         assert (
-            import_repository(URL, tmp_path, index=inventory_index).archive_path
+            fetch_repository(URL, tmp_path, index=inventory_index).archive_path
             == paths.mirror_repository
         )
     assert clean_repository_import_state(URL, (tmp_path,), index=inventory_index) == ()
@@ -192,7 +192,7 @@ def test_active_descendant_prevents_ancestor_reservation(
     child = archive_paths_for_repository(tmp_path, parse_repository_url(URL + "/child"))
     with repository_operation(tmp_path, child, create=True):
         with pytest.raises(RepositoryBusyError):
-            import_repository(URL, tmp_path, adopt=True, index=inventory_index)
+            fetch_repository(URL, tmp_path, adopt=True, index=inventory_index)
         assert not parent.lock_file.exists()
 
 

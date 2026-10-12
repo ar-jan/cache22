@@ -26,13 +26,13 @@ from .cli_support import (
 )
 from .diagnostics import error_text
 from .errors import DomainError, StructuralError
-from .import_service import import_repository
+from .fetch_service import fetch_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
 from .inventory_service import InventoryQuery, list_inventory
 from .manager_service import bulk_command, duration, json_value, register_batch
 from .repo_audit import audit
-from .repo_service import ImportResult, check_repository
+from .repo_service import FetchResult, check_repository
 from .repository_ref import is_repository_url
 from .worker import run_continuous, run_worker, shutdown_signals
 
@@ -131,15 +131,15 @@ def selected(index: Index, selectors: list[str] | None, all_repositories: bool) 
 
 def _fetch_one(
     index: Index, selector: str, *, case_sensitive: bool, adopt: bool, timeout: float
-) -> ImportResult:
+) -> FetchResult:
     """Fetch an indexed repository, or register and fetch a new clone URL."""
     record = index.find(selector)
     if record is None and not is_repository_url(selector):
         raise StructuralError(f"Repository is not indexed: {selector}")
 
-    def attempt(adopt: bool, archive_dir: Path | None = None) -> ImportResult:
+    def attempt(adopt: bool, archive_dir: Path | None = None) -> FetchResult:
         if record is not None:
-            return import_repository(
+            return fetch_repository(
                 record["source_url"],
                 Path(record["archive_root"]),
                 case_sensitive=True,
@@ -147,7 +147,7 @@ def _fetch_one(
                 index=index,
                 timeout=timeout,
             )
-        return import_repository(
+        return fetch_repository(
             selector,
             archive_dir=archive_dir,
             case_sensitive=case_sensitive,
@@ -192,12 +192,21 @@ def _batch(
                 result = _fetch_one(
                     index, selector, case_sensitive=case_sensitive, adopt=adopt, timeout=timeout
                 )
+                record = index.get(selector)
+                record["fetch"] = {
+                    "action": result.action,
+                    "adopted": result.adopted,
+                    "storage_format": result.storage_format,
+                    "archive_path": str(result.archive_path),
+                }
                 if not as_json:
-                    for message in result.info_messages:
-                        typer.echo(message)
+                    archive_kind = "Git mirror" if result.storage_format == "git" else "bundle"
+                    if result.adopted:
+                        typer.echo(f"INFO: adopted {archive_kind}: {result.archive_path}")
+                    typer.echo(f"INFO: {result.action} {archive_kind}: {result.archive_path}")
             else:
-                check_repository(selector, index=index, timeout=timeout)
-            results.append(index.get(selector))
+                record = check_repository(selector, index=index, timeout=timeout)
+            results.append(record)
         except (DomainError, OSError, subprocess.SubprocessError) as exc:
             failed = True
             record = index.find(selector)

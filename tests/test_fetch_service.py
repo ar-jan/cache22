@@ -8,14 +8,14 @@ from unittest.mock import patch
 import pytest
 
 from cache22.archive_layout import archive_paths_for_repository
-from cache22.import_service import import_repository
+from cache22.fetch_service import fetch_repository
 from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
 
 pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 
 
-def test_import_repository_clones_git_mirror(inventory_index: Index, tmp_path: Path) -> None:
+def test_fetch_repository_clones_git_mirror(inventory_index: Index, tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
     repository = parse_repository_url("https://gitlab.com/Group/Subgroup/Cache22.git")
@@ -34,14 +34,15 @@ def test_import_repository_clones_git_mirror(inventory_index: Index, tmp_path: P
         patch("cache22.storage.find_git_executable", return_value=Path("/usr/bin/git")),
         patch("cache22.git_mirror.run_git", side_effect=fake_run),
     ):
-        result = import_repository(
+        result = fetch_repository(
             "https://gitlab.com/Group/Subgroup/Cache22.git",
             archive_dir=archive_dir,
             index=inventory_index,
         )
 
     assert result.archive_path == paths.mirror_repository
-    assert result.info_messages == ()
+    assert result.action == "created"
+    assert result.storage_format == "git" and not result.adopted
     assert clone_calls == [
         [
             "/usr/bin/git",
@@ -57,7 +58,7 @@ def test_import_repository_clones_git_mirror(inventory_index: Index, tmp_path: P
     assert paths.clone_complete_marker.exists()
 
 
-def test_import_repository_updates_existing_git_archive_with_info(
+def test_fetch_repository_updates_existing_git_archive(
     inventory_index: Index, tmp_path: Path
 ) -> None:
     archive_dir = tmp_path / "archive"
@@ -74,14 +75,15 @@ def test_import_repository_updates_existing_git_archive_with_info(
         patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
     ):
-        result = import_repository(url, archive_dir=archive_dir, index=inventory_index)
+        result = fetch_repository(url, archive_dir=archive_dir, index=inventory_index)
 
     assert result.archive_path == paths.mirror_repository
-    assert result.info_messages == (f"INFO: updated Git mirror: {paths.mirror_repository}",)
+    assert result.action == "updated"
+    assert result.storage_format == "git" and not result.adopted
     fetch.assert_called_once_with(git_executable=Path("git"), url=url, paths=paths)
 
 
-def test_import_repository_rejects_incomplete_final_clone(
+def test_fetch_repository_rejects_incomplete_final_clone(
     inventory_index: Index, tmp_path: Path
 ) -> None:
     archive_dir = tmp_path / "archive"
@@ -97,7 +99,7 @@ def test_import_repository_rejects_incomplete_final_clone(
         patch("cache22.storage.find_git_executable", return_value=Path("/usr/bin/git")),
         pytest.raises(ValueError, match="Expected a bare Git mirror"),
     ):
-        import_repository(url, archive_dir=archive_dir, index=inventory_index)
+        fetch_repository(url, archive_dir=archive_dir, index=inventory_index)
 
 
 def test_failed_clone_releases_lock_and_removes_only_incomplete_output(
@@ -122,11 +124,11 @@ def test_failed_clone_releases_lock_and_removes_only_incomplete_output(
         patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
         with pytest.raises(RuntimeError, match="git clone --mirror failed"):
-            import_repository(url, tmp_path, index=inventory_index)
+            fetch_repository(url, tmp_path, index=inventory_index)
         assert not paths.mirror_repository.exists()
         assert not paths.clone_complete_marker.exists()
         assert paths.lock_file.is_file()
-        result = import_repository(url, tmp_path, index=inventory_index)
+        result = fetch_repository(url, tmp_path, index=inventory_index)
 
     assert result.archive_path == paths.mirror_repository
     assert paths.clone_complete_marker.is_file()

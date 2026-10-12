@@ -17,7 +17,7 @@ from cache22 import git_mirror, operation, repo_service
 from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.errors import TransportError
-from cache22.import_service import import_repository
+from cache22.fetch_service import fetch_repository
 from cache22.index import Index
 from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
@@ -51,7 +51,7 @@ class Repository:
         return git(self.source, "rev-parse", "HEAD")
 
     def fetch(self) -> dict[str, Any]:
-        import_repository(URL, self.root, index=self.index)
+        fetch_repository(URL, self.root, index=self.index)
         return self.index.get(self.id)
 
 
@@ -443,7 +443,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     queue = Queue(r.index)
     scheduler = Scheduler(r.index)
     queue.enqueue(r.id)
-    result = import_repository(URL, index=r.index)
+    result = fetch_repository(URL, index=r.index)
     assert result.repository is not None
     assert result.repository["archive_root"] == str(r.root)
     assert scheduler.claim() is None
@@ -453,7 +453,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     from cache22 import config
 
     config.config_file().write_text(f'archive_dirs = ["{other_root}"]\n')
-    result = import_repository(URL, index=r.index)
+    result = fetch_repository(URL, index=r.index)
     assert result.archive_path == Path(r.index.get(r.id)["archive_path"])
 
 

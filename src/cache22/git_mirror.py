@@ -4,6 +4,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from . import operation
 from .archive_layout import ArchivePaths
@@ -25,7 +26,7 @@ def ensure_git_mirror(
     git_executable: Path,
     url: str,
     storage: RepositoryStorage,
-) -> str | None:
+) -> Literal["created", "updated"]:
     paths = storage.paths
     if paths.clone_complete_marker.exists():
         if not paths.mirror_repository.exists():
@@ -33,7 +34,7 @@ def ensure_git_mirror(
                 f"Clone marker exists but mirror repository is missing: {paths.repository_dir}"
             )
         _fetch_git_mirror(git_executable=git_executable, url=url, paths=paths)
-        return f"INFO: updated Git mirror: {paths.mirror_repository}"
+        return "updated"
 
     if paths.mirror_repository.exists():
         raise StructuralError(
@@ -69,13 +70,13 @@ def ensure_git_mirror(
         operation.progress("HEAD synchronization")
         _synchronize_head(git_executable, paths.mirror_repository, head)
         if _remote_head(git_executable, paths.mirror_repository, url) != head:
-            raise StructuralError("Remote HEAD changed during cloning; retry the import")
+            raise StructuralError("Remote HEAD changed during cloning; retry the fetch")
         storage.write_clone_marker()
     except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
         _clear_incomplete_mirror(storage)
         raise
 
-    return None
+    return "created"
 
 
 def _fetch_git_mirror(*, git_executable: Path, url: str, paths: ArchivePaths) -> None:
@@ -94,7 +95,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
     except StructuralError as exc:
         raise StructuralError(
             "Remote HEAD discovery failed; the initialized mirror was kept. "
-            "Retry the import to fetch updates."
+            "Retry the fetch to fetch updates."
         ) from exc
     operation.progress("fetching")
     refspecs = ["+refs/*:refs/*"]
@@ -126,7 +127,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
         raise TransportError(
             failure_message(
                 f"git fetch failed with exit code {exc.returncode}; "
-                "the initialized mirror was kept. Retry the import to fetch updates.",
+                "the initialized mirror was kept. Retry the fetch to fetch updates.",
                 exc,
                 url,
             )
@@ -139,7 +140,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
     except (OSError, subprocess.CalledProcessError, StructuralError) as exc:
         message = (
             "Git refs were fetched, but HEAD synchronization failed; "
-            "the mirror was kept. Retry the import to complete the update."
+            "the mirror was kept. Retry the fetch to complete the update."
         )
         if isinstance(exc, OSError):
             raise storage_error(exc, message) from exc
@@ -170,7 +171,7 @@ def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
         advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
     except subprocess.CalledProcessError as exc:
         raise TransportError(
-            failure_message("Remote HEAD discovery failed; retry the import", exc, url)
+            failure_message("Remote HEAD discovery failed; retry the fetch", exc, url)
         ) from exc
     target = oid = None
     for line in advertisement.splitlines():

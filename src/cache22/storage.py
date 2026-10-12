@@ -28,7 +28,8 @@ Format = Literal["git", "bundle"]
 @dataclass(frozen=True, slots=True)
 class StorageFetchResult:
     archive_path: Path
-    info_messages: tuple[str, ...] = ()
+    storage_format: Format
+    action: Literal["created", "updated"]
 
 
 def _empty_fields() -> dict[str, Any]:
@@ -179,14 +180,14 @@ class Repository:
         if self.is_bundle:
             source_path = parse_repository_url(url, case_sensitive=True).source_path
             return StorageFetchResult(
-                git_bundle.materialize(self._storage, source_path, update_url=url, publish=publish)
+                git_bundle.materialize(self._storage, source_path, update_url=url, publish=publish),
+                "bundle",
+                "updated",
             )
-        message = ensure_git_mirror(
+        action = ensure_git_mirror(
             git_executable=find_git_executable(), url=url, storage=self._storage
         )
-        return StorageFetchResult(
-            self.paths.mirror_repository, (message,) if message is not None else ()
-        )
+        return StorageFetchResult(self.paths.mirror_repository, "git", action)
 
     def convert_to_bundle(self, source_path: str, *, publish: Callable[[], None]) -> Path:
         return git_bundle.materialize(self._storage, source_path, publish=publish)

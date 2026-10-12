@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from cache22.cli import app
 from cache22.index import Index
-from cache22.repo_service import ImportResult
+from cache22.repo_service import FetchResult
 from cache22.repository_ref import parse_repository_url
 
 URL = "https://github.com/ar-jan/cache22.git"
@@ -35,7 +35,7 @@ def test_fetch_url_reports_missing_archive_dir_without_traceback(
 
 
 def test_fetch_unknown_key_is_rejected_without_registration(runner: CliRunner) -> None:
-    with patch("cache22.repo_cli.import_repository", side_effect=AssertionError) as call:
+    with patch("cache22.repo_cli.fetch_repository", side_effect=AssertionError) as call:
         result = runner.invoke(app, ["fetch", KEY])
 
     assert result.exit_code == 1
@@ -44,7 +44,9 @@ def test_fetch_unknown_key_is_rejected_without_registration(runner: CliRunner) -
 
 
 def test_fetch_new_url_registers_and_passes_options(runner: CliRunner, tmp_path: Path) -> None:
-    with patch("cache22.repo_cli.import_repository", return_value=ImportResult(tmp_path)) as call:
+    with patch(
+        "cache22.repo_cli.fetch_repository", return_value=FetchResult(tmp_path, "git", "created")
+    ) as call:
         result = runner.invoke(app, ["fetch", URL, "--case-sensitive"])
 
     # The mocked import registers nothing, so the summary row falls back to the selector.
@@ -69,10 +71,8 @@ def test_fetch_indexed_key_uses_stored_binding_and_reports_info(
     archive_path = tmp_path / "archive" / "github.com" / "ar-jan" / "cache22" / "cache22.git"
 
     with patch(
-        "cache22.repo_cli.import_repository",
-        return_value=ImportResult(
-            archive_path, info_messages=(f"INFO: updated Git mirror: {archive_path}",)
-        ),
+        "cache22.repo_cli.fetch_repository",
+        return_value=FetchResult(archive_path, "git", "updated"),
     ) as call:
         result = runner.invoke(app, ["fetch", KEY])
 
@@ -85,17 +85,39 @@ def test_fetch_indexed_key_uses_stored_binding_and_reports_info(
     assert lines[1].startswith(KEY)
 
 
-def test_fetch_json_suppresses_info_messages(runner: CliRunner, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "storage_format,action,adopted,noun",
+    [
+        ("git", "created", False, "Git mirror"),
+        ("git", "updated", False, "Git mirror"),
+        ("git", "updated", True, "Git mirror"),
+        ("bundle", "updated", False, "bundle"),
+    ],
+)
+def test_fetch_json_and_text_describe_the_same_outcome(
+    runner: CliRunner, tmp_path: Path, storage_format: Any, action: Any, adopted: bool, noun: str
+) -> None:
     register(tmp_path / "archive")
     with patch(
-        "cache22.repo_cli.import_repository",
-        return_value=ImportResult(tmp_path, info_messages=("INFO: noise",)),
+        "cache22.repo_cli.fetch_repository",
+        return_value=FetchResult(tmp_path, storage_format, action, adopted=adopted),
     ):
         result = runner.invoke(app, ["fetch", KEY, "--json"])
+        rendered = runner.invoke(app, ["fetch", KEY])
 
     assert result.exit_code == 0, result.output
     assert "INFO" not in result.output
-    assert json.loads(result.output)[0]["repo_key"] == KEY
+    row = json.loads(result.output)[0]
+    assert row["repo_key"] == KEY
+    assert row["fetch"] == {
+        "action": action,
+        "adopted": adopted,
+        "storage_format": storage_format,
+        "archive_path": str(tmp_path),
+    }
+    assert rendered.exit_code == 0, rendered.output
+    assert f"INFO: {action} {noun}: {tmp_path}" in rendered.output
+    assert (f"INFO: adopted {noun}: {tmp_path}" in rendered.output) is adopted
 
 
 def test_fetch_requires_selectors_or_all(runner: CliRunner) -> None:

@@ -26,13 +26,12 @@ from .index import Index, repository_key
 from .job_operation import running_job
 from .repository_ref import RepositoryRef, parse_repository_url
 from .scheduler import Scheduler
-from .storage import Repository, absent_fields
+from .storage import Repository, StorageFetchResult, absent_fields
 
 
 @dataclass(frozen=True, slots=True)
-class ImportResult:
-    archive_path: Path
-    info_messages: tuple[str, ...] = ()
+class FetchResult(StorageFetchResult):
+    adopted: bool = False
     repository: dict[str, Any] | None = None
 
 
@@ -93,7 +92,7 @@ def check_repository(selector: str | int, *, index: Index, timeout: float = 120)
 
 def fetch_locked(
     index: Index, record: dict[str, Any], *, url: str, adopt: bool = False
-) -> ImportResult:
+) -> FetchResult:
     repository = parse_repository_url(url, case_sensitive=True)
     resolved_archive_dir = normalize_archive_dir(Path(record["archive_root"]))
     index.update(record["id"], reconciliation_required=True)
@@ -123,24 +122,17 @@ def fetch_locked(
             fetched = repo.fetch(
                 repository.clone_url, publish=lambda: publish_local(index, record, repo)
             )
-            result = ImportResult(fetched.archive_path, fetched.info_messages)
             publish_local(index, record, repo)
             if index.get(record["id"])["local_state"] != "ready":
-                raise StructuralError("Imported mirror could not be validated for the inventory")
+                raise StructuralError("Fetched repository could not be validated for the inventory")
             # A transport failure in this optional probe does not fail the fetch job.
             try:
                 publish_remote(index, record)
             except TransportError:
                 pass
-            if adopted:
-                return ImportResult(
-                    result.archive_path,
-                    (
-                        f"INFO: adopted Git mirror: {repo.paths.mirror_repository}",
-                        *result.info_messages,
-                    ),
-                )
-            return result
+            return FetchResult(
+                fetched.archive_path, fetched.storage_format, fetched.action, adopted=adopted
+            )
         except DomainError, OSError, subprocess.SubprocessError:
             # Observe refs even when a fetch updated them but HEAD publication failed.
             try:
@@ -183,11 +175,11 @@ def execute_job(
     adopt: bool = False,
     source_url: str | None = None,
     cancel: threading.Event | None = None,
-) -> Any:
+) -> FetchResult | Path | None:
     scheduler = Scheduler(index)
     record = index.get(job["repository_id"])
     kind = job["kind"]
-    result: Any = None
+    result: FetchResult | Path | None = None
     try:
         timeout = {"check": check_timeout, "fetch": fetch_timeout, "convert": convert_timeout}[kind]
         with running_job(scheduler.queue, job, timeout, cancel):

@@ -18,14 +18,14 @@ from cache22.archive_storage import repository_operation
 from cache22.cli import app
 from cache22.config import add_archive_dir
 from cache22.errors import RepositoryBusyError, StructuralError
-from cache22.import_service import import_repository
+from cache22.fetch_service import fetch_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
 from cache22.inventory_service import list_inventory
 from cache22.job_queue import Queue
 from cache22.manager_service import bulk_command, queue_snapshot
 from cache22.repo_audit import audit
-from cache22.repo_service import check_repository, execute_job
+from cache22.repo_service import FetchResult, check_repository, execute_job
 from cache22.repository_ref import parse_repository_url
 from cache22.scheduler import Scheduler
 from cache22.worker import run_worker
@@ -54,8 +54,8 @@ class Repo:
         git(self.source, "commit", "-m", message)
         return git(self.source, "rev-parse", "HEAD")
 
-    def fetch(self) -> Any:
-        return import_repository(URL, self.root, index=self.index)
+    def fetch(self) -> FetchResult:
+        return fetch_repository(URL, self.root, index=self.index)
 
     def convert(self) -> Path:
         queue = Queue(self.index)
@@ -63,7 +63,9 @@ class Repo:
         job_id = queue.enqueue(self.id, "convert")
         job = scheduler.claim(job_id)
         assert job is not None
-        return execute_job(self.index, job)
+        result = execute_job(self.index, job)
+        assert isinstance(result, Path)
+        return result
 
 
 @pytest.fixture
@@ -159,7 +161,10 @@ def test_bundle_checks_and_fetches_follow_remote_refs(repo: Repo) -> None:
     git(repo.source, "branch", "-D", "deleted")
     git(repo.source, "tag", "-d", "old")
     assert check_repository(repo.id, index=repo.index)["remote_status"] == "updates_available"
-    repo.fetch()
+    result = repo.fetch()
+    assert result.storage_format == "bundle" and result.action == "updated"
+    assert not result.adopted
+    assert result.archive_path != old_bundle and result.archive_path.is_file()
     assert not old_bundle.exists()
     assert repo.index.get(repo.id)["local_head_oid"] == second
     git(repo.source, "reset", "--hard", first)
@@ -435,7 +440,7 @@ def test_direct_import_updates_existing_bundle(repo: Repo) -> None:
     repo.fetch()
     repo.convert()
     second = repo.commit("second")
-    result = import_repository(URL, index=repo.index)
+    result = fetch_repository(URL, index=repo.index)
     assert result.archive_path.suffix == ".bundle"
     assert repo.index.get(repo.id)["local_head_oid"] == second
     assert not repo.paths.mirror_repository.exists()

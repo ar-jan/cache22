@@ -65,6 +65,12 @@ errors. Continuous worker output is one JSON result per line. Exit codes are 0
 for success, 1 for operational failures/audit discrepancies, and 2 for usage errors.
 Use `cache22 COMMAND --help` for defaults and argument descriptions.
 
+Each successful `fetch --json` row includes a `fetch` object with `action`
+(`created` or `updated`), `adopted`, `storage_format`, and `archive_path`.
+Text output describes the same facts before the inventory rows. Adoption is
+reported separately from the update performed after adoption. Bundle fetches
+report the newly published generation's path.
+
 List sorting supports `repo_key` (default), `project_name`,
 `local_head_committed_at`, `last_checked_at`, `last_fetched_at`, `last_converted_at`,
 and `remote_status`.
