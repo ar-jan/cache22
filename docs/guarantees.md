@@ -249,6 +249,19 @@ Errors are stored only on job attempts. Job inspection exposes a derived
 `diagnostic` separately from the current attempt and progress, with no duplicate
 job-level `error` or `error_category` fields.
 
+Expected failures carry an explicit domain category. Structural validation takes
+precedence over an underlying OS cause: missing required mirror content is a
+structural problem, while unavailable storage defers work. Claim loss and
+interruption remain separate control paths. Unexpected exceptions are recorded as
+`unexpected` and re-raised; the worker stops, and the failure neither blocks the
+schedule nor enters transport retry policy.
+
+Error output and persisted diagnostics share credential sanitization. Streaming
+Git output is sanitized before truncation; lines over 64 KiB are omitted with an
+explicit marker rather than retaining a potentially sensitive fragment. Progress
+and diagnostic messages remain bounded, and ordinary final Git errors survive
+preceding progress chatter.
+
 `jobs --state failed` shows the latest failed or interrupted completed attempt per
 problem job, including retries. Its diagnostic stays visible while another attempt
 runs; succeeded and cancelled jobs are excluded. A separate successful job does

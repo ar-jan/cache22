@@ -1,12 +1,13 @@
 # Remaining architecture and simplification issues
 
-Reviewed against `3c9ce9a` on 2026-09-23. This document evaluates remaining
-problems and design choices in the current implementation. Recommendations are
-not commitments to implement every possible simplification. Schema changes follow
+Originally reviewed against `3c9ce9a` on 2026-09-23. Re-evaluated against
+`db5ab61` on 2026-10-12, then updated with the implementation on
+`feature/simplify2`. Sections 1–7 are complete. Recommendations below are not
+commitments to implement every possible simplification. Schema changes follow
 the project's greenfield policy: reject unsupported versions rather than add
 compatibility migrations or silently reset data.
 
-## Recommended order
+## Implementation and next steps
 
 1. **Completed:** separate index initialization from ordinary access and remove
    repeated schema introspection.
@@ -14,11 +15,19 @@ compatibility migrations or silently reset data.
    `project_name`; combine these schema edits in version 4.
 3. **Completed:** establish a shared inventory query model and replace Datasette
    with a focused Cache22 web application.
-4. Improve domain errors and operation results, extract pure diagnostics, and
-   centralize observation-state interpretation.
+4. **Completed in separate commits:** extract diagnostics and fix streaming
+   redaction (`cfcde57`); introduce domain errors (`86279cd`); return structured
+   fetch outcomes and share registration target selection (`88962fa`); centralize
+   observation-state interpretation in the commit accompanying this update.
+5. **Next decision:** measure representative mirror and bundle workflows, then
+   settle the archival end state and align the storage requirements (section 9).
+6. **Deferred:** further schema consolidation needs measured benefit (section 8);
+   on-disk metadata changes need the storage decision and a recovery design
+   (section 10). Remaining naming and repository organization are opportunistic
+   (section 11).
 
-Storage defaults and on-disk metadata deserve separate decisions. Neither should
-block the index or web work. Naming and repository organization are lower priority.
+The completed simplifications retain schema version 4 and the existing on-disk
+layout. Storage policy and metadata consolidation remain separate work.
 
 ## 1. Index initialization is explicit — completed
 
@@ -134,75 +143,83 @@ These are smoke measurements, not latency guarantees. The earlier baseline used
 fewer diagnostics and timed individual reads rather than complete page snapshots;
 it is not a controlled before/after speed comparison.
 
-## 5. Error classification and result presentation cross layer boundaries
+## 5. Domain errors and structured outcomes — completed
 
-**Evidence.** [repo_service.py](../src/cache22/repo_service.py) classifies failures
-with `isinstance` checks and recursive cause inspection in `category_for`.
-Adapters and services catch overlapping exception tuples. `ImportResult` and
-`StorageFetchResult` carry formatted `INFO:` messages generated below the CLI.
+[errors.py](../src/cache22/errors.py) defines a small shared model for transport,
+unavailable storage, busy repositories, and structural failures. Expected
+validation failures are explicit; filesystem and Git failures are translated at
+boundaries with the relevant context. `repo_service` no longer walks exception
+causes to guess a category. For example, missing required content inside a mirror
+is structural even when its underlying cause is `FileNotFoundError`; an
+unavailable storage root defers work.
 
-**Recommendation — introduce domain errors and structured outcomes.** Define a
-small shared error model for expected domain failures, with deliberate categories
-for transport, unavailable storage, busy storage, and structural problems. Translate
-OS/Git failures at the boundary that has enough context to classify them. Keep
-retry/defer decisions in the scheduler. Preserve distinct claim-loss and interruption
-control paths instead of turning them into ordinary retryable failures.
+The scheduler still owns retry/defer policy. Busy and unavailable storage defer
+for one minute without consuming retries; transport keeps the existing backoff;
+structural errors keep the existing schedule-blocking rules, including the
+conversion exception. Claim loss never finalizes another owner's attempt, and
+interruption retains its recovery path. Unexpected exceptions are recorded as
+`unexpected` and re-raised; the worker stops rather than quietly treating a defect
+as an expected structural failure. Unexpected failures do not block schedules or
+enter transport retry policy.
 
-Return structured fetch/adoption facts and let CLI/web adapters phrase the output.
-This makes category behavior and presentation easier to inspect. Avoid a class per
-message and a catch-all wrapper that hides programming errors. Centralize
-credential sanitization before diagnostics are persisted or returned.
+[diagnostics.py](../src/cache22/diagnostics.py) provides shared error rendering for
+attempt persistence, CLI, audit, and browser responses. Input parsing translates
+expected errors locally; CLI/web adapters no longer blanket-handle programming
+`RuntimeError`, `ValueError`, or `TypeError` exceptions as user failures.
 
-**Acceptance.** Existing retry/defer schedules, structural blocking, interruption,
-and lost-claim behavior remain correct. Credential-bearing diagnostics stay
-sanitized. Text rendering and JSON output describe the same outcomes without
-embedding CLI prose in storage results.
+`StorageFetchResult` now carries the archive path, format, and created/updated
+action. The service's `FetchResult` adds adoption and an inventory snapshot.
+`git_mirror.ensure_git_mirror` returns an action instead of CLI prose. The CLI
+renders these facts and includes the same facts in each successful JSON row's
+`fetch` object. Bundle updates report the newly published generation path.
 
-## 6. Operation code still combines pure diagnostics and execution context
+Tests cover category precedence over chained causes, retry/defer and blocking,
+unexpected failures propagating through worker/CLI/web, credential redaction,
+text/JSON agreement, creation, updates, adoption, and bundle generations. Existing
+interruption, claim-loss, and publication tests remain in place.
 
-**Evidence.** [operation.py](../src/cache22/operation.py) contains sanitization,
-failure-message extraction, Git-progress parsing/publication, subprocess handling,
-claim/deadline fencing, and inherited-lock context variables.
-[job_operation.py](../src/cache22/job_operation.py) owns heartbeat and job lifecycle.
+## 6. Pure diagnostics and execution context are separated — completed
 
-**Recommendation — make a small extraction first.** Move sanitization,
-failure-message extraction, and a pure Git-progress parser into a diagnostics
-module. Let the parser return a structured snapshot; keep publishing progress and
-consulting the current operation in the execution layer. Preserve bounded output
-and sanitization before truncation.
+[diagnostics.py](../src/cache22/diagnostics.py) owns sanitization, bounded failure
+messages, a pure progress parser returning a structured snapshot, and bounded Git
+output framing. [operation.py](../src/cache22/operation.py) retains progress
+publication, subprocess management, deadline/claim checks, and inherited locks.
 
-Defer wholesale replacement of context variables with explicit arguments.
-`current_operation` fences inventory writes as well as subprocesses, and inherited
-lock descriptors keep locks alive when a parent dies. Threading those dependencies
-through every storage/Git path would be a separate high-risk change without a
-currently demonstrated correctness benefit. Document these dependencies at the
-service and storage boundaries instead.
+The evaluation reproduced a credential fragment leaking into progress when raw
+output was truncated before URL sanitization. Streaming output now frames complete
+CR/LF-delimited lines across reads and sanitizes them before truncation, retention,
+or publication. Lines exceeding 64 KiB are omitted in full with an explicit
+marker, then parsing resumes at the next delimiter. This bounds memory without
+retaining a partial credential-bearing URL. Retained stderr remains bounded at
+64 KiB and diagnostics at 4,000 characters. Normal final error lines survive
+preceding progress chatter.
 
-**Acceptance.** Malformed progress remains harmless, credentials stay redacted,
-claim loss prevents writes, cancellation kills Git before locks are released,
-and child processes retain required lock descriptors. Reuse the existing
-operation and locking tests; add only focused parser coverage where needed.
+Focused tests cover split reads, oversized lines, malformed counters, final-error
+retention, and redaction of both progress and retained failures. Existing tests
+cover claim fencing, process cancellation, heartbeat cleanup, and inherited locks.
+Service and storage docstrings document their operation-context dependencies.
 
-## 7. Interpretation of prior observation state is repeated
+Wholesale replacement of context variables remains deferred. `current_operation`
+fences inventory writes as well as subprocesses, and inherited lock descriptors
+keep locks alive when a parent dies. Threading those dependencies through every
+storage/Git path remains separate work without a demonstrated correctness benefit.
 
-**Evidence.** [repo_service.py](../src/cache22/repo_service.py) and
-[repo_audit.py](../src/cache22/repo_audit.py) repeatedly derive `previously_ready`
-from `local_state` before calling storage observation helpers. Inventory also
-uses `reconciliation_required` to decide whether remote status is trustworthy.
+## 7. Prior observation interpretation is shared — completed
 
-**Recommendation — centralize interpretation, retain the two dimensions.** Put
-prior-state interpretation in one service-layer helper. Do not make the storage
-facade depend on inventory records or scheduling policy merely to remove repeated
-expressions.
+[observation_service.py](../src/cache22/observation_service.py) interprets the prior
+inventory state once and obtains local fields for both normal operations and
+audit. Storage receives the source path, selected format, and prior-readiness flag;
+it does not depend on inventory records or scheduling policy. Callers retain
+ownership of publication and claim fencing.
 
-Keep reconciliation/freshness independent of the last-known local state. A single
-`stale` state would discard whether the repository was previously ready, missing,
-or never fetched, unless that information were stored elsewhere. This is a small
-readability improvement, not justification for a schema redesign.
+Reconciliation/freshness remains independent of last-known local state. An
+interruption marks observations untrusted without discarding whether the archive
+was previously ready, missing, or never fetched. There is no schema change or
+combined `stale` state.
 
-**Acceptance.** Interrupted work makes observations untrusted without losing the
-absent-versus-missing distinction; audit and normal operations interpret prior
-state consistently.
+Integration tests compare audit repair with normal checking across absent, ready,
+missing, and incomplete prior states, with and without interruption. Repeated
+reconciliation keeps missing storage distinct from never-fetched storage.
 
 ## 8. Further progress and schedule schema consolidation has uncertain payoff
 
@@ -278,19 +295,20 @@ archive-safety tests to identify meaningful additional cases.
 
 ## 11. Smaller naming and repository-organization work
 
-**Evidence.** [import_service.py](../src/cache22/import_service.py) still names
-its fetch entry point `import_repository` and overlaps registration/root-selection
-logic with `registration_target`. URL selector normalization belongs to `Index`,
-while URL parsing and effective remote casing belong to `repository_ref`.
-The root [package.json](../package.json) serves the unrelated
-[editor experiment](../utils/editor/README.md).
+**Completed alongside fetch outcomes.**
+[fetch_service.py](../src/cache22/fetch_service.py) exposes `fetch_repository` and
+uses the shared `registration_target` resolver. The former import service and
+result names are removed without aliases. Fetch retains its explicit
+import/adoption binding rules; register-only validation remains distinct. Existing
+source-binding, selected-root, and interactive adoption tests cover this sharing.
 
-**Recommendation — handle opportunistically.** Use fetch-oriented names and
-consolidate registration decisions when those paths are next changed. Preserve
-the distinction between fetch's import/adoption binding rules and register-only
-validation; sharing code must not erase it. Keep selector normalization in one
-shared resolver rather than duplicating it in CLI and web adapters. Moving it out
-of `Index` is worthwhile only alongside a clearer service interface.
+**Remaining recommendation — handle opportunistically.** URL selector
+normalization still belongs to `Index`, while URL parsing and effective remote
+casing belong to `repository_ref`. Keep selector normalization in one shared
+resolver rather than duplicating it in CLI and web adapters. Moving it out of
+`Index` is worthwhile only alongside a clearer service interface.
+The root [package.json](../package.json) still serves the unrelated
+[editor experiment](../utils/editor/README.md).
 
 If the editor continues growing, move it and its package tooling under an explicit
 experiment boundary. Do not create a separate repository merely to shorten the

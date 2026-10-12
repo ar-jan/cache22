@@ -16,8 +16,9 @@ from .config import list_archive_dirs
 from .diagnostics import error_text
 from .errors import DomainError, StructuralError
 from .index import Index, repository_key
+from .observation_service import observe_local
 from .repository_ref import parse_repository_url, validate_storage_component
-from .storage import Repository, absent_fields
+from .storage import Repository
 
 
 def register_storage(index: Index, root: Path, repo: Repository) -> dict[str, Any]:
@@ -128,11 +129,7 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                             continue
                         record = index.add(ref, root)
                         records[key] = record
-                    fields = repo.observe_local(
-                        record["source_path"],
-                        previously_ready=record["local_state"] in {"ready", "missing"},
-                        expected_format=record["storage_format"],
-                    )
+                    fields = observe_local(record, repo)
                     changed = (
                         any(record[k] != v for k, v in fields.items())
                         or record["reconciliation_required"]
@@ -202,16 +199,7 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                     and any(paths.repository_dir.iterdir())
                 ):
                     raise StructuralError("Expected repository has unowned or invalid storage")
-                previously_ready = record["local_state"] in {"ready", "missing"}
-                fields = (
-                    absent_fields(previously_ready)
-                    if repo is None
-                    else repo.observe_local(
-                        record["source_path"],
-                        previously_ready=previously_ready,
-                        expected_format=record["storage_format"],
-                    )
-                )
+                fields = observe_local(record, repo)
                 if (
                     any(record[k] != v for k, v in fields.items())
                     or record["reconciliation_required"]

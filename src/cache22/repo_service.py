@@ -24,9 +24,10 @@ from .errors import (
 from .git_observation import remote_fields, remote_snapshot
 from .index import Index, repository_key
 from .job_operation import running_job
+from .observation_service import observe_local
 from .repository_ref import RepositoryRef, parse_repository_url
 from .scheduler import Scheduler
-from .storage import Repository, StorageFetchResult, absent_fields
+from .storage import Repository, StorageFetchResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,16 +60,7 @@ def add_repository(
 def publish_local(index: Index, record: dict[str, Any], repo: Repository | None) -> None:
     operation.progress("index publication")
     operation.guard()
-    previously_ready = record["local_state"] in {"ready", "missing"}
-    fields = (
-        absent_fields(previously_ready)
-        if repo is None
-        else repo.observe_local(
-            record["source_path"],
-            previously_ready=previously_ready,
-            expected_format=record["storage_format"],
-        )
-    )
+    fields = observe_local(record, repo)
     index.update(
         record["id"], **fields, local_observed_at=index.now(), reconciliation_required=False
     )
