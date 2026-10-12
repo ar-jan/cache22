@@ -14,9 +14,10 @@ from typer.testing import CliRunner
 
 from cache22 import git_bundle, operation
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
-from cache22.archive_storage import RepositoryBusyError, repository_operation
+from cache22.archive_storage import repository_operation
 from cache22.cli import app
 from cache22.config import add_archive_dir
+from cache22.errors import RepositoryBusyError, StructuralError
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
@@ -210,8 +211,9 @@ def test_publication_interruption_keeps_recoverable_source(
             raise OSError("injected publication failure")
 
         monkeypatch.setattr(git_bundle.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="injected"):
+    with pytest.raises(StructuralError, match="injected") as caught:
         repo.convert()
+    assert isinstance(caught.value.__cause__, OSError)
     assert repo.paths.mirror_repository.is_dir()
     assert repo.paths.bundle_manifest.exists() == after_publication
     monkeypatch.undo()

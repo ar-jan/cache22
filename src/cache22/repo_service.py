@@ -6,7 +6,6 @@ their transaction, while Git subprocesses consult its deadline and cancellation.
 
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -14,9 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from . import operation
-from .archive_storage import RepositoryBusyError
 from .config import default_archive_dir, normalize_archive_dir
-from .diagnostics import sanitize
+from .diagnostics import error_text
+from .errors import (
+    DomainError,
+    StorageUnavailableError,
+    StructuralError,
+    TransportError,
+)
 from .git_observation import remote_fields, remote_snapshot
 from .index import Index, repository_key
 from .job_operation import running_job
@@ -53,25 +57,6 @@ def add_repository(
     return index.add(ref, target)
 
 
-def category_for(exc: BaseException) -> str:
-    if isinstance(exc, RepositoryBusyError):
-        return "busy"
-    if isinstance(exc, (operation.ClaimLostError, operation.OperationInterrupted)):
-        return "interrupted"
-    if isinstance(exc, (FileNotFoundError, PermissionError)):
-        return "unavailable"
-    if isinstance(exc, (operation.TransportError, subprocess.TimeoutExpired)):
-        return "transport"
-    if exc.__cause__ is not None:
-        return category_for(exc.__cause__)
-    return "structural"
-
-
-def error_text(exc: BaseException, url: str) -> str:
-    # Do not copy credential-bearing clone URLs into persisted diagnostics.
-    return sanitize(str(exc), url)
-
-
 def publish_local(index: Index, record: dict[str, Any], repo: Repository | None) -> None:
     operation.progress("index publication")
     operation.guard()
@@ -98,7 +83,7 @@ def publish_remote(index: Index, record: dict[str, Any]) -> None:
 
 def check_repository(selector: str | int, *, index: Index, timeout: float = 120) -> dict[str, Any]:
     if timeout <= 0:
-        raise ValueError("Operation timeout must be positive")
+        raise StructuralError("Operation timeout must be positive")
     record = index.get(selector)
     scheduler = Scheduler(index)
     job = scheduler.immediate(record["id"], "check")
@@ -126,7 +111,7 @@ def fetch_locked(
         prepare=prepare,
     ) as repo:
         if repo is None:
-            raise ValueError("Selected bundle storage is missing; restore it before fetching")
+            raise StructuralError("Selected bundle storage is missing; restore it before fetching")
         operation.guard()
         repo.require_selected_format(record["storage_format"])
         repo.bind_source(repository.source_path)
@@ -141,11 +126,11 @@ def fetch_locked(
             result = ImportResult(fetched.archive_path, fetched.info_messages)
             publish_local(index, record, repo)
             if index.get(record["id"])["local_state"] != "ready":
-                raise ValueError("Imported mirror could not be validated for the inventory")
+                raise StructuralError("Imported mirror could not be validated for the inventory")
             # A transport failure in this optional probe does not fail the fetch job.
             try:
                 publish_remote(index, record)
-            except operation.TransportError:
+            except TransportError:
                 pass
             if adopted:
                 return ImportResult(
@@ -156,11 +141,11 @@ def fetch_locked(
                     ),
                 )
             return result
-        except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
+        except DomainError, OSError, subprocess.SubprocessError:
             # Observe refs even when a fetch updated them but HEAD publication failed.
             try:
                 publish_local(index, record, repo)
-            except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
+            except DomainError, OSError, subprocess.SubprocessError:
                 pass
             raise
         finally:
@@ -170,17 +155,19 @@ def fetch_locked(
 def check_locked(index: Index, record: dict[str, Any]) -> None:
     root = Path(record["archive_root"])
     if not root.is_dir():
-        raise FileNotFoundError(f"Archive root unavailable: {root}")
+        raise StorageUnavailableError(f"Archive root unavailable: {root}")
     ref = parse_repository_url(record["source_url"], case_sensitive=True)
     paths = Repository.paths_for(root, ref)
     with Repository.open(root, ref) as repo:
         operation.guard()
         if repo is None and paths.repository_dir.exists() and any(paths.repository_dir.iterdir()):
             index.update(record["id"], local_state="incomplete", reconciliation_required=True)
-            raise ValueError("Existing storage is unowned; explicit verified adoption is required")
+            raise StructuralError(
+                "Existing storage is unowned; explicit verified adoption is required"
+            )
         publish_local(index, record, repo)
         if index.get(record["id"])["local_state"] == "incomplete":
-            raise ValueError(
+            raise StructuralError(
                 "Archive is incomplete; explicit cleanup or verified adoption is required"
             )
         publish_remote(index, record)
@@ -211,7 +198,9 @@ def execute_job(
                 result = convert_locked(index, record)
             else:
                 if not Path(record["archive_root"]).is_dir():
-                    raise FileNotFoundError(f"Archive root unavailable: {record['archive_root']}")
+                    raise StorageUnavailableError(
+                        f"Archive root unavailable: {record['archive_root']}"
+                    )
                 result = fetch_locked(
                     index,
                     record,
@@ -221,12 +210,16 @@ def execute_job(
     except operation.OperationInterrupted, KeyboardInterrupt:
         scheduler.interrupt(job)
         raise
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, sqlite3.Error) as exc:
-        category = category_for(exc)
-        message = error_text(exc, record["source_url"])
-        if not isinstance(exc, operation.ClaimLostError):
-            # Queue finalization validates the claim after the operation context exits.
-            scheduler.finish(job, category=category, error=message)
+    except operation.ClaimLostError:
+        # A former owner must not finalize the new owner's attempt.
+        raise
+    except DomainError as exc:
+        scheduler.finish(job, category=exc.category, error=error_text(exc, record["source_url"]))
+        raise
+    except Exception as exc:
+        # Persist evidence without disguising defects as expected storage failures.
+        # The worker lets these exceptions escape and stop its execution loop.
+        scheduler.finish(job, category="unexpected", error=error_text(exc, record["source_url"]))
         raise
     else:
         scheduler.finish(job)
@@ -238,7 +231,7 @@ def convert_locked(index: Index, record: dict[str, Any]) -> Path:
     ref = parse_repository_url(record["source_url"], case_sensitive=True)
     with Repository.open(root, ref) as repo:
         if repo is None:
-            raise ValueError("Conversion requires an existing Cache22-managed repository")
+            raise StructuralError("Conversion requires an existing Cache22-managed repository")
         repo.require_selected_format(record["storage_format"])
         index.update(record["id"], reconciliation_required=True)
         result = repo.convert_to_bundle(

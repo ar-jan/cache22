@@ -170,7 +170,7 @@ def test_failed_clone_and_interrupted_cleanup_allow_rebinding(
     ("metadata", "message"),
     [
         ("{}", "Malformed source metadata"),
-        ("{", "Expecting property name enclosed in double quotes"),
+        ("{", "Malformed source metadata"),
         ('{"source_path": 3}', "Malformed source metadata"),
         ('{"source_path":"HOST/team/repo"}', "Malformed source metadata"),
     ],

@@ -22,7 +22,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .. import inventory_service as inventory
 from .. import manager_service as service
 from ..config import list_archive_dirs
-from ..diagnostics import sanitize
+from ..diagnostics import error_text
+from ..errors import DomainError, StructuralError
 from ..index import Index
 
 ASSETS = Path(__file__).parent
@@ -87,10 +88,17 @@ def _render(request: Request, template: str, **context: Any) -> Response:
 
 
 async def invalid(request: Request, exc: Exception) -> Response:
-    message = sanitize(str(exc))
+    message = error_text(exc)
     if request.url.path.startswith("/api/") or request.url.path.endswith((".json", ".csv")):
         return JSONResponse({"error": message}, status_code=400)
     return TEMPLATES.TemplateResponse(request, "error.html", {"error": message}, status_code=400)
+
+
+def query_integer(request: Request, name: str) -> int:
+    try:
+        return int(request.query_params.get(name, "0"))
+    except ValueError as exc:
+        raise StructuralError(f"{name} must be an integer") from exc
 
 
 async def inventory_view(request: Request) -> Response:
@@ -162,35 +170,38 @@ async def api(request: Request) -> Response:
             result = await asyncio.to_thread(
                 service.detail,
                 index,
-                int(request.query_params.get("id", "0")),
-                offset=int(request.query_params.get("offset", "0")),
+                query_integer(request, "id"),
+                offset=query_integer(request, "offset"),
             )
         else:
             result = await asyncio.to_thread(
                 service.queue_snapshot,
                 index,
                 section=request.query_params.get("section", "running"),
-                offset=int(request.query_params.get("offset", "0")),
+                offset=query_integer(request, "offset"),
             )
             if endpoint == "health":
                 result = {"workers": result["workers"], "observed_at": result["observed_at"]}
     else:
-        data = json.loads(await request.body())
+        try:
+            data = json.loads(await request.body())
+        except (ValueError, UnicodeError) as exc:
+            raise StructuralError("Expected valid JSON") from exc
         if not isinstance(data, dict):
-            raise ValueError("Expected a JSON object")
+            raise StructuralError("Expected a JSON object")
         if endpoint in {"preview", "register"}:
             urls = data.get("urls")
             if not isinstance(urls, str):
-                raise ValueError("urls must be newline-separated text")
+                raise StructuralError("urls must be newline-separated text")
             root = data.get("root")
             roots = await asyncio.to_thread(list_archive_dirs)
             if root is not None and (
                 not isinstance(root, str) or root not in {str(p) for p in roots}
             ):
-                raise ValueError("Choose a configured archive root")
+                raise StructuralError("Choose a configured archive root")
             for flag in ("case_sensitive", "fetch"):
                 if type(data.get(flag, False)) is not bool:
-                    raise ValueError(f"{flag} must be boolean")
+                    raise StructuralError(f"{flag} must be boolean")
             result = {
                 "results": await asyncio.to_thread(
                     service.register_batch,
@@ -209,7 +220,7 @@ async def api(request: Request) -> Response:
                 or not isinstance(action, str)
                 or (every is not None and not isinstance(every, str))
             ):
-                raise ValueError("Expected ids list, action string, and optional every string")
+                raise StructuralError("Expected ids list, action string, and optional every string")
             result = {
                 "results": await asyncio.to_thread(
                     service.bulk_command, index, ids, action, every=every
@@ -218,7 +229,7 @@ async def api(request: Request) -> Response:
         else:
             query = data.get("query", "")
             if not isinstance(query, str):
-                raise ValueError("query must be a query string")
+                raise StructuralError("query must be a query string")
             selection = inventory.parse_query(query)
             result = {
                 "ids": await asyncio.to_thread(inventory.selected_ids, index, selection.query)
@@ -247,8 +258,7 @@ def create_app(path: Path | None = None) -> Starlette:
             Mount("/static", StaticFiles(directory=ASSETS / "static")),
         ],
         exception_handlers={
-            exception: invalid
-            for exception in (ValueError, TypeError, OverflowError, OSError, sqlite3.Error)
+            exception: invalid for exception in (DomainError, OSError, sqlite3.Error)
         },
         max_body_size=2 * 1024 * 1024,
     )

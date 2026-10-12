@@ -12,6 +12,7 @@ from .archive_storage import (
     open_archive_directory,
 )
 from .config import list_archive_dirs, normalize_archive_dir
+from .errors import StructuralError
 from .index import Index
 from .repo_audit import register_storage
 from .repo_service import publish_local
@@ -51,7 +52,7 @@ def _resolve_archive_dirs(archive_dirs: Sequence[Path] | None) -> tuple[Path, ..
     if archive_dirs is None:
         archive_dirs = list_archive_dirs()
         if not archive_dirs:
-            raise ValueError(
+            raise StructuralError(
                 "No archive roots configured. Add one with 'cache22 config root add PATH'"
             )
     return tuple(normalize_archive_dir(archive_dir) for archive_dir in archive_dirs)

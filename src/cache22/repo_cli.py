@@ -24,6 +24,8 @@ from .cli_support import (
     command,
     output,
 )
+from .diagnostics import error_text
+from .errors import DomainError, StructuralError
 from .import_service import import_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
@@ -133,7 +135,7 @@ def _fetch_one(
     """Fetch an indexed repository, or register and fetch a new clone URL."""
     record = index.find(selector)
     if record is None and not is_repository_url(selector):
-        raise ValueError(f"Repository is not indexed: {selector}")
+        raise StructuralError(f"Repository is not indexed: {selector}")
 
     def attempt(adopt: bool, archive_dir: Path | None = None) -> ImportResult:
         if record is not None:
@@ -159,11 +161,13 @@ def _fetch_one(
     except AdoptionRequiredError as exc:
         if adopt or not _is_interactive():
             raise
-        typer.echo(exc.conflict_message, err=True)
+        typer.echo(error_text(exc), err=True)
         if not typer.confirm(
             "Verify and adopt the existing Git mirror, then fetch updates?", default=False, err=True
         ):
-            raise ValueError("Adoption declined; the existing mirror was left untouched") from exc
+            raise StructuralError(
+                "Adoption declined; the existing mirror was left untouched"
+            ) from exc
         # The first attempt has released its locks. Retry against the same root
         # even if configuration changed while awaiting input.
         return attempt(True, exc.archive_dir)
@@ -194,13 +198,23 @@ def _batch(
             else:
                 check_repository(selector, index=index, timeout=timeout)
             results.append(index.get(selector))
-        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        except (DomainError, OSError, subprocess.SubprocessError) as exc:
             failed = True
             record = index.find(selector)
             results.append(
-                dict(record, operation_error=str(exc))
+                dict(
+                    record,
+                    operation_error=error_text(
+                        exc, selector if is_repository_url(selector) else ""
+                    ),
+                )
                 if record is not None
-                else {"selector": selector, "operation_error": str(exc)}
+                else {
+                    "selector": selector,
+                    "operation_error": error_text(
+                        exc, selector if is_repository_url(selector) else ""
+                    ),
+                }
             )
     output(results, as_json, columns=REPOSITORY_COLUMNS)
     if failed:
@@ -260,7 +274,7 @@ def clean(
         for selector in selected(index, selectors, all_repositories):
             record = index.find(selector)
             if record is None and not is_repository_url(selector):
-                raise ValueError(f"Repository is not indexed: {selector}")
+                raise StructuralError(f"Repository is not indexed: {selector}")
             removed.extend(
                 clean_repository_import_state(
                     record["source_url"] if record else selector, index=index
@@ -290,8 +304,12 @@ def _mutate(selectors: list[str], action: str, as_json: bool, *, every: str | No
             seen.add(record["id"])
             result = bulk_command(index, [record["id"]], action, every=every)[0]
             result.update(selector=selector, repo_key=record["repo_key"])
-        except (ValueError, OSError, sqlite3.Error) as exc:
-            result = {"selector": selector, "status": "error", "error": str(exc)}
+        except (DomainError, OSError, sqlite3.Error) as exc:
+            result = {
+                "selector": selector,
+                "status": "error",
+                "error": error_text(exc, selector if is_repository_url(selector) else ""),
+            }
         results.append(result)
     output(results, as_json, columns=RESULT_COLUMNS)
     if any(result["status"] == "error" for result in results):
@@ -326,7 +344,7 @@ def schedule(
         try:
             duration(every)
         except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+            raise typer.BadParameter(error_text(exc)) from exc
     _mutate(selectors, "disable" if off else "schedule", as_json, every=every)
 
 

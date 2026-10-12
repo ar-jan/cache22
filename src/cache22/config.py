@@ -12,8 +12,10 @@ from typing import Any
 
 import tomli_w
 
+from .errors import StructuralError
 
-class ConfigError(ValueError):
+
+class ConfigError(StructuralError):
     """Raised when the persisted config is invalid."""
 
 
@@ -99,11 +101,11 @@ def _save_config(config: Config) -> None:
 def normalize_archive_dir(raw_path: str | Path) -> Path:
     archive_dir = Path(raw_path).expanduser().resolve()
     if not archive_dir.exists():
-        raise ValueError(f"Archive root does not exist: {archive_dir}")
+        raise StructuralError(f"Archive root does not exist: {archive_dir}")
     if not archive_dir.is_dir():
-        raise ValueError(f"Archive path is not a directory: {archive_dir}")
+        raise StructuralError(f"Archive path is not a directory: {archive_dir}")
     if not os.access(archive_dir, os.W_OK | os.X_OK):
-        raise ValueError(f"Archive root is not writable and searchable: {archive_dir}")
+        raise StructuralError(f"Archive root is not writable and searchable: {archive_dir}")
 
     return archive_dir
 
@@ -125,7 +127,9 @@ def list_archive_dirs() -> list[Path]:
 def default_archive_dir() -> Path:
     archive_dirs = list_archive_dirs()
     if not archive_dirs:
-        raise ValueError("No archive roots configured. Add one with 'cache22 config root add PATH'")
+        raise StructuralError(
+            "No archive roots configured. Add one with 'cache22 config root add PATH'"
+        )
 
     return archive_dirs[0]
 

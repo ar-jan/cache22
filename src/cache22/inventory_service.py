@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
+from .errors import StructuralError
 from .index import Index
 
 MAX_SELECTION = 10_000
@@ -100,21 +101,21 @@ class InventoryQuery:
 
     def __post_init__(self) -> None:
         if not isinstance(self.q, str) or self.sort not in SORTS:
-            raise ValueError("Invalid search or sort field")
+            raise StructuralError("Invalid search or sort field")
         if type(self.descending) is not bool:
-            raise ValueError("descending must be boolean")
+            raise StructuralError("descending must be boolean")
         for field in CATEGORIES:
             values = getattr(self, field)
             if not isinstance(values, tuple) or any(
                 not isinstance(v, str) or not v for v in values
             ):
-                raise ValueError(f"{field} must contain nonempty strings")
+                raise StructuralError(f"{field} must contain nonempty strings")
             if field in ENUMS and any(v not in ENUMS[field] for v in values):
-                raise ValueError(f"Invalid {field}")
+                raise StructuralError(f"Invalid {field}")
         for field in FLAGS:
             value = getattr(self, field)
             if value is not None and type(value) is not bool:
-                raise ValueError(f"{field} must be boolean")
+                raise StructuralError(f"{field} must be boolean")
 
     def parameters(self) -> dict[str, Any]:
         result = {field: getattr(self, field) for field in CATEGORIES if getattr(self, field)}
@@ -141,9 +142,9 @@ class InventoryRequest:
 
     def __post_init__(self) -> None:
         if type(self.limit) is not int or not 1 <= self.limit <= 500:
-            raise ValueError("Limit must be 1–500")
+            raise StructuralError("Limit must be 1–500")
         if type(self.offset) is not int or not 0 <= self.offset <= 2**63 - 1:
-            raise ValueError("Offset must be a nonnegative SQLite integer")
+            raise StructuralError("Offset must be a nonnegative SQLite integer")
 
     def url(self, path: str = "/", **changes: Any) -> str:
         values = self.query.parameters() | {"limit": self.limit, "offset": self.offset}
@@ -152,10 +153,13 @@ class InventoryRequest:
 
 
 def parse_query(raw: str) -> InventoryRequest:
-    values = parse_qs(raw, keep_blank_values=True, max_num_fields=200)
+    try:
+        values = parse_qs(raw, keep_blank_values=True, max_num_fields=200)
+    except ValueError as exc:
+        raise StructuralError("Too many inventory parameters") from exc
     unknown = values.keys() - {*CATEGORIES, *FLAGS, "q", "sort", "descending", "limit", "offset"}
     if unknown:
-        raise ValueError(f"Unsupported inventory parameters: {', '.join(sorted(unknown))}")
+        raise StructuralError(f"Unsupported inventory parameters: {', '.join(sorted(unknown))}")
     data: dict[str, Any] = {}
     page: dict[str, int] = {}
     for field, items in values.items():
@@ -163,16 +167,19 @@ def parse_query(raw: str) -> InventoryRequest:
             data[field] = tuple(dict.fromkeys(item for item in items if item))
             continue
         if len(items) != 1:
-            raise ValueError(f"Provide {field} once")
+            raise StructuralError(f"Provide {field} once")
         value = items[0]
         if field in FLAGS or field == "descending":
             if not value:
                 continue
             if value not in {"true", "false"}:
-                raise ValueError(f"{field} must be true or false")
+                raise StructuralError(f"{field} must be true or false")
             data[field] = value == "true"
         elif field in {"limit", "offset"}:
-            page[field] = int(value)
+            try:
+                page[field] = int(value)
+            except ValueError as exc:
+                raise StructuralError(f"{field} must be an integer") from exc
         else:
             data[field] = value
     return InventoryRequest(InventoryQuery(**data), **page)
@@ -271,7 +278,7 @@ def selected_ids(index: Index, query: InventoryQuery) -> list[int]:
             f"SELECT id FROM inventory{where} ORDER BY id LIMIT ?", [*params, MAX_SELECTION + 1]
         ).fetchall()
     if len(rows) > MAX_SELECTION:
-        raise ValueError(f"Selection exceeds {MAX_SELECTION} repositories; narrow the filters")
+        raise StructuralError(f"Selection exceeds {MAX_SELECTION} repositories; narrow the filters")
     return [row[0] for row in rows]
 
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .config import default_archive_dir, normalize_archive_dir
+from .errors import StructuralError
 from .index import Index, repository_key
 from .repo_service import ImportResult, execute_job
 from .repository_ref import parse_repository_url
@@ -20,7 +21,7 @@ def import_repository(
     timeout: float = 7200,
 ) -> ImportResult:
     if timeout <= 0:
-        raise ValueError("Operation timeout must be positive")
+        raise StructuralError("Operation timeout must be positive")
     repository = parse_repository_url(url, case_sensitive=case_sensitive)
     with index.connect() as db:
         existing = db.execute(

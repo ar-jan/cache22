@@ -13,6 +13,8 @@ from .archive_storage import (
     open_archive_directory,
 )
 from .config import list_archive_dirs
+from .diagnostics import error_text
+from .errors import DomainError, StructuralError
 from .index import Index, repository_key
 from .repository_ref import parse_repository_url, validate_storage_component
 from .storage import Repository, absent_fields
@@ -21,11 +23,11 @@ from .storage import Repository, absent_fields
 def register_storage(index: Index, root: Path, repo: Repository) -> dict[str, Any]:
     source = repo.read_source()
     if source is None:
-        raise ValueError("Managed mirror has no source binding")
+        raise StructuralError("Managed mirror has no source binding")
     origin = repo.origin_url(source)
     ref = parse_repository_url(origin, case_sensitive=True)
     if Repository.paths_for(root, ref) != repo.paths:
-        raise ValueError("Mirror is not at its canonical path")
+        raise StructuralError("Mirror is not at its canonical path")
     return index.add(ref, root)
 
 
@@ -82,7 +84,7 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                 key = relative.as_posix()
                 record = records.get(key)
                 if record is not None and record["archive_root"] != str(root):
-                    raise ValueError(
+                    raise StructuralError(
                         f"Duplicate managed copy; selected root is {record['archive_root']}"
                     )
                 seen.add(key)
@@ -101,20 +103,20 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                     root, path, prepare=prepare if adopt else None
                 ) as repo:
                     if repo is None:
-                        raise ValueError("Unrecognized ownership marker")
+                        raise StructuralError("Unrecognized ownership marker")
                     registered = record is None
                     if record is None:
                         # Validate before adding; no index-only audit side effects.
                         source = repo.read_source()
                         if source is None:
-                            raise ValueError("Managed storage has no source binding")
+                            raise StructuralError("Managed storage has no source binding")
                         origin = repo.origin_url(source)
                         ref = parse_repository_url(origin, case_sensitive=True)
                         if repository_key(ref) != key:
-                            raise ValueError("Mirror is not at its canonical path")
+                            raise StructuralError("Mirror is not at its canonical path")
                         observed = repo.observe_local(source)
                         if observed["local_state"] != "ready":
-                            raise ValueError("Mirror cannot be indexed as ready")
+                            raise StructuralError("Mirror cannot be indexed as ready")
                         if not fix:
                             issues.append(
                                 {
@@ -179,12 +181,12 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                             issues.append({"path": str(path), "problem": problem, "fixed": True})
             except (
                 OSError,
-                RuntimeError,
+                DomainError,
                 ValueError,
                 sqlite3.Error,
                 subprocess.SubprocessError,
             ) as exc:
-                issues.append({"path": str(path), "problem": str(exc), "fixed": False})
+                issues.append({"path": str(path), "problem": error_text(exc), "fixed": False})
     for key, record in records.items():
         if key in seen or not Path(record["archive_root"]).is_dir():
             continue
@@ -199,7 +201,7 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                     and paths.repository_dir.exists()
                     and any(paths.repository_dir.iterdir())
                 ):
-                    raise ValueError("Expected repository has unowned or invalid storage")
+                    raise StructuralError("Expected repository has unowned or invalid storage")
                 previously_ready = record["local_state"] in {"ready", "missing"}
                 fields = (
                     absent_fields(previously_ready)
@@ -230,10 +232,12 @@ def audit(*, index: Index, fix: bool = False, adopt: bool = False) -> list[dict[
                     )
         except (
             OSError,
-            RuntimeError,
+            DomainError,
             ValueError,
             sqlite3.Error,
             subprocess.SubprocessError,
         ) as exc:
-            issues.append({"path": record["repository_dir"], "problem": str(exc), "fixed": False})
+            issues.append(
+                {"path": record["repository_dir"], "problem": error_text(exc), "fixed": False}
+            )
     return issues

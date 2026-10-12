@@ -5,16 +5,17 @@ from __future__ import annotations
 import os
 import signal
 import sqlite3
-import subprocess
 import threading
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from .diagnostics import error_text
+from .errors import DomainError, StructuralError
 from .index import Index
-from .operation import OperationInterrupted
-from .repo_service import error_text, execute_job
+from .operation import ClaimLostError, OperationInterrupted
+from .repo_service import execute_job
 from .scheduler import Scheduler
 
 
@@ -62,7 +63,7 @@ def run_continuous(
     once: bool = False,
 ) -> None:
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
-        raise ValueError("Timeouts must be positive")
+        raise StructuralError("Timeouts must be positive")
     stop = stop or threading.Event()
     heartbeat_stop = threading.Event()
     heartbeat_failed = threading.Event()
@@ -112,15 +113,9 @@ def run_continuous(
                     cancel=stop,
                 )
                 report({"job_id": job["id"], "outcome": "succeeded"})
-            except OperationInterrupted:
+            except OperationInterrupted, ClaimLostError:
                 report({"job_id": job["id"], "outcome": "interrupted"})
-            except (
-                OSError,
-                RuntimeError,
-                ValueError,
-                sqlite3.Error,
-                subprocess.SubprocessError,
-            ) as exc:
+            except DomainError as exc:
                 report(
                     {
                         "job_id": job["id"],

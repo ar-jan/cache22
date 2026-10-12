@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from cache22 import git_mirror, operation, repo_service
 from cache22.cli import app
 from cache22.config import add_archive_dir
+from cache22.errors import TransportError
 from cache22.import_service import import_repository
 from cache22.index import Index
 from cache22.inventory_service import list_inventory
@@ -287,7 +288,7 @@ def test_remote_failure_preserves_snapshot_and_retries(
     before = r.fetch()
 
     def fail(url: str) -> Any:
-        raise operation.TransportError("offline")
+        raise TransportError("offline")
 
     monkeypatch.setattr(repo_service, "remote_snapshot", fail)
     queue = Queue(r.index)
@@ -323,7 +324,7 @@ def test_fetch_status_describes_whole_job_not_remote_probe(
 
     def fail_probe(url: str) -> Any:
         if tolerated:
-            raise operation.TransportError("offline")
+            raise TransportError("offline")
         raise ValueError("Malformed advertisement")
 
     monkeypatch.setattr(repo_service, "remote_snapshot", fail_probe)
@@ -514,7 +515,7 @@ def test_operation_timeout_terminates_child_and_releases_locks(
     paths = archive_paths_for_repository(r.root, parse_repository_url(URL))
     pidfile = tmp_path / "child-pid"
     with (
-        pytest.raises(operation.TransportError, match="timed out"),
+        pytest.raises(TransportError, match="timed out"),
         running_job(queue, job, 0.3),
         repository_operation(r.root, paths, create=True),
     ):

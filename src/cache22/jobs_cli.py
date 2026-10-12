@@ -10,6 +10,7 @@ from typing import Annotated, Any
 import typer
 
 from .cli_support import JsonOption, command, output
+from .errors import DomainError, StructuralError
 from .index import Index, index_path
 from .manager_service import jobs_snapshot, json_value
 
@@ -130,6 +131,6 @@ def jobs(
         snapshot = jobs_snapshot(
             index, state=state.value, repository_id=repository_id, limit=limit, offset=offset
         )
-    except (ValueError, OSError, sqlite3.Error) as exc:
-        raise RuntimeError(f"Cannot inspect database {path}: {exc}") from exc
+    except (DomainError, OSError, sqlite3.Error) as exc:
+        raise StructuralError(f"Cannot inspect database {path}: {exc}") from exc
     _report_snapshot(json_value(dict(snapshot, database=str(path))), as_json)

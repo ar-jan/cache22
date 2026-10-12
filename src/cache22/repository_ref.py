@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from .errors import StructuralError
+
 
 def validate_storage_component(component: str) -> None:
     if (
@@ -10,7 +12,7 @@ def validate_storage_component(component: str) -> None:
         or component in {".", ".."}
         or any(char in "/\\" or ord(char) < 32 or ord(char) == 127 for char in component)
     ):
-        raise ValueError(f"Unsafe repository storage component: {component!r}")
+        raise StructuralError(f"Unsafe repository storage component: {component!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,14 +32,19 @@ def is_repository_url(selector: str) -> bool:
 
 def parse_repository_url(url: str, *, case_sensitive: bool = False) -> RepositoryRef:
     if any(ord(char) < 32 or ord(char) == 127 for char in url):
-        raise ValueError("Unsafe repository URL: control characters are not supported")
+        raise StructuralError("Unsafe repository URL: control characters are not supported")
     if "?" in url or "#" in url:
-        raise ValueError("Repository URL must not include query or fragment delimiters")
+        raise StructuralError("Repository URL must not include query or fragment delimiters")
     raw_url = url.strip()
     if not raw_url:
-        raise ValueError("Repository URL must not be empty")
+        raise StructuralError("Repository URL must not be empty")
 
-    host, raw_path = _split_clone_url(raw_url)
+    try:
+        host, raw_path = _split_clone_url(raw_url)
+    except ValueError as exc:
+        if isinstance(exc, StructuralError):
+            raise
+        raise StructuralError(f"Invalid repository URL: {exc}") from exc
     validate_storage_component(host)
     repository = _repository_from_path(host, raw_path)
     effective = (
@@ -87,13 +94,13 @@ def _split_clone_url(raw_url: str) -> tuple[str, str]:
 
     parsed = urlsplit(raw_url)
     if parsed.scheme not in {"https", "ssh"}:
-        raise ValueError(f"Only HTTPS and SSH clone URLs are supported: {raw_url}")
+        raise StructuralError(f"Only HTTPS and SSH clone URLs are supported: {raw_url}")
     if parsed.query or parsed.fragment:
-        raise ValueError(f"Repository URL must not include query or fragment data: {raw_url}")
+        raise StructuralError(f"Repository URL must not include query or fragment data: {raw_url}")
 
     host = (parsed.hostname or "").lower()
     if not host:
-        raise ValueError(f"Repository URL must include a hostname: {raw_url}")
+        raise StructuralError(f"Repository URL must include a hostname: {raw_url}")
 
     return host, parsed.path
 
@@ -116,7 +123,7 @@ def _repository_from_path(host: str, raw_path: str) -> RepositoryRef:
         ),
     )
     if len(parts) < 2:
-        raise ValueError(
+        raise StructuralError(
             "Repository URL must have the form HOST/NAMESPACE[/SUBGROUP/...]/REPO(.git): "
             f"{repository_path}"
         )
@@ -140,9 +147,9 @@ def _path_parts(
 ) -> list[str]:
     parts = [part for part in raw_path.strip().strip("/").split("/") if part]
     if not parts:
-        raise ValueError(empty_message)
+        raise StructuralError(empty_message)
     if any(part in {".", ".."} for part in parts):
-        raise ValueError(invalid_segment_message)
+        raise StructuralError(invalid_segment_message)
     return parts
 
 

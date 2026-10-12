@@ -15,16 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .archive_layout import LOCK_FILE_NAME, ArchivePaths
+from .errors import RepositoryBusyError, StructuralError
 from .operation import current_operation, guard, inherited_lock
 from .repository_ref import parse_repository_url, validate_storage_component
 
 LOCK_SIGNATURE = b"cache22-storage-v1\n"
 
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-
-
-class RepositoryBusyError(RuntimeError):
-    """Another Cache22 operation holds this repository's lock."""
 
 
 def has_repository_boundary(directory_fd: int) -> bool:
@@ -42,7 +39,7 @@ def open_archive_directory(
 ) -> Iterator[int | None]:
     """Reserve ancestors shared and the target shared/exclusive, without following symlinks."""
     if relative.is_absolute():
-        raise ValueError(f"Archive path must be relative: {relative}")
+        raise StructuralError(f"Archive path must be relative: {relative}")
     for part in relative.parts:
         validate_storage_component(part)
 
@@ -52,7 +49,7 @@ def open_archive_directory(
         for depth, part in enumerate(relative.parts):
             if depth >= 3 and has_repository_boundary(directory_fd):
                 ancestor = root.joinpath(*relative.parts[:depth])
-                raise ValueError(
+                raise StructuralError(
                     f"Repository path conflict: {root / relative} is inside repository {ancestor}"
                 )
             try:
@@ -69,7 +66,7 @@ def open_archive_directory(
             child_path = root.joinpath(*relative.parts[: depth + 1])
             final = depth == len(relative.parts) - 1
             if not final and depth >= 2 and has_repository_boundary(child_fd):
-                raise ValueError(
+                raise StructuralError(
                     f"Repository path conflict: {root / relative} is inside repository {child_path}"
                 )
             _lock_directory(child_fd, child_path, exclusive=exclusive and final)
@@ -107,7 +104,7 @@ class RepositoryStorage:
         except FileNotFoundError:
             return None
         if not (stat.S_ISREG(result.st_mode) or stat.S_ISDIR(result.st_mode)):
-            raise ValueError(f"Unsafe archive entry: {self.paths.repository_dir / name}")
+            raise StructuralError(f"Unsafe archive entry: {self.paths.repository_dir / name}")
         return result
 
     def validate(self) -> None:
@@ -120,7 +117,7 @@ class RepositoryStorage:
         ):
             result = self.entry(path.name)
             if result is not None and stat.S_ISDIR(result.st_mode) != directory:
-                raise ValueError(f"Unexpected archive entry type: {path}")
+                raise StructuralError(f"Unexpected archive entry type: {path}")
 
     def validate_clone_marker(self) -> None:
         name = self.paths.clone_complete_marker.name
@@ -129,11 +126,11 @@ class RepositoryStorage:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.directory_fd)
         with os.fdopen(fd, "rb") as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                raise ValueError(
+                raise StructuralError(
                     f"Unsafe clone completion marker: {self.paths.clone_complete_marker}"
                 )
             if handle.read(len(b"complete\n") + 1) != b"complete\n":
-                raise ValueError(
+                raise StructuralError(
                     f"Malformed clone completion marker: {self.paths.clone_complete_marker}"
                 )
 
@@ -170,13 +167,18 @@ class RepositoryStorage:
         if self.entry(name) is not None:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.directory_fd)
             with os.fdopen(fd) as handle:
-                metadata = json.load(handle)
+                try:
+                    metadata = json.load(handle)
+                except (ValueError, UnicodeError) as exc:
+                    raise StructuralError(
+                        f"Malformed source metadata: {self.paths.source_file}"
+                    ) from exc
             if (
                 not isinstance(metadata, dict)
                 or set(metadata) != {"source_path"}
                 or not isinstance(metadata["source_path"], str)
             ):
-                raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
+                raise StructuralError(f"Malformed source metadata: {self.paths.source_file}")
             stored = metadata["source_path"]
             stored_host, _, stored_path = stored.partition("/")
             url_host = f"[{stored_host}]" if ":" in stored_host else stored_host
@@ -185,18 +187,22 @@ class RepositoryStorage:
                     f"https://{url_host}/{stored_path}.git", case_sensitive=True
                 )
             except ValueError as exc:
-                raise ValueError(f"Malformed source metadata: {self.paths.source_file}") from exc
+                raise StructuralError(
+                    f"Malformed source metadata: {self.paths.source_file}"
+                ) from exc
             if valid.source_path != stored:
-                raise ValueError(f"Malformed source metadata: {self.paths.source_file}")
+                raise StructuralError(f"Malformed source metadata: {self.paths.source_file}")
         return stored
 
     def check_source(self, source_path: str, *, allow_unbound: bool = False) -> str | None:
         stored = self.read_source()
         if self.has_import_state():
             if stored is None and not allow_unbound:
-                raise ValueError(f"Archive data has no source binding: {self.paths.repository_dir}")
+                raise StructuralError(
+                    f"Archive data has no source binding: {self.paths.repository_dir}"
+                )
             if stored is not None and stored != source_path:
-                raise ValueError(
+                raise StructuralError(
                     f"Repository source conflict: stored {stored}; requested {source_path}"
                 )
         return stored
@@ -302,7 +308,7 @@ def repository_operation(
             return
         if lock_fd is not None and os.pread(lock_fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
             if create:
-                raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
+                raise StructuralError(f"Unrecognized archive storage: {paths.repository_dir}")
             yield None
             return
         storage = RepositoryStorage(paths, directory_fd)
@@ -356,7 +362,7 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
             return None
         entries = os.listdir(directory_fd)
         if entries:
-            raise ValueError(
+            raise StructuralError(
                 f"Repository path conflict: {paths.repository_dir} is a nonempty "
                 "namespace or uninitialized directory"
             ) from None
@@ -366,15 +372,15 @@ def _open_owned_lock(directory_fd: int, paths: ArchivePaths, *, create: bool) ->
         os.close(fd)
         if create:
             if stat.S_ISDIR(mode):
-                raise ValueError(
+                raise StructuralError(
                     f"Repository path conflict: {paths.repository_dir} is a namespace directory"
                 )
-            raise ValueError(f"Unsafe archive lock: {paths.lock_file}")
+            raise StructuralError(f"Unsafe archive lock: {paths.lock_file}")
         return None
     if os.pread(fd, len(LOCK_SIGNATURE) + 1, 0) != LOCK_SIGNATURE:
         os.close(fd)
         if create:
-            raise ValueError(f"Unrecognized archive storage: {paths.repository_dir}")
+            raise StructuralError(f"Unrecognized archive storage: {paths.repository_dir}")
         return None
     return fd
 

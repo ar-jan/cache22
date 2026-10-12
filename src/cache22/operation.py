@@ -15,13 +15,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .diagnostics import GitOutputDecoder, parse_git_progress, sanitize
+from .errors import TransportError
 
 
 class ClaimLostError(RuntimeError):
-    pass
-
-
-class TransportError(RuntimeError):
     pass
 
 

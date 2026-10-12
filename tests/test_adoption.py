@@ -20,9 +20,10 @@ from typer.testing import CliRunner
 from cache22 import adoption, git_mirror
 from cache22.adoption import AdoptionRequiredError
 from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
-from cache22.archive_storage import LOCK_SIGNATURE, RepositoryBusyError, repository_operation
+from cache22.archive_storage import LOCK_SIGNATURE, repository_operation
 from cache22.cli import app
 from cache22.config import add_archive_dir
+from cache22.errors import RepositoryBusyError, StructuralError
 from cache22.import_service import import_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
@@ -298,9 +299,10 @@ def test_interrupted_initialization_can_be_retried(
     )
     with (
         patch(target, side_effect=OSError("publication interrupted")),
-        pytest.raises(OSError, match="publication interrupted"),
+        pytest.raises(StructuralError, match="publication interrupted") as caught,
     ):
         import_repository(URL, mirror.root, adopt=True, index=inventory_index)
+    assert isinstance(caught.value.__cause__, OSError)
     assert mirror.paths.clone_complete_marker.exists()
     assert clean_repository_import_state(URL, (mirror.root,), index=inventory_index) == ()
     assert (

@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from .archive_storage import RepositoryStorage
+from .errors import StructuralError
 from .git_config import (
     git_repository_command,
     git_repository_environment,
@@ -14,7 +15,7 @@ from .operation import run as run_git
 from .system_tools import find_git_executable
 
 
-class AdoptionRequiredError(ValueError):
+class AdoptionRequiredError(StructuralError):
     """A candidate needs explicit adoption; all storage locks are released on exit."""
 
     def __init__(self, archive_dir: Path, repository_dir: Path) -> None:
@@ -38,13 +39,17 @@ def prepare_git_import(
         storage.validate_clone_marker()
     except ValueError as exc:
         if not owned:
-            raise ValueError(f"Repository path conflict: {paths.repository_dir}: {exc}") from exc
+            raise StructuralError(
+                f"Repository path conflict: {paths.repository_dir}: {exc}"
+            ) from exc
         raise
     if storage.entry(paths.mirror_repository.name) is None:
         if not owned and os.listdir(storage.directory_fd):
-            raise ValueError(_conflict_message(paths.repository_dir))
+            raise StructuralError(_conflict_message(paths.repository_dir))
         if adopt and storage.has_import_state():
-            raise ValueError(f"Adoption requires an existing Git mirror: {paths.mirror_repository}")
+            raise StructuralError(
+                f"Adoption requires an existing Git mirror: {paths.mirror_repository}"
+            )
         return False
 
     initialized = (
@@ -59,7 +64,9 @@ def prepare_git_import(
         _validate_layout(storage, source_path)
     except ValueError as exc:
         if not owned:
-            raise ValueError(f"Repository path conflict: {paths.repository_dir}: {exc}") from exc
+            raise StructuralError(
+                f"Repository path conflict: {paths.repository_dir}: {exc}"
+            ) from exc
         raise
     if not adopt:
         raise AdoptionRequiredError(archive_dir, paths.repository_dir)
@@ -91,7 +98,7 @@ def _validate_layout(storage: RepositoryStorage, source_path: str) -> None:
     }
     unexpected = set(os.listdir(storage.directory_fd)) - allowed
     if unexpected:
-        raise ValueError(
+        raise StructuralError(
             f"Cannot adopt {paths.repository_dir}: unexpected entries: "
             f"{', '.join(sorted(unexpected))}"
         )
@@ -119,12 +126,12 @@ def _verify_mirror(mirror: Path, source_path: str) -> None:
             env=env,
         )
         if result.returncode != 0:
-            raise ValueError(
+            raise StructuralError(
                 f"Git mirror verification failed at {mirror} ({args[0]}): "
                 f"{result.stderr.strip() or result.stdout.strip() or f'exit code {result.returncode}'}"
             )
         return result.stdout.strip()
 
     if run("rev-parse", "--is-bare-repository") != "true":
-        raise ValueError(f"Adoption requires a bare Git mirror: {mirror}")
+        raise StructuralError(f"Adoption requires a bare Git mirror: {mirror}")
     run("fsck", "--full")

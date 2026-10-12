@@ -25,6 +25,11 @@ def sanitize(value: str, *sources: str) -> str:
     return "".join(c for c in value if c == "\n" or (ord(c) >= 32 and ord(c) != 127))[:4000]
 
 
+def error_text(exc: BaseException, *sources: str) -> str:
+    """One rendering boundary for persisted and returned exception diagnostics."""
+    return sanitize(str(exc), *sources)
+
+
 def failure_message(summary: str, error: subprocess.CalledProcessError, *sources: str) -> str:
     """Keep the final diagnostic after progress chatter, within the persisted error limit."""
     summary = sanitize(summary, *sources)

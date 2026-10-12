@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .errors import StructuralError
 from .operation import current_operation
 from .repository_ref import RepositoryRef, is_repository_url, parse_repository_url
 
@@ -175,9 +176,9 @@ def _uninitialized(db: sqlite3.Connection) -> bool:
     if version == SCHEMA_VERSION:
         return False
     if version != 0:
-        raise ValueError(_version_error(version))
+        raise StructuralError(_version_error(version))
     if db.execute("SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1").fetchone():
-        raise ValueError("Cannot initialize a nonempty version-zero repository index")
+        raise StructuralError("Cannot initialize a nonempty version-zero repository index")
     return True
 
 
@@ -215,7 +216,7 @@ class Index:
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version != SCHEMA_VERSION:
-                raise ValueError(_version_error(version))
+                raise StructuralError(_version_error(version))
 
     @classmethod
     def initialize(
@@ -313,11 +314,11 @@ class Index:
         existing: Any, repository: RepositoryRef, root: Path, *, importing: bool = False
     ) -> None:
         if existing["archive_root"] != str(root):
-            raise ValueError(
+            raise StructuralError(
                 f"Repository already assigned to {existing['archive_root']}: {repository_key(repository)}"
             )
         if existing["source_path"] != repository.source_path and not importing:
-            raise ValueError(
+            raise StructuralError(
                 f"Repository source conflict: stored {existing['source_path']}; requested {repository.source_path}"
             )
 
@@ -338,7 +339,7 @@ class Index:
     def get(self, selector: str | int) -> dict[str, Any]:
         record = self.find(selector)
         if record is None:
-            raise ValueError(f"Repository is not indexed: {self._selector_key(selector)}")
+            raise StructuralError(f"Repository is not indexed: {self._selector_key(selector)}")
         return record
 
     @staticmethod

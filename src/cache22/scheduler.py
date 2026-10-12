@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from .archive_storage import RepositoryBusyError
+from .errors import RepositoryBusyError, StructuralError
 from .index import Index
 from .job_queue import Kind, Queue
 
@@ -19,7 +19,7 @@ class Scheduler:
 
     def schedule(self, repository_id: int, interval: int | None) -> None:
         if interval is not None and interval <= 0:
-            raise ValueError("Schedule interval must be positive")
+            raise StructuralError("Schedule interval must be positive")
         with self.index.transaction() as db:
             if interval is None:
                 db.execute("UPDATE schedules SET enabled=0 WHERE repository_id=?", (repository_id,))
