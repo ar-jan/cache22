@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .diagnostics import GitOutputDecoder, parse_git_progress, sanitize
-from .errors import TransportError
+from .errors import StructuralError, TransportError
 
 
 class ClaimLostError(RuntimeError):
@@ -80,15 +80,18 @@ def run(
     """
     operation = current_operation.get()
     if operation is None:
-        return subprocess.run(
-            args,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            env=env,
-            pass_fds=lock_fds.get(),
-            **kwargs,
-        )
+        try:
+            return subprocess.run(
+                args,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                env=env,
+                pass_fds=lock_fds.get(),
+                **kwargs,
+            )
+        except UnicodeDecodeError as exc:
+            raise StructuralError(f"Git output cannot be decoded as {exc.encoding}") from exc
     guard()
     env = dict(os.environ if env is None else env)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -116,6 +119,12 @@ def run(
                 except subprocess.TimeoutExpired:
                     input_data = None
                     guard()
+                except UnicodeDecodeError as exc:
+                    # Git permits non-UTF-8 refs. Reject unsupported text without
+                    # losing ref bytes or treating repository data as a worker bug.
+                    raise StructuralError(
+                        f"Git output cannot be decoded as {exc.encoding}"
+                    ) from exc
             guard()
         except BaseException:
             try:

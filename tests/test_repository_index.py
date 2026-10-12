@@ -7,6 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,9 @@ from typer.testing import CliRunner
 from cache22 import git_mirror, operation, repo_service
 from cache22.cli import app
 from cache22.config import add_archive_dir
-from cache22.errors import TransportError
+from cache22.errors import StructuralError, TransportError
 from cache22.fetch_service import fetch_repository
+from cache22.git_observation import mirror_snapshot, remote_snapshot
 from cache22.index import Index
 from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
@@ -100,6 +102,53 @@ def test_inventory_dates_and_persistent_unfetched_changes(repository: Repository
         assert record["remote_head_oid"] == second
         assert record["last_checked_at"] == now
     assert r.fetch()["remote_status"] == "current"
+
+
+@pytest.mark.parametrize("location", ["local", "remote"])
+def test_non_utf8_ref_failure_does_not_stop_unrelated_jobs(
+    repository: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    r = repository
+    oid = r.commit("initial")
+    record = r.fetch()
+    mirror = Path(record["archive_path"])
+    bad_ref = os.fsdecode(b"refs/heads/non-utf8-\xff")
+    git(mirror if location == "local" else r.source, "update-ref", bad_ref, oid)
+
+    # Direct Git reads without an operation context must use the same domain error.
+    observe = (
+        partial(mirror_snapshot, mirror) if location == "local" else partial(remote_snapshot, URL)
+    )
+    with pytest.raises(StructuralError, match="Git output.*utf-8") as caught:
+        observe()
+    assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
+    healthy_source = tmp_path / "healthy.git"
+    healthy_source.mkdir()
+    git(healthy_source, "init", "--bare", "--initial-branch=main")
+    healthy_url = "https://example.test/team/healthy"
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", f"url.{healthy_source}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", healthy_url)
+    healthy = add_repository(healthy_url, r.root, index=r.index)
+    scheduler = Scheduler(r.index)
+    scheduler.schedule(r.id, 3600)
+    queue = Queue(r.index)
+    failed_id = queue.enqueue(r.id, "check")
+    healthy_id = queue.enqueue(healthy["id"], "check")
+
+    outcomes = run_worker(index=r.index)
+
+    assert [(result["job_id"], result["outcome"]) for result in outcomes] == [
+        (failed_id, "failed"),
+        (healthy_id, "succeeded"),
+    ]
+    failed = queue.list(r.id)[0]
+    assert failed["state"] == "failed" and failed["retry_count"] == 0
+    assert failed["attempts"][0]["error_category"] == "structural"
+    assert "Git output" in failed["attempts"][0]["error"]
+    assert r.index.get(r.id)["schedule_blocked"]
+    assert r.index.get(healthy["id"])["last_checked_at"] is not None
 
 
 @pytest.mark.parametrize("stage", ["clone", "fetch", "ls-remote"])
