@@ -11,6 +11,8 @@ from typing import Annotated, Any
 
 import typer
 
+from .diagnostics import error_text
+from .errors import DomainError
 from .manager_service import json_value
 
 JsonOption = Annotated[bool, typer.Option("--json", help="Emit JSON instead of text.")]
@@ -44,13 +46,12 @@ def command[**P](function: Callable[P, None]) -> Callable[P, None]:
         try:
             function(*args, **kwargs)
         except (
-            ValueError,
-            RuntimeError,
+            DomainError,
             OSError,
             sqlite3.Error,
             subprocess.SubprocessError,
         ) as exc:
-            typer.echo(str(exc), err=True)
+            typer.echo(error_text(exc), err=True)
             raise typer.Exit(1) from exc
 
     return wrapped

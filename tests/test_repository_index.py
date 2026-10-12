@@ -7,6 +7,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +17,11 @@ from typer.testing import CliRunner
 from cache22 import git_mirror, operation, repo_service
 from cache22.cli import app
 from cache22.config import add_archive_dir
-from cache22.import_service import import_repository
+from cache22.errors import StructuralError, TransportError
+from cache22.fetch_service import fetch_repository
+from cache22.git_observation import mirror_snapshot, remote_snapshot
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
 from cache22.job_queue import Queue
 from cache22.repo_audit import audit
@@ -49,7 +53,7 @@ class Repository:
         return git(self.source, "rev-parse", "HEAD")
 
     def fetch(self) -> dict[str, Any]:
-        import_repository(URL, self.root, index=self.index)
+        fetch_repository(URL, self.root, index=self.index)
         return self.index.get(self.id)
 
 
@@ -72,7 +76,7 @@ def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Repository:
     root.mkdir()
     add_archive_dir(root)
     clock = [1000.0]
-    index = Index(clock=lambda: clock[0])
+    index = Index.initialize(clock=lambda: clock[0])
     record = add_repository(URL, root, index=index)
     return Repository(source, root, index, clock, record["id"])
 
@@ -98,6 +102,53 @@ def test_inventory_dates_and_persistent_unfetched_changes(repository: Repository
         assert record["remote_head_oid"] == second
         assert record["last_checked_at"] == now
     assert r.fetch()["remote_status"] == "current"
+
+
+@pytest.mark.parametrize("location", ["local", "remote"])
+def test_non_utf8_ref_failure_does_not_stop_unrelated_jobs(
+    repository: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    r = repository
+    oid = r.commit("initial")
+    record = r.fetch()
+    mirror = Path(record["archive_path"])
+    bad_ref = os.fsdecode(b"refs/heads/non-utf8-\xff")
+    git(mirror if location == "local" else r.source, "update-ref", bad_ref, oid)
+
+    # Direct Git reads without an operation context must use the same domain error.
+    observe = (
+        partial(mirror_snapshot, mirror) if location == "local" else partial(remote_snapshot, URL)
+    )
+    with pytest.raises(StructuralError, match="Git output.*utf-8") as caught:
+        observe()
+    assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+
+    healthy_source = tmp_path / "healthy.git"
+    healthy_source.mkdir()
+    git(healthy_source, "init", "--bare", "--initial-branch=main")
+    healthy_url = "https://example.test/team/healthy"
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", f"url.{healthy_source}.insteadOf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", healthy_url)
+    healthy = add_repository(healthy_url, r.root, index=r.index)
+    scheduler = Scheduler(r.index)
+    scheduler.schedule(r.id, 3600)
+    queue = Queue(r.index)
+    failed_id = queue.enqueue(r.id, "check")
+    healthy_id = queue.enqueue(healthy["id"], "check")
+
+    outcomes = run_worker(index=r.index)
+
+    assert [(result["job_id"], result["outcome"]) for result in outcomes] == [
+        (failed_id, "failed"),
+        (healthy_id, "succeeded"),
+    ]
+    failed = queue.list(r.id)[0]
+    assert failed["state"] == "failed" and failed["retry_count"] == 0
+    assert failed["attempts"][0]["error_category"] == "structural"
+    assert "Git output" in failed["attempts"][0]["error"]
+    assert r.index.get(r.id)["schedule_blocked"]
+    assert r.index.get(healthy["id"])["last_checked_at"] is not None
 
 
 @pytest.mark.parametrize("stage", ["clone", "fetch", "ls-remote"])
@@ -138,16 +189,16 @@ def test_git_failure_details_reach_cli_and_history(
     result = CliRunner().invoke(app, [command, URL])
     assert result.exit_code == 1, result.output
     job = Queue(r.index).list(r.id)[0]
-    assert job["state"] == "pending" and job["error_category"] == "transport"
+    attempt = job["attempts"][0]
+    assert job["state"] == "pending" and attempt["error_category"] == "transport"
     for message in (
         result.output,
-        job["error"],
-        job["attempts"][0]["error"],
+        attempt["error"],
         r.index.get(r.id)["last_error"],
     ):
         assert diagnostic in message
         assert "secret" not in message and "\x1b" not in message
-    assert len(job["error"]) <= 4000
+    assert len(attempt["error"]) <= 4000
     assert r.index.get(r.id)["last_error_kind"] == command
 
 
@@ -197,12 +248,14 @@ def test_listing_is_database_only_with_disconnected_root(
 
     monkeypatch.setattr(os, "scandir", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
-    assert r.index.list()[0] == before
+    assert list_inventory(r.index)[0] == before
     result = CliRunner().invoke(app, ["list", "--json"])
     assert result.exit_code == 0, result.output
     listed = json.loads(result.output)[0]
     assert listed["last_fetched_at"] == "1970-01-01T00:16:40Z"
     assert listed["last_checked_at"] is None
+    assert listed["project_name"] == "project"
+    assert listed["archive_path"] == before["archive_path"]
 
 
 def test_schedule_checks_then_fetches_and_coalesces(repository: Repository) -> None:
@@ -284,7 +337,7 @@ def test_remote_failure_preserves_snapshot_and_retries(
     before = r.fetch()
 
     def fail(url: str) -> Any:
-        raise operation.TransportError("offline")
+        raise TransportError("offline")
 
     monkeypatch.setattr(repo_service, "remote_snapshot", fail)
     queue = Queue(r.index)
@@ -320,7 +373,7 @@ def test_fetch_status_describes_whole_job_not_remote_probe(
 
     def fail_probe(url: str) -> Any:
         if tolerated:
-            raise operation.TransportError("offline")
+            raise TransportError("offline")
         raise ValueError("Malformed advertisement")
 
     monkeypatch.setattr(repo_service, "remote_snapshot", fail_probe)
@@ -349,7 +402,7 @@ def test_unavailable_root_defers_fetch_without_losing_inventory(repository: Repo
     run_worker(index=r.index)
     job = queue.list()[0]
     assert job["state"] == "pending" and job["retry_count"] == 0
-    assert job["error_category"] == "unavailable"
+    assert job["attempts"][0]["error_category"] == "unavailable"
     after = r.index.get(r.id)
     assert after["local_head_oid"] == before["local_head_oid"]
     assert after["local_state"] == "ready"
@@ -361,12 +414,12 @@ def test_audit_bootstraps_owned_mirrors_without_network(
     r = repository
     r.commit("first")
     before = r.fetch()
-    other = Index(tmp_path / "other.sqlite3", clock=lambda: 2000)
+    other = Index.initialize(tmp_path / "other.sqlite3", clock=lambda: 2000)
     monkeypatch.setattr(
         repo_service, "remote_snapshot", lambda url: pytest.fail("Audit must be offline")
     )
     assert any("not indexed" in issue["problem"] for issue in audit(index=other))
-    assert other.list() == []
+    assert list_inventory(other) == []
     assert all(issue["fixed"] for issue in audit(index=other, fix=True))
     record = other.get(before["repo_key"])
     assert record["local_head_oid"] == before["local_head_oid"]
@@ -439,7 +492,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     queue = Queue(r.index)
     scheduler = Scheduler(r.index)
     queue.enqueue(r.id)
-    result = import_repository(URL, index=r.index)
+    result = fetch_repository(URL, index=r.index)
     assert result.repository is not None
     assert result.repository["archive_root"] == str(r.root)
     assert scheduler.claim() is None
@@ -449,7 +502,7 @@ def test_direct_fetch_consumes_pending_work_and_keeps_selected_root(
     from cache22 import config
 
     config.config_file().write_text(f'archive_dirs = ["{other_root}"]\n')
-    result = import_repository(URL, index=r.index)
+    result = fetch_repository(URL, index=r.index)
     assert result.archive_path == Path(r.index.get(r.id)["archive_path"])
 
 
@@ -466,7 +519,7 @@ def test_default_branch_rename_and_cleanup_refresh_inventory(repository: Reposit
     assert after["remote_status"] == "current"
     marker = Path(after["repository_dir"]) / ".clone-complete"
     marker.unlink()
-    clean_repository_import_state(URL, [r.root])
+    clean_repository_import_state(URL, [r.root], index=r.index)
     cleaned = r.index.get(r.id)
     assert cleaned["local_state"] == "missing"
     assert cleaned["local_head_oid"] is None
@@ -511,7 +564,7 @@ def test_operation_timeout_terminates_child_and_releases_locks(
     paths = archive_paths_for_repository(r.root, parse_repository_url(URL))
     pidfile = tmp_path / "child-pid"
     with (
-        pytest.raises(operation.TransportError, match="timed out"),
+        pytest.raises(TransportError, match="timed out"),
         running_job(queue, job, 0.3),
         repository_operation(r.root, paths, create=True),
     ):

@@ -14,6 +14,7 @@ from typing import Any, BinaryIO
 
 from . import operation
 from .archive_storage import RepositoryStorage
+from .errors import StructuralError
 from .git_config import (
     git_local_environment,
     git_repository_command,
@@ -38,11 +39,11 @@ class BundleState:
 def _regular(storage: RepositoryStorage, name: str) -> int:
     entry = storage.entry(name)
     if entry is None or not stat.S_ISREG(entry.st_mode):
-        raise ValueError(f"Missing or unsafe bundle file: {name}")
+        raise StructuralError(f"Missing or unsafe bundle file: {name}")
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=storage.directory_fd)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise ValueError(f"Unsafe bundle file: {name}")
+        raise StructuralError(f"Unsafe bundle file: {name}")
     return fd
 
 
@@ -64,9 +65,9 @@ def _header(handle: BinaryIO, object_format: str) -> dict[str, str]:
     oid_pattern = re.compile(r"[0-9a-f]{" + ("40" if object_format == "sha1" else "64") + r"}\Z")
     refs: dict[str, str] = {}
     if handle.readline(65537) != b"# v3 git bundle\n":
-        raise ValueError("Expected a version-3 bundle")
+        raise StructuralError("Expected a version-3 bundle")
     if handle.readline(65537) != f"@object-format={object_format}\n".encode():
-        raise ValueError("Bundle object format does not match its manifest")
+        raise StructuralError("Bundle object format does not match its manifest")
     while True:
         if len(refs) % 256 == 0:
             operation.guard()
@@ -74,28 +75,37 @@ def _header(handle: BinaryIO, object_format: str) -> dict[str, str]:
         if line == b"\n":
             break
         if not line or len(line) > 65536:
-            raise ValueError("Malformed bundle header")
-        oid, separator, ref = line.decode("utf-8").rstrip("\n").partition(" ")
+            raise StructuralError("Malformed bundle header")
+        try:
+            oid, separator, ref = line.decode("utf-8").rstrip("\n").partition(" ")
+        except UnicodeError as exc:
+            raise StructuralError("Malformed bundle header") from exc
         if (
             not separator
             or not oid_pattern.fullmatch(oid)
             or (ref != "HEAD" and not _ref(ref))
             or ref in refs
         ):
-            raise ValueError("Invalid bundle refs, prerequisites, or capabilities")
+            raise StructuralError("Invalid bundle refs, prerequisites, or capabilities")
         refs[ref] = oid
     if handle.read(4) != b"PACK":
-        raise ValueError("Bundle object pack is missing")
+        raise StructuralError("Bundle object pack is missing")
     return refs
 
 
 def read_bundle(storage: RepositoryStorage, source_path: str) -> BundleState:
     storage.check_source(source_path)
-    with os.fdopen(_regular(storage, storage.paths.bundle_manifest.name), "r") as handle:
-        raw = handle.read(65537)
+    try:
+        with os.fdopen(_regular(storage, storage.paths.bundle_manifest.name), "r") as handle:
+            raw = handle.read(65537)
+    except UnicodeError as exc:
+        raise StructuralError("Malformed bundle manifest") from exc
     if len(raw) > 65536:
-        raise ValueError("Bundle manifest is too large")
-    data = json.loads(raw)
+        raise StructuralError("Bundle manifest is too large")
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise StructuralError("Malformed bundle manifest") from exc
     fields = {
         "version",
         "storage_format",
@@ -109,51 +119,51 @@ def read_bundle(storage: RepositoryStorage, source_path: str) -> BundleState:
         "ref_digest",
     }
     if not isinstance(data, dict) or set(data) != fields:
-        raise ValueError("Malformed bundle manifest")
+        raise StructuralError("Malformed bundle manifest")
     if (
         type(data["version"]) is not int
         or data["version"] != 1
         or data["storage_format"] != "bundle"
     ):
-        raise ValueError("Unsupported bundle manifest version or storage format")
+        raise StructuralError("Unsupported bundle manifest version or storage format")
     name = data["bundle_file"]
     if not isinstance(name, str) or name not in storage.bundle_generations():
-        raise ValueError("Invalid or missing bundle generation")
+        raise StructuralError("Invalid or missing bundle generation")
     if data["object_format"] not in ("sha1", "sha256"):
-        raise ValueError("Unsupported bundle object format")
+        raise StructuralError("Unsupported bundle object format")
     if not isinstance(data["source_url"], str) or not data["source_url"]:
-        raise ValueError("Invalid bundle origin")
+        raise StructuralError("Invalid bundle origin")
     if parse_repository_url(data["source_url"], case_sensitive=True).source_path != source_path:
-        raise ValueError("Bundle source conflicts with repository binding")
+        raise StructuralError("Bundle source conflicts with repository binding")
     oid_pattern = re.compile(
         r"[0-9a-f]{" + ("40" if data["object_format"] == "sha1" else "64") + r"}\Z"
     )
     head_ref, head_oid, date = data["head_ref"], data["head_oid"], data["head_committed_at"]
     if head_ref is not None and (not isinstance(head_ref, str) or not _ref(head_ref)):
-        raise ValueError("Invalid bundle HEAD target")
+        raise StructuralError("Invalid bundle HEAD target")
     if head_oid is not None and (
         not isinstance(head_oid, str) or not oid_pattern.fullmatch(head_oid)
     ):
-        raise ValueError("Invalid bundle HEAD object ID")
+        raise StructuralError("Invalid bundle HEAD object ID")
     if (head_oid is None and date is not None) or (head_oid is not None and type(date) is not int):
-        raise ValueError("Invalid bundle HEAD commit date")
+        raise StructuralError("Invalid bundle HEAD commit date")
     refs: dict[str, str] = {}
     with os.fdopen(_regular(storage, name), "rb") as handle:
         if (
             type(data["bundle_size"]) is not int
             or os.fstat(handle.fileno()).st_size != data["bundle_size"]
         ):
-            raise ValueError("Bundle file size does not match its manifest")
+            raise StructuralError("Bundle file size does not match its manifest")
         refs = _header(handle, data["object_format"])
     if refs.pop("HEAD", None) != head_oid:
-        raise ValueError("Bundle HEAD does not match its manifest")
+        raise StructuralError("Bundle HEAD does not match its manifest")
     if head_ref is not None and refs.get(head_ref) != head_oid:
-        raise ValueError("Bundle symbolic HEAD does not match its target")
+        raise StructuralError("Bundle symbolic HEAD does not match its target")
     if not refs and head_oid is None:
-        raise ValueError("Empty bundles are not supported")
+        raise StructuralError("Empty bundles are not supported")
     snapshot = RefSnapshot(refs, head_ref, head_oid)
     if snapshot.digest != data["ref_digest"]:
-        raise ValueError("Bundle ref snapshot does not match its manifest")
+        raise StructuralError("Bundle ref snapshot does not match its manifest")
     return BundleState(
         storage.paths.repository_dir / name,
         snapshot,
@@ -188,10 +198,10 @@ def restore(state: BundleState, destination: Path) -> None:
     fd = os.open(state.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise ValueError("Unsafe bundle file")
+            raise StructuralError("Unsafe bundle file")
         refs = _header(handle, state.object_format)
     if refs.pop("HEAD", None) != state.snapshot.head_oid or refs != state.snapshot.refs:
-        raise ValueError("Bundle header does not match the expected snapshot")
+        raise StructuralError("Bundle header does not match the expected snapshot")
     operation.progress("bundle restoration")
     operation.run(
         [
@@ -225,7 +235,7 @@ def restore(state: BundleState, destination: Path) -> None:
     operation.progress("bundle verification")
     _git(destination, "fsck", "--full")
     if mirror_snapshot(destination) != (state.snapshot, state.committed_at, state.object_format):
-        raise ValueError("Restored bundle does not match the expected repository snapshot")
+        raise StructuralError("Restored bundle does not match the expected repository snapshot")
 
 
 def _safe_staging(storage: RepositoryStorage) -> None:
@@ -238,7 +248,7 @@ def _safe_staging(storage: RepositoryStorage) -> None:
                 stat.S_ISREG((Path(directory) / name).lstat().st_mode)
                 or stat.S_ISDIR((Path(directory) / name).lstat().st_mode)
             ):
-                raise ValueError("Unsafe bundle staging entry")
+                raise StructuralError("Unsafe bundle staging entry")
 
 
 def clear_staging(storage: RepositoryStorage) -> None:
@@ -258,7 +268,7 @@ def retire(storage: RepositoryStorage, state: BundleState) -> list[Path]:
         operation.guard()
         entry = storage.entry(name)
         if name.endswith(".bundle") and entry is not None and not stat.S_ISREG(entry.st_mode):
-            raise ValueError("Unsafe retired bundle")
+            raise StructuralError("Unsafe retired bundle")
         if storage.remove(name):
             removed.append(storage.paths.repository_dir / name)
     os.fsync(storage.directory_fd)
@@ -283,7 +293,7 @@ def cleanup(storage: RepositoryStorage, source_path: str) -> list[Path]:
     elif storage.bundle_generations():
         storage.validate_clone_marker()
         if storage.entry(storage.paths.clone_complete_marker.name) is None:
-            raise ValueError(
+            raise StructuralError(
                 "Unpublished bundles have no complete source mirror; preserving storage"
             )
         validate_git_mirror_layout(storage.paths.mirror_repository)
@@ -321,7 +331,7 @@ def materialize(
     if old is None:
         storage.validate_clone_marker()
         if storage.entry(paths.clone_complete_marker.name) is None:
-            raise ValueError("Conversion requires a complete managed mirror")
+            raise StructuralError("Conversion requires a complete managed mirror")
         storage.check_source(source_path)
         validate_git_mirror_layout(paths.mirror_repository)
         source_url = validate_git_mirror_config(
@@ -339,7 +349,7 @@ def materialize(
         fetch_git_repository(git_executable=find_git_executable(), url=update_url, mirror=mirror)
     snapshot, date, object_format = mirror_snapshot(mirror)
     if not snapshot.refs and snapshot.head_oid is None:
-        raise ValueError(
+        raise StructuralError(
             "Cannot publish an empty repository as a bundle; previous archive retained"
         )
     operation.progress("bundle creation")

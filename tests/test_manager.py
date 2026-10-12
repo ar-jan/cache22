@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import sys
 import threading
@@ -9,12 +8,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from starlette.testclient import TestClient
 
 from cache22 import operation
 from cache22.index import Index
+from cache22.inventory_service import list_inventory
 from cache22.job_operation import running_job
 from cache22.job_queue import Queue
-from cache22.manager.app import create_datasette
+from cache22.manager.app import create_app
 from cache22.manager_service import bulk_command, detail, queue_snapshot, register_batch
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
@@ -22,11 +23,11 @@ from cache22.worker import run_continuous
 
 
 def test_registration_batch_preview_duplicates_conflicts_and_atomic_enqueue(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     urls = ["https://host/Team/Repo", "https://host/Team/Repo", "invalid", "https://host/team/repo"]
     preview = register_batch(index, urls, root=tmp_path, case_sensitive=True, preview=True)
     assert [r["status"] for r in preview] == ["new", "duplicate", "error", "error"]
-    assert index.list() == []
+    assert list_inventory(index) == []
     results = register_batch(index, urls, root=tmp_path, case_sensitive=True, fetch=True)
     assert [r["status"] for r in results] == ["registered", "duplicate", "error", "error"]
     assert results[0]["job_id"] == results[1]["job_id"]
@@ -37,11 +38,11 @@ def test_registration_batch_preview_duplicates_conflicts_and_atomic_enqueue(tmp_
     ):
         failed = register_batch(index, ["https://host/team/other"], root=tmp_path, fetch=True)
     assert failed[0]["status"] == "error"
-    assert len(index.list()) == 1
+    assert len(list_inventory(index)) == 1
 
 
 def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -67,7 +68,7 @@ def test_interrupt_merges_successor_and_fences_progress(tmp_path: Path) -> None:
 
 
 def test_worker_idle_registry_and_shutdown(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     stop = threading.Event()
     thread = threading.Thread(target=run_continuous, kwargs={"index": index, "stop": stop})
     thread.start()
@@ -88,7 +89,7 @@ def test_worker_idle_registry_and_shutdown(tmp_path: Path) -> None:
 
 
 def test_streaming_progress_drains_both_pipes_and_preserves_output(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db")
+    index = Index.initialize(tmp_path / "index.db")
     repository = add_repository("https://host/team/repo", tmp_path, index=index)
     queue = Queue(index)
     scheduler = Scheduler(index)
@@ -110,69 +111,78 @@ def test_streaming_progress_drains_both_pipes_and_preserves_output(tmp_path: Pat
     assert queue_snapshot(index, section="history")["jobs"][0]["live"] == 0
 
 
-def test_datasette_browsing_selection_commands_and_boundaries(tmp_path: Path) -> None:
-    async def exercise() -> None:
-        ds = create_datasette(tmp_path / "index.db")
-        index = ds.cache22_index
-        ids = [
-            add_repository(f"https://user:secret@host/team/repo{i}", tmp_path, index=index)["id"]
-            for i in range(3)
-        ]
-        try:
-            # All index fields remain inspectable, including source URLs.
-            response = await ds.client.get("/index/repositories.json")
-            assert response.status_code == 200 and "user:secret" in response.text
+def test_web_browsing_selection_commands_and_boundaries(tmp_path: Path) -> None:
+    app = create_app(tmp_path / "index.db")
+    index = app.state.index
+    ids = [
+        add_repository(f"https://user:secret@host/Team/Sub/Repo{i}", tmp_path, index=index)["id"]
+        for i in range(3)
+    ]
+    with TestClient(app, base_url="http://127.0.0.1:8001") as client:
+        response = client.get("/")
+        assert response.status_code == 200 and "c22-inventory" in response.text
+        assert "user:secret" not in response.text
+        response = client.get("/inventory.json?sort=project_name&descending=true")
+        assert [row["project_name"] for row in response.json()] == ["Repo2", "Repo1", "Repo0"]
+        assert all("source_url" not in row for row in response.json())
+        for query in ("q=repo1", "host=host&q=repo1", "queued=false&q=repo1"):
+            assert [row["id"] for row in client.get(f"/inventory.json?{query}").json()] == [ids[1]]
+            selected = client.post("/api/selection", json={"query": query})
+            assert selected.json()["ids"] == [ids[1]]
+        selected = client.post("/api/selection", json={"query": "queued=false"}).json()["ids"]
+        bulk_command(index, [ids[0]], "fetch")
+        response = client.post("/api/command", json={"ids": selected, "action": "check"})
+        assert len(response.json()["results"]) == 3
+        assert Queue(index).list(ids[0])[0]["kind"] == "fetch"
+        for headers in (
+            {"host": "evil.example"},
+            {"origin": "https://evil.example"},
+            {"sec-fetch-site": "cross-site"},
+            {"host": "localhost/path"},
+            {"host": "localhost#fragment"},
+        ):
             assert (
-                await ds.client.get("/index/-/query.json?sql=select+count(*)+from+jobs")
-            ).status_code == 200
-            response = await ds.client.get("/", follow_redirects=True)
-            assert response.status_code == 200 and "c22-inventory" in response.text
-            # source_url does not appear among the summary table cells.
-            assert 'class="col-source_url type-' not in response.text
-            for query in ("project_name__contains=repo1", "_q=repo1", "_where=id%3D2"):
-                selected = await ds.client.post("/-/cache22/api/selection", json={"query": query})
-                assert selected.status_code == 200, selected.text
-                assert selected.json()["ids"] == [ids[1]]
-            selected = (
-                await ds.client.post("/-/cache22/api/selection", json={"query": "queued=0"})
-            ).json()["ids"]
-            bulk_command(index, [ids[0]], "fetch")
-            response = await ds.client.post(
-                "/-/cache22/api/command", json={"ids": selected, "action": "check"}
+                client.post(
+                    "/api/command", json={"ids": ids, "action": "fetch"}, headers=headers
+                ).status_code
+                == 403
             )
-            assert len(response.json()["results"]) == 3
-            assert Queue(index).list(ids[0])[0]["kind"] == "fetch"
-            for headers in (
-                {"host": "evil.example"},
-                {"origin": "https://evil.example"},
-                {"sec-fetch-site": "cross-site"},
-            ):
-                response = await ds.client.post(
-                    "/-/cache22/api/command", json={"ids": ids, "action": "fetch"}, headers=headers
-                )
-                assert response.status_code == 403
-            assert (await ds.client.get("/-/cache22/api/command")).status_code == 405
-            response = await ds.client.post(
+        for host in ("localhost:12345", "127.0.0.1:8080", "[::1]:8001"):
+            assert (
+                client.get("/", headers={"host": host, "origin": f"http://{host}"}).status_code
+                == 200
+            )
+        assert client.get("/api/command").status_code == 405
+        assert client.post("/").status_code == 405
+        assert client.head("/api/health").status_code == 200
+        for path in (
+            "/index/inventory",
+            "/index/repositories.json",
+            "/index/-/query.json?sql=select+1",
+            "/index.db",
+            "/-/cache22/queue",
+        ):
+            assert client.get(path).status_code == 404
+        assert (
+            client.post(
                 "/index/repositories/-/insert", json={"rows": [{"repo_key": "bypass"}]}
-            )
-            assert response.status_code == 403
-            response = await ds.client.post(
-                "/-/cache22/api/command", json={"ids": [True], "action": "fetch"}
-            )
-            assert response.status_code == 400
-            assert len(index.list()) == 3
-            scheduler = Scheduler(index)
-            failed = scheduler.immediate(ids[1], "check")
-            scheduler.finish(failed, category="structural", error="Invalid storage")
-            response = await ds.client.post(
-                "/-/cache22/api/selection", json={"query": "has_error=1"}
-            )
-            assert response.status_code == 200
-            assert response.json()["ids"] == [ids[1]]
-            response = await ds.client.get("/index/inventory.json?has_error=1")
-            assert response.status_code == 200
-            assert response.json()["rows"][0]["last_error"] == "Invalid storage"
-        finally:
-            await ds.invoke_shutdown()
-
-    asyncio.run(exercise())
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post("/api/command", json={"ids": [True], "action": "fetch"}).status_code == 400
+        )
+        assert client.post("/api/command", content="broken json").status_code == 400
+        assert client.post("/api/command", content=b"x" * (2 * 1024 * 1024 + 1)).status_code == 413
+        assert client.get("/repositories/999999").status_code == 404
+        assert len(list_inventory(index)) == 3
+        scheduler = Scheduler(index)
+        failed = scheduler.immediate(ids[1], "check")
+        scheduler.finish(failed, category="structural", error="Invalid storage")
+        assert client.post("/api/selection", json={"query": "has_error=true"}).json()["ids"] == [
+            ids[1]
+        ]
+        response = client.get("/inventory.json?has_error=true")
+        assert response.json()[0]["last_error"] == "Invalid storage"
+        assert response.headers["cache-control"] == "no-store"
+        assert client.get("/static/manager.js").status_code == 200

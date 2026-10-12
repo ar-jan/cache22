@@ -13,6 +13,8 @@ from . import git_bundle
 from .adoption import prepare_git_import
 from .archive_layout import ArchivePaths, archive_paths_for_directory, archive_paths_for_repository
 from .archive_storage import RepositoryStorage, repository_operation
+from .diagnostics import failure_message
+from .errors import StructuralError, TransportError, storage_error
 from .git_config import validate_git_mirror_config
 from .git_layout import validate_git_mirror_layout
 from .git_mirror import ensure_git_mirror
@@ -26,7 +28,8 @@ Format = Literal["git", "bundle"]
 @dataclass(frozen=True, slots=True)
 class StorageFetchResult:
     archive_path: Path
-    info_messages: tuple[str, ...] = ()
+    storage_format: Format
+    action: Literal["created", "updated"]
 
 
 def _empty_fields() -> dict[str, Any]:
@@ -48,6 +51,9 @@ class Repository:
 
     Use only inside an opening context or its preparation callback. Preparation
     may run before ownership publication and final structural validation.
+    Opening binds inherited lock descriptors to the operation context so Git
+    children retain reservations even if their parent dies. Publication callbacks
+    run under those locks and must preserve the caller's inventory claim fence.
     """
 
     root: Path
@@ -104,13 +110,20 @@ class Repository:
             assert prepare is not None
             prepare(repo)
 
-        with repository_operation(
-            root, paths, create=create, prepare=prepare_storage if prepare is not None else None
-        ) as storage:
-            if storage is None:
-                yield None
-            else:
-                yield repo if repo is not None else cls(root, storage)
+        try:
+            with repository_operation(
+                root, paths, create=create, prepare=prepare_storage if prepare is not None else None
+            ) as storage:
+                if storage is None:
+                    yield None
+                else:
+                    yield repo if repo is not None else cls(root, storage)
+        except OSError as exc:
+            raise storage_error(exc) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise TransportError("Git operation timed out") from exc
+        except subprocess.CalledProcessError as exc:
+            raise StructuralError(failure_message("Local Git operation failed", exc)) from exc
 
     @property
     def format(self) -> Format:
@@ -125,7 +138,9 @@ class Repository:
     def require_selected_format(self, expected: str) -> None:
         # A published bundle can precede its inventory update after interruption.
         if expected == "bundle" and not self.is_bundle:
-            raise ValueError("Selected bundle manifest is missing; preserving all archive data")
+            raise StructuralError(
+                "Selected bundle manifest is missing; preserving all archive data"
+            )
 
     def read_source(self) -> str | None:
         return self._storage.read_source()
@@ -154,7 +169,7 @@ class Repository:
     def prepare_import(self, *, source_path: str, adopt: bool) -> bool:
         if self.is_bundle:
             if self._storage.entry(self.paths.lock_file.name) is None or adopt:
-                raise ValueError("Bundle adoption is not supported")
+                raise StructuralError("Bundle adoption is not supported")
             git_bundle.read_bundle(self._storage, source_path)
             return False
         return prepare_git_import(
@@ -165,14 +180,14 @@ class Repository:
         if self.is_bundle:
             source_path = parse_repository_url(url, case_sensitive=True).source_path
             return StorageFetchResult(
-                git_bundle.materialize(self._storage, source_path, update_url=url, publish=publish)
+                git_bundle.materialize(self._storage, source_path, update_url=url, publish=publish),
+                "bundle",
+                "updated",
             )
-        message = ensure_git_mirror(
+        action = ensure_git_mirror(
             git_executable=find_git_executable(), url=url, storage=self._storage
         )
-        return StorageFetchResult(
-            self.paths.mirror_repository, (message,) if message is not None else ()
-        )
+        return StorageFetchResult(self.paths.mirror_repository, "git", action)
 
     def convert_to_bundle(self, source_path: str, *, publish: Callable[[], None]) -> Path:
         return git_bundle.materialize(self._storage, source_path, publish=publish)
@@ -251,9 +266,9 @@ class Repository:
         origin = validate_git_mirror_config(find_git_executable(), paths.mirror_repository)
         ref = parse_repository_url(origin, case_sensitive=True)
         if self.paths_for(self.root, ref) != paths:
-            raise ValueError("Mirror is not at its canonical path")
+            raise StructuralError("Mirror is not at its canonical path")
         if expected_source_path is not None and expected_source_path != ref.source_path:
-            raise ValueError("Repository source conflict with inventory")
+            raise StructuralError("Repository source conflict with inventory")
         return self.prepare_import(source_path=ref.source_path, adopt=True)
 
     def clean(self) -> list[Path]:
@@ -268,7 +283,7 @@ class Repository:
         ):
             source = storage.read_source()
             if source is None:
-                raise ValueError("Bundle storage has no source binding; preserving it")
+                raise StructuralError("Bundle storage has no source binding; preserving it")
             removed_paths.extend(git_bundle.cleanup(storage, source))
 
         mirror_exists = storage.entry(paths.mirror_repository.name) is not None

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .diagnostics import error_text
+from .errors import DomainError, StructuralError
 from .index import Index, repository_key
+from .inventory_service import public_record
 from .job_queue import BLOCKING_JOB_SQL, Queue
-from .operation import sanitize
 from .repo_service import registration_target
 from .scheduler import Scheduler
 
@@ -21,10 +22,12 @@ MAX_BATCH = 10_000
 def duration(value: str) -> int:
     match = re.fullmatch(r"([1-9][0-9]*)(s|m|h|d|w)", value)
     if not match:
-        raise ValueError("Use a positive duration such as 30m, 6h, or 1d")
+        raise StructuralError("Use a positive duration such as 30m, 6h, or 1d")
+    if len(match[1]) > 19:
+        raise StructuralError("Schedule interval is too large")
     seconds = int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[match[2]]
     if seconds > 2**63 - 1 - 2**40:
-        raise ValueError("Schedule interval is too large")
+        raise StructuralError("Schedule interval is too large")
     return seconds
 
 
@@ -48,7 +51,7 @@ def register_batch(
     preview: bool = False,
 ) -> list[dict[str, Any]]:
     if len(urls) > MAX_BATCH:
-        raise ValueError(f"At most {MAX_BATCH} URLs per submission")
+        raise StructuralError(f"At most {MAX_BATCH} URLs per submission")
     results: list[dict[str, Any]] = []
     seen: dict[str, dict[str, Any]] = {}
     projected: dict[str, dict[str, Any]] = {}
@@ -96,8 +99,8 @@ def register_batch(
                     job_id=job_id,
                 )
             seen[url] = result.copy()
-        except (ValueError, OSError, sqlite3.Error) as exc:
-            result.update(status="error", error=sanitize(str(exc), url))
+        except (DomainError, OSError, sqlite3.Error) as exc:
+            result.update(status="error", error=error_text(exc, url))
         results.append(result)
     return results
 
@@ -110,9 +113,9 @@ def bulk_command(
     every: str | None = None,
 ) -> list[dict[str, Any]]:
     if not ids or len(ids) > MAX_BATCH or any(type(i) is not int or i <= 0 for i in ids):
-        raise ValueError(f"Provide between 1 and {MAX_BATCH} positive repository IDs")
+        raise StructuralError(f"Provide between 1 and {MAX_BATCH} positive repository IDs")
     if action not in {"check", "fetch", "convert", "unqueue", "schedule", "disable"}:
-        raise ValueError("Unknown repository action")
+        raise StructuralError("Unknown repository action")
     interval = duration(every or "") if action == "schedule" else None
     results = []
     queue = Queue(index)
@@ -130,31 +133,15 @@ def bulk_command(
             else:
                 Scheduler(index).schedule(repository_id, interval)
             result["status"] = "accepted"
-        except (ValueError, OSError, sqlite3.Error) as exc:
-            result.update(status="error", error=sanitize(str(exc)))
+        except (DomainError, OSError, sqlite3.Error) as exc:
+            result.update(status="error", error=error_text(exc))
         results.append(result)
     return results
 
 
-def selected_ids(index: Index, where: list[str], params: dict[str, Any]) -> list[int]:
-    """SQL fragments come from the Datasette filter adapter, never from a command body."""
-    clause = " WHERE " + " AND ".join(f"({term})" for term in where) if where else ""
-    with index.connect() as db:
-        db.execute("PRAGMA query_only=ON")
-        deadline = time.monotonic() + 2
-        db.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
-        db.execute("BEGIN")
-        rows = db.execute(
-            f"SELECT id FROM inventory{clause} ORDER BY id LIMIT {MAX_BATCH + 1}", params
-        ).fetchall()
-    if len(rows) > MAX_BATCH:
-        raise ValueError(f"Selection exceeds {MAX_BATCH} repositories; narrow the filters")
-    return [row[0] for row in rows]
-
-
 def _page(limit: int, offset: int) -> None:
     if not 1 <= limit <= 500 or offset < 0:
-        raise ValueError("Limit must be 1–500 and offset must be nonnegative")
+        raise StructuralError("Limit must be 1–500 and offset must be nonnegative")
 
 
 def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
@@ -163,10 +150,8 @@ def detail(index: Index, repository_id: int, *, limit: int = 50, offset: int = 0
         db.execute("BEGIN")
         row = db.execute("SELECT * FROM inventory WHERE id=?", (repository_id,)).fetchone()
         if row is None:
-            raise ValueError("Repository not found")
-        repository = index._record(row)
-        # Details emphasize identity; the native Datasette record exposes the full source URL.
-        repository.pop("source_url")
+            raise StructuralError("Repository not found")
+        repository = public_record(index._record(row))
         attempts = [
             dict(row)
             for row in db.execute(
@@ -190,7 +175,7 @@ def queue_snapshot(
     """Browser queue sections backed by the shared inspection query."""
     sections = ("running", "runnable", "deferred", "history")
     if section not in sections:
-        raise ValueError("Unknown queue section")
+        raise StructuralError("Unknown queue section")
     snapshot = jobs_snapshot(
         index, state=section, limit=limit, offset=offset, include_attempts=False
     )
@@ -220,7 +205,7 @@ def jobs_snapshot(
         "history": "j.state IN ('succeeded','failed','cancelled')",
     }
     if state not in predicates:
-        raise ValueError("Unknown job state")
+        raise StructuralError("Unknown job state")
     scope = "(:repository_id IS NULL OR j.repository_id=:repository_id)"
     params = {"now": now, "limit": limit + 1, "offset": offset, "repository_id": repository_id}
     order = {
@@ -240,7 +225,7 @@ def jobs_snapshot(
             dict(row)
             for row in db.execute(
                 f"""SELECT j.id,j.repository_id,r.repo_key,j.kind,j.origin,j.state,j.due_at,
-            j.finished_at,j.retry_count,j.error_category,j.error,
+            j.finished_at,j.retry_count,
             CASE WHEN j.state='pending' THEN ({BLOCKING_JOB_SQL}) END AS blocking_job_id,
             a.id AS attempt_id,a.started_at,
             a.finished_at AS attempt_finished_at,a.outcome,

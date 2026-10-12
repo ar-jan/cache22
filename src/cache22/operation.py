@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import selectors
 import signal
 import sqlite3
@@ -15,41 +14,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from .diagnostics import GitOutputDecoder, parse_git_progress, sanitize
+from .errors import StructuralError, TransportError
+
 
 class ClaimLostError(RuntimeError):
     pass
 
 
-class TransportError(RuntimeError):
-    pass
-
-
 class OperationInterrupted(RuntimeError):
     pass
-
-
-def sanitize(value: str, *sources: str) -> str:
-    for source in sources:
-        if source:
-            value = value.replace(source, "<source URL>")
-    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
-    value = re.sub(r"(https?://|ssh://)[^\s/@]+@", r"\1<credentials>@", value)
-    return "".join(c for c in value if c == "\n" or (ord(c) >= 32 and ord(c) != 127))[:4000]
-
-
-def failure_message(summary: str, error: subprocess.CalledProcessError, *sources: str) -> str:
-    """Keep the final diagnostic after progress chatter, within the persisted error limit."""
-    stderr = error.stderr
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode("utf-8", errors="replace")
-    if not stderr:
-        return summary
-    # Sanitize before taking the tail so truncation cannot split a credential-bearing URL.
-    # Work line-by-line to avoid sanitize()'s prefix limit discarding the final error.
-    detail = "\n".join(sanitize(line, *sources) for line in stderr.splitlines()).strip()
-    if not detail:
-        return summary
-    return summary + "\n" + detail[-(4000 - len(summary) - 1) :]
 
 
 @dataclass
@@ -66,33 +40,6 @@ def progress(phase: str, **fields: Any) -> None:
         if "detail" in fields:
             fields["detail"] = sanitize(fields["detail"])
         operation.publish({"phase": phase, **fields})
-
-
-def git_progress(line: str) -> None:
-    """Unknown Git messages remain bounded detail; percentages are phase-specific."""
-    line = sanitize(line).strip()
-    if not line:
-        return
-    match = re.search(r"([\w ]+):\s+(\d+)%\s+\((\d+)/(\d+)\)", line)
-    if match:
-        phase, percent, completed, total = match.groups()
-        try:
-            percentage, done, count = int(percent), int(completed), int(total)
-            if not (0 <= percentage <= 100 and 0 <= done <= count <= 2**63 - 1):
-                raise ValueError("Invalid Git progress counters")
-        except ValueError:
-            pass
-        else:
-            progress(
-                phase.strip().lower(),
-                percentage=percentage,
-                completed=done,
-                total=count,
-                unit="objects",
-                detail=line,
-            )
-            return
-    progress("git transfer", detail=line)
 
 
 current_operation: ContextVar[Operation | None] = ContextVar("operation", default=None)
@@ -133,15 +80,18 @@ def run(
     """
     operation = current_operation.get()
     if operation is None:
-        return subprocess.run(
-            args,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            env=env,
-            pass_fds=lock_fds.get(),
-            **kwargs,
-        )
+        try:
+            return subprocess.run(
+                args,
+                check=check,
+                capture_output=capture_output,
+                text=text,
+                env=env,
+                pass_fds=lock_fds.get(),
+                **kwargs,
+            )
+        except UnicodeDecodeError as exc:
+            raise StructuralError(f"Git output cannot be decoded as {exc.encoding}") from exc
     guard()
     env = dict(os.environ if env is None else env)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -169,6 +119,12 @@ def run(
                 except subprocess.TimeoutExpired:
                     input_data = None
                     guard()
+                except UnicodeDecodeError as exc:
+                    # Git permits non-UTF-8 refs. Reject unsupported text without
+                    # losing ref bytes or treating repository data as a worker bug.
+                    raise StructuralError(
+                        f"Git output cannot be decoded as {exc.encoding}"
+                    ) from exc
             guard()
         except BaseException:
             try:
@@ -212,7 +168,16 @@ def _run_streaming(
             selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         stdout = bytearray()
         stderr = bytearray()
-        pending = b""
+        decoder = GitOutputDecoder()
+
+        def observe(line: str) -> None:
+            # Only sanitized complete lines enter the retained tail or publication.
+            stderr.extend(line.encode("utf-8") + b"\n")
+            del stderr[:-65536]
+            snapshot = parse_git_progress(line)
+            if snapshot is not None:
+                progress(**snapshot)
+
         try:
             while selector.get_map() or process.poll() is None:
                 guard()
@@ -224,14 +189,10 @@ def _run_streaming(
                     if key.data == "stdout":
                         stdout.extend(chunk)
                         continue
-                    stderr.extend(chunk)
-                    del stderr[:-65536]
-                    parts = re.split(rb"[\r\n]", pending + chunk)
-                    pending = parts.pop()[-4096:]
-                    for part in parts:
-                        git_progress(part[-4096:].decode("utf-8", errors="replace"))
-            if pending:
-                git_progress(pending.decode("utf-8", errors="replace"))
+                    for line in decoder.feed(chunk):
+                        observe(line)
+            for line in decoder.finish():
+                observe(line)
             guard()
         except BaseException:
             try:

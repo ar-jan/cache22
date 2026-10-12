@@ -4,7 +4,8 @@ version = "0.0.1"
 description = "CLI for archiving Git repositories as mirrors or bundles"
 requires-python = ">=3.14"
 dependencies = [
-    "datasette==1.0a40",
+    "jinja2>=3.1.6",
+    "starlette>=1.7.0",
     "tomli-w>=1.2.0",
     "typer>=0.27.2",
     "uvicorn>=0.34",
@@ -13,12 +14,10 @@ dependencies = [
 [project.scripts]
 cache22 = "cache22.cli:main"
 
-[project.entry-points.datasette]
-cache22-manager = "cache22.manager"
-
 [dependency-groups]
 dev = [
     "check-jsonschema>=0.36.2",
+    "httpx2>=2.13.1",
     "playwright>=1.50",
     "pre-commit>=4.5.1",
     "pyright>=1.1.408",

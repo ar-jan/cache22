@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from . import operation
+from .diagnostics import failure_message
+from .errors import StructuralError, TransportError
 from .git_config import (
     git_local_environment,
     git_repository_command,
@@ -56,35 +58,39 @@ def remote_snapshot(url: str) -> RefSnapshot:
             env=git_repository_environment(),
         )
     except subprocess.CalledProcessError as exc:
-        raise operation.TransportError(
-            operation.failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
+        raise TransportError(
+            failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
         ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise TransportError("Remote check timed out") from exc
+    except OSError as exc:
+        raise StructuralError(f"Cannot run Git for remote check: {exc}") from exc
     refs: dict[str, str] = {}
     target = head = None
     for line in result.stdout.splitlines():
         value, separator, name = line.partition("\t")
         if not separator:
-            raise ValueError("Malformed remote ref advertisement")
+            raise StructuralError("Malformed remote ref advertisement")
         if value.startswith("ref: "):
             if name == "HEAD":
                 if target is not None:
-                    raise ValueError("Duplicate remote HEAD target")
+                    raise StructuralError("Duplicate remote HEAD target")
                 target = value[5:]
                 if not target.startswith("refs/"):
-                    raise ValueError("Invalid remote HEAD target")
+                    raise StructuralError("Invalid remote HEAD target")
             continue
         if not OID.fullmatch(value):
-            raise ValueError("Invalid remote object ID")
+            raise StructuralError("Invalid remote object ID")
         if name == "HEAD":
             if head is not None:
-                raise ValueError("Duplicate remote HEAD")
+                raise StructuralError("Duplicate remote HEAD")
             head = value
         elif name.startswith("refs/") and not name.endswith("^{}"):
             if name in refs:
-                raise ValueError("Duplicate remote ref")
+                raise StructuralError("Duplicate remote ref")
             refs[name] = value
     if refs and head is None:
-        raise ValueError("Nonempty remote did not advertise HEAD")
+        raise StructuralError("Nonempty remote did not advertise HEAD")
     return RefSnapshot(refs, target, head)
 
 

@@ -24,12 +24,15 @@ from .cli_support import (
     command,
     output,
 )
-from .import_service import import_repository
+from .diagnostics import error_text
+from .errors import DomainError, StructuralError
+from .fetch_service import fetch_repository
 from .import_state import clean_all_import_state, clean_repository_import_state
 from .index import Index
+from .inventory_service import InventoryQuery, list_inventory
 from .manager_service import bulk_command, duration, json_value, register_batch
 from .repo_audit import audit
-from .repo_service import ImportResult, check_repository
+from .repo_service import FetchResult, check_repository
 from .repository_ref import is_repository_url
 from .worker import run_continuous, run_worker, shutdown_signals
 
@@ -53,7 +56,7 @@ def add(
     as_json: JsonOption = False,
 ) -> None:
     """Register Git URLs without downloading or queueing work."""
-    results = register_batch(Index(), urls, root=root, case_sensitive=case_sensitive)
+    results = register_batch(Index.initialize(), urls, root=root, case_sensitive=case_sensitive)
     for result in results:
         result["selector"] = urls[result["line"] - 1]
     output(results, as_json, columns=RESULT_COLUMNS)
@@ -64,11 +67,18 @@ def add(
 @repo_app.command("list")
 @command
 def list_repositories(
-    host: str | None = None,
-    local_state: str | None = None,
-    remote_status: str | None = None,
-    queued: bool = False,
-    scheduled: bool = False,
+    q: str = "",
+    host: list[str] | None = None,
+    archive_root: list[str] | None = None,
+    local_state: list[str] | None = None,
+    remote_status: list[str] | None = None,
+    storage_format: list[str] | None = None,
+    queued: bool | None = None,
+    running: bool | None = None,
+    scheduled: bool | None = None,
+    schedule_blocked: bool | None = None,
+    has_error: bool | None = None,
+    reconciliation_required: bool | None = None,
     sort: str = "repo_key",
     descending: bool = False,
     limit: int = 100,
@@ -76,18 +86,24 @@ def list_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """List indexed repositories without scanning storage or contacting remotes."""
+    query = InventoryQuery(
+        q=q,
+        host=tuple(host or ()),
+        archive_root=tuple(archive_root or ()),
+        local_state=tuple(local_state or ()),
+        remote_status=tuple(remote_status or ()),
+        storage_format=tuple(storage_format or ()),
+        queued=queued,
+        running=running,
+        scheduled=scheduled,
+        schedule_blocked=schedule_blocked,
+        has_error=has_error,
+        reconciliation_required=reconciliation_required,
+        sort=sort,
+        descending=descending,
+    )
     output(
-        Index().list(
-            host=host,
-            local_state=local_state,
-            remote_status=remote_status,
-            queued=queued,
-            scheduled=scheduled,
-            sort=sort,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-        ),
+        list_inventory(Index(read_only=True), query, limit=limit, offset=offset),
         as_json,
         columns=REPOSITORY_COLUMNS,
     )
@@ -97,7 +113,7 @@ def list_repositories(
 @command
 def show(selector: Selector, as_json: JsonOption = False) -> None:
     """Show indexed repository details by key or URL."""
-    output(Index().get(selector), as_json)
+    output(Index(read_only=True).get(selector), as_json)
 
 
 def selected(index: Index, selectors: list[str] | None, all_repositories: bool) -> list[str]:
@@ -115,15 +131,15 @@ def selected(index: Index, selectors: list[str] | None, all_repositories: bool) 
 
 def _fetch_one(
     index: Index, selector: str, *, case_sensitive: bool, adopt: bool, timeout: float
-) -> ImportResult:
+) -> FetchResult:
     """Fetch an indexed repository, or register and fetch a new clone URL."""
     record = index.find(selector)
     if record is None and not is_repository_url(selector):
-        raise ValueError(f"Repository is not indexed: {selector}")
+        raise StructuralError(f"Repository is not indexed: {selector}")
 
-    def attempt(adopt: bool, archive_dir: Path | None = None) -> ImportResult:
+    def attempt(adopt: bool, archive_dir: Path | None = None) -> FetchResult:
         if record is not None:
-            return import_repository(
+            return fetch_repository(
                 record["source_url"],
                 Path(record["archive_root"]),
                 case_sensitive=True,
@@ -131,7 +147,7 @@ def _fetch_one(
                 index=index,
                 timeout=timeout,
             )
-        return import_repository(
+        return fetch_repository(
             selector,
             archive_dir=archive_dir,
             case_sensitive=case_sensitive,
@@ -145,11 +161,13 @@ def _fetch_one(
     except AdoptionRequiredError as exc:
         if adopt or not _is_interactive():
             raise
-        typer.echo(exc.conflict_message, err=True)
+        typer.echo(error_text(exc), err=True)
         if not typer.confirm(
             "Verify and adopt the existing Git mirror, then fetch updates?", default=False, err=True
         ):
-            raise ValueError("Adoption declined; the existing mirror was left untouched") from exc
+            raise StructuralError(
+                "Adoption declined; the existing mirror was left untouched"
+            ) from exc
         # The first attempt has released its locks. Retry against the same root
         # even if configuration changed while awaiting input.
         return attempt(True, exc.archive_dir)
@@ -165,7 +183,7 @@ def _batch(
     timeout: float,
     as_json: bool,
 ) -> None:
-    index = Index()
+    index = Index.initialize()
     results: list[dict[str, Any]] = []
     failed = False
     for selector in selected(index, selectors, all_repositories):
@@ -174,19 +192,38 @@ def _batch(
                 result = _fetch_one(
                     index, selector, case_sensitive=case_sensitive, adopt=adopt, timeout=timeout
                 )
+                record = index.get(selector)
+                record["fetch"] = {
+                    "action": result.action,
+                    "adopted": result.adopted,
+                    "storage_format": result.storage_format,
+                    "archive_path": str(result.archive_path),
+                }
                 if not as_json:
-                    for message in result.info_messages:
-                        typer.echo(message)
+                    archive_kind = "Git mirror" if result.storage_format == "git" else "bundle"
+                    if result.adopted:
+                        typer.echo(f"INFO: adopted {archive_kind}: {result.archive_path}")
+                    typer.echo(f"INFO: {result.action} {archive_kind}: {result.archive_path}")
             else:
-                check_repository(selector, index=index, timeout=timeout)
-            results.append(index.get(selector))
-        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                record = check_repository(selector, index=index, timeout=timeout)
+            results.append(record)
+        except (DomainError, OSError, subprocess.SubprocessError) as exc:
             failed = True
             record = index.find(selector)
             results.append(
-                dict(record, operation_error=str(exc))
+                dict(
+                    record,
+                    operation_error=error_text(
+                        exc, selector if is_repository_url(selector) else ""
+                    ),
+                )
                 if record is not None
-                else {"selector": selector, "operation_error": str(exc)}
+                else {
+                    "selector": selector,
+                    "operation_error": error_text(
+                        exc, selector if is_repository_url(selector) else ""
+                    ),
+                }
             )
     output(results, as_json, columns=REPOSITORY_COLUMNS)
     if failed:
@@ -238,17 +275,19 @@ def clean(
     all_repositories: bool = typer.Option(False, "--all"),
 ) -> None:
     """Remove partial import state; completed archives and lock files are kept."""
-    index = Index()
+    index = Index.initialize()
     removed: list[Path] = []
     if all_repositories and not selectors:
-        removed.extend(clean_all_import_state())
+        removed.extend(clean_all_import_state(index=index))
     else:
         for selector in selected(index, selectors, all_repositories):
             record = index.find(selector)
             if record is None and not is_repository_url(selector):
-                raise ValueError(f"Repository is not indexed: {selector}")
+                raise StructuralError(f"Repository is not indexed: {selector}")
             removed.extend(
-                clean_repository_import_state(record["source_url"] if record else selector)
+                clean_repository_import_state(
+                    record["source_url"] if record else selector, index=index
+                )
             )
     if not removed:
         typer.echo("No partial import state found.")
@@ -263,7 +302,7 @@ class JobKind(StrEnum):
 
 
 def _mutate(selectors: list[str], action: str, as_json: bool, *, every: str | None = None) -> None:
-    index = Index()
+    index = Index.initialize()
     seen: set[int] = set()
     results: list[dict[str, Any]] = []
     for selector in dict.fromkeys(selectors):
@@ -274,8 +313,12 @@ def _mutate(selectors: list[str], action: str, as_json: bool, *, every: str | No
             seen.add(record["id"])
             result = bulk_command(index, [record["id"]], action, every=every)[0]
             result.update(selector=selector, repo_key=record["repo_key"])
-        except (ValueError, OSError, sqlite3.Error) as exc:
-            result = {"selector": selector, "status": "error", "error": str(exc)}
+        except (DomainError, OSError, sqlite3.Error) as exc:
+            result = {
+                "selector": selector,
+                "status": "error",
+                "error": error_text(exc, selector if is_repository_url(selector) else ""),
+            }
         results.append(result)
     output(results, as_json, columns=RESULT_COLUMNS)
     if any(result["status"] == "error" for result in results):
@@ -310,7 +353,7 @@ def schedule(
         try:
             duration(every)
         except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+            raise typer.BadParameter(error_text(exc)) from exc
     _mutate(selectors, "disable" if off else "schedule", as_json, every=every)
 
 
@@ -324,7 +367,8 @@ def audit_repositories(
     as_json: JsonOption = False,
 ) -> None:
     """Inspect archive storage and optionally repair inventory or adopt mirrors."""
-    issues = audit(fix=fix, adopt=adopt)
+    index = Index.initialize() if fix or adopt else Index(read_only=True)
+    issues = audit(index=index, fix=fix, adopt=adopt)
     output(issues, as_json)
     if any(not issue["fixed"] for issue in issues):
         raise typer.Exit(1)
@@ -342,6 +386,7 @@ def worker(
     """Process jobs continuously, or drain currently runnable work with --once."""
     if min(check_timeout, fetch_timeout, convert_timeout) <= 0:
         raise typer.BadParameter("Timeouts must be positive")
+    index = Index.initialize()
     if not once:
         stop = threading.Event()
 
@@ -353,6 +398,7 @@ def worker(
 
         with shutdown_signals(stop):
             run_continuous(
+                index=index,
                 stop=stop,
                 check_timeout=check_timeout,
                 fetch_timeout=fetch_timeout,
@@ -363,6 +409,7 @@ def worker(
     stop = threading.Event()
     with shutdown_signals(stop):
         results = run_worker(
+            index=index,
             check_timeout=check_timeout,
             fetch_timeout=fetch_timeout,
             convert_timeout=convert_timeout,

@@ -11,7 +11,7 @@ from cache22.repo_service import add_repository
 
 
 def test_coalescing_and_claims_respect_conversion_barriers(tmp_path: Path) -> None:
-    index = Index(tmp_path / "index.db", clock=lambda: 1000)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: 1000)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
     queue = Queue(index)
     with index.transaction() as db:
@@ -46,7 +46,7 @@ def test_coalescing_and_claims_respect_conversion_barriers(tmp_path: Path) -> No
 
 def test_expired_owner_cannot_renew_publish_or_finalize(tmp_path: Path) -> None:
     now = 1000
-    index = Index(tmp_path / "index.db", clock=lambda: now)
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
     queue = Queue(index)
     queue.enqueue(repo_id)

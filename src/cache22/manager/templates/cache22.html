@@ -1,12 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Cache22 · {{ page|capitalize }}{% endblock %}
 {% block content %}
-<nav class="c22-nav" aria-label="Cache22">
-  <a href="{{ inventory_url }}">Inventory</a>
-  <a href="/-/cache22/add">Add repositories</a>
-  <a href="/-/cache22/queue">Queue and workers</a>
-  <a href="/index">Browse index</a>
-</nav>
 <main id="c22-page" data-page="{{ page }}" {% if repository_id %}data-id="{{ repository_id }}"{% endif %}>
 <h1>{{ {"add": "Add repositories", "queue": "Queue and workers", "repository": "Repository details"}[page] }}</h1>
 <p id="c22-connection" role="status"></p>
