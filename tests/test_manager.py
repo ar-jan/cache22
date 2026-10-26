@@ -186,3 +186,17 @@ def test_web_browsing_selection_commands_and_boundaries(tmp_path: Path) -> None:
         assert response.json()[0]["last_error"] == "Invalid storage"
         assert response.headers["cache-control"] == "no-store"
         assert client.get("/static/manager.js").status_code == 200
+
+    lan_app = create_app(tmp_path / "lan.db", allowed_hosts={"g1820"}, allow_ip_literals=True)
+    with TestClient(lan_app, base_url="http://192.168.1.110:8001") as client:
+        assert client.get("/", headers={"host": "192.168.1.110:8001"}).status_code == 200
+        assert client.get("/", headers={"host": "g1820:8001"}).status_code == 200
+        assert client.get("/", headers={"host": "evil.example"}).status_code == 403
+        assert (
+            client.post(
+                "/api/selection",
+                json={"query": ""},
+                headers={"host": "192.168.1.110:8001", "origin": "http://evil.example"},
+            ).status_code
+            == 403
+        )

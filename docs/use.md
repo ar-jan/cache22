@@ -43,7 +43,7 @@ cache22 jobs [SELECTOR]
 cache22 audit [--fix] [--adopt] [--json]
 cache22 worker [--once] [--timeout-check SECONDS]
                [--timeout-fetch SECONDS] [--timeout-convert SECONDS] [--json]
-cache22 web [--port PORT]
+cache22 web [--host HOST] [--port PORT] [--allow-host NAME]
 ```
 
 A `SELECTOR` is an exact canonical key (such as `github.com/ar-jan/cache22`)
@@ -192,7 +192,10 @@ cache22 worker
 ```
 
 The web server only serves the browser manager; it never starts a worker. It binds
-to loopback and accepts `--port` (default 8001). The browser can register repositories
+to loopback by default and accepts `--host` and `--port` (default 8001). Use
+`--host 0.0.0.0` to listen on all IPv4 interfaces and reach the manager from the
+LAN; the server then accepts any IP-literal Host plus local hostnames, and
+`--allow-host` adds further names. The browser can register repositories
 and queue jobs while workers are stopped. Each process can restart independently;
 closing the browser does not stop jobs.
 

@@ -30,6 +30,7 @@ Run these in separate terminals:
 ```sh
 cache22 web
 # Open http://127.0.0.1:8001/
+# Use `cache22 web --host 0.0.0.0` to serve the manager to the LAN.
 ```
 
 ```sh
