@@ -11,7 +11,7 @@
 </div>
 <div class="c22-scroll">
 <table class="c22-table"><caption class="c22-visually-hidden">Matching repositories</caption>
-<thead><tr>{% for heading in ['Select', 'Repository', 'Archive', 'State', 'Schedule', 'Activity', 'Diagnostic'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead>
+<thead><tr>{% for heading in ['Select', 'Repository', 'Archive', 'State', 'Schedule', 'Activity', 'Current issue'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead>
 <tbody>
 {% for row in rows %}<tr data-id="{{ row.id }}">
 <td><input id="repository-{{ row.id }}-select" type="checkbox" class="c22-select" value="{{ row.id }}" aria-label="Select {{ row.repo_key }}"></td>

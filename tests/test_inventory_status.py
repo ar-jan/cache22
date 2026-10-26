@@ -30,7 +30,7 @@ def test_schema_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -
         )
     }
     with index.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
         assert (removed | {"project_name"}).isdisjoint(
             row[1] for row in db.execute("PRAGMA table_info(repositories)")
         )
@@ -48,7 +48,7 @@ def test_schema_stores_attempts_instead_of_repository_outcomes(tmp_path: Path) -
         index.update(record["id"], last_fetched_at=1)
 
 
-@pytest.mark.parametrize("version", [2, 3, 99])
+@pytest.mark.parametrize("version", [2, 3, 4, 99])
 @pytest.mark.parametrize("access", ["read_only", "read_write", "initialize"])
 def test_unsupported_index_is_rejected_without_reset(
     tmp_path: Path, version: int, access: str
@@ -165,6 +165,84 @@ def test_promoting_retry_preserves_original_attempt_kind(tmp_path: Path) -> None
     assert record["last_fetched_at"] == 1000
     assert not record["has_error"]
     assert [a["kind"] for a in queue.list(repo_id)[0]["attempts"]] == ["check", "fetch"]
+
+
+@pytest.mark.parametrize("kind", ["check", "fetch", "convert"])
+@pytest.mark.parametrize("elapsed", [0, 1])
+def test_separate_success_resolves_inventory_error_and_preserves_history(
+    tmp_path: Path, kind: Kind, elapsed: int
+) -> None:
+    now = 1000
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
+    repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
+    scheduler = Scheduler(index)
+    queue = Queue(index)
+    failed = scheduler.immediate(repo_id, kind)
+    scheduler.finish(failed, category="structural", error="Needs retry")
+    assert index.get(repo_id)["has_error"]
+
+    now += elapsed
+    queued = queue.enqueue(repo_id, kind)
+    assert index.get(repo_id)["has_error"]
+    queue.unqueue(repo_id)
+    assert index.get(repo_id)["has_error"]
+    retry = scheduler.immediate(repo_id, kind)
+    assert retry["id"] not in (failed["id"], queued)
+    assert index.get(repo_id)["has_error"]
+    scheduler.finish(retry)
+
+    record = index.get(repo_id)
+    assert not record["has_error"]
+    assert all(
+        record[field] is None
+        for field in ("last_error", "last_error_kind", "last_error_category", "last_error_at")
+    )
+    assert list_inventory(index, InventoryQuery(has_error=True)) == []
+    assert list_inventory(index, InventoryQuery(has_error=False))[0]["id"] == repo_id
+    assert jobs_snapshot(index, state="failed")["jobs"][0]["diagnostic"]["error"] == "Needs retry"
+    assert any(a["error"] == "Needs retry" for a in detail(index, repo_id)["attempts"])
+
+    # An earlier success must not hide a subsequent failure, even in the same second.
+    scheduler.finish(
+        scheduler.immediate(repo_id, kind), category="structural", error="Failed again"
+    )
+    assert index.get(repo_id)["last_error"] == "Failed again"
+
+
+def test_resolution_is_scoped_to_repository_and_attempt_kind(tmp_path: Path) -> None:
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: 1000)
+    repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
+    other_id = add_repository("https://host/team/other", tmp_path, index=index)["id"]
+    scheduler = Scheduler(index)
+    scheduler.finish(
+        scheduler.immediate(repo_id, "fetch"), category="structural", error="Fetch failed"
+    )
+    scheduler.finish(
+        scheduler.immediate(repo_id, "convert"), category="structural", error="Convert failed"
+    )
+    scheduler.finish(scheduler.immediate(other_id, "convert"))
+    scheduler.finish(scheduler.immediate(repo_id, "check"))
+    assert index.get(repo_id)["last_error"] == "Convert failed"
+    scheduler.finish(scheduler.immediate(repo_id, "convert"))
+    assert index.get(repo_id)["last_error"] == "Fetch failed"
+    scheduler.finish(scheduler.immediate(repo_id, "fetch"))
+    assert not index.get(repo_id)["has_error"]
+
+
+def test_resolution_survives_history_pruning(tmp_path: Path) -> None:
+    now = 1000
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
+    repo_id = add_repository("https://host/team/repo", tmp_path, index=index)["id"]
+    scheduler = Scheduler(index)
+    failure = scheduler.immediate(repo_id, "convert")
+    scheduler.finish(failure, category="structural", error="Conversion failed")
+    success = scheduler.immediate(repo_id, "convert")
+    scheduler.finish(success)
+    assert not index.get(repo_id)["has_error"]
+    now += 31 * 86400
+    scheduler.tick()
+    assert [j["id"] for j in Queue(index).list()] == [success["id"]]
+    assert not index.get(repo_id)["has_error"]
 
 
 def test_retention_keeps_latest_success_per_repository_and_kind(tmp_path: Path) -> None:

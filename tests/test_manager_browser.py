@@ -188,6 +188,26 @@ def test_browser_selection_refresh_registration_and_queue(
                 page.wait_for_function(
                     "document.querySelector('#c22-attempts').textContent.includes('succeeded')"
                 )
+                # An open inventory clears a resolved error through normal polling.
+                recovered_id = index.get("example.org/team/repo0")["id"]
+                failed = scheduler.immediate(recovered_id, "convert")
+                scheduler.finish(failed, category="structural", error="Conversion needs retry")
+                page.goto(base)
+                page.wait_for_function(
+                    "document.querySelector('#c22-inventory-data').textContent.includes('Conversion needs retry')"
+                )
+                retry = scheduler.immediate(recovered_id, "convert")
+                assert "Conversion needs retry" in page.locator("#c22-inventory-data").inner_text()
+                scheduler.finish(retry)
+                page.wait_for_function(
+                    "!document.querySelector('#c22-inventory-data').textContent.includes('Conversion needs retry')"
+                )
+                page.goto(base + f"/repositories/{recovered_id}")
+                page.wait_for_function(
+                    "document.querySelector('#c22-detail').textContent.includes('Current issue')"
+                )
+                assert "Conversion needs retry" not in page.locator("#c22-detail").inner_text()
+                assert "Conversion needs retry" in page.locator("#c22-attempts").inner_text()
                 assert not errors
             finally:
                 if browser is not None:

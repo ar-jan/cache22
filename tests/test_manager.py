@@ -185,6 +185,16 @@ def test_web_browsing_selection_commands_and_boundaries(tmp_path: Path) -> None:
         response = client.get("/inventory.json?has_error=true")
         assert response.json()[0]["last_error"] == "Invalid storage"
         assert response.headers["cache-control"] == "no-store"
+        assert "Current issue" in client.get("/inventory/fragment").text
+        scheduler.finish(scheduler.immediate(ids[1], "check"))
+        assert client.get("/inventory.json?has_error=true").json() == []
+        assert client.post("/api/selection", json={"query": "has_error=true"}).json()["ids"] == []
+        assert "Invalid storage" not in client.get("/inventory/fragment").text
+        assert "Invalid storage" not in client.get("/inventory.csv").text
+        details = client.get(f"/api/detail?id={ids[1]}").json()
+        assert not details["repository"]["has_error"]
+        assert details["repository"]["last_error"] is None
+        assert any(a["error"] == "Invalid storage" for a in details["attempts"])
         assert client.get("/static/manager.js").status_code == 200
 
     lan_app = create_app(tmp_path / "lan.db", allowed_hosts={"g1820"}, allow_ip_literals=True)

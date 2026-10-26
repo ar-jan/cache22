@@ -45,7 +45,7 @@ metadata is available in repository details and filtered JSON/CSV exports, excep
 stored clone URLs. Changes go through Cache22 services. Assets
 are bundled locally. See [usage](docs/use.md) for commands and service examples.
 
-The index uses schema version 4. Other versions are rejected without migration
+The index uses schema version 5. Other versions are rejected without migration
 or automatic reset. To replace an older index, stop all Cache22 processes, back
 up the index, and remove it and its `-wal`/`-shm` sidecars. This loses registrations,
 schedules, queued work, and history, but leaves archive files intact. A fresh index
