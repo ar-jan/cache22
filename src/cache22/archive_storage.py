@@ -148,7 +148,13 @@ class RepositoryStorage:
         pattern = re.compile(
             re.escape(self.paths.repository_dir.name) + r"\.[0-9a-f]{32}\.bundle\Z"
         )
-        return sorted(name for name in os.listdir(self.directory_fd) if pattern.fullmatch(name))
+        # Btrfs can omit new entries when rescanning an existing open handle.
+        # Open relative to the reserved directory to retain its identity and lock.
+        fd = os.open(".", _DIRECTORY_FLAGS, dir_fd=self.directory_fd)
+        try:
+            return sorted(name for name in os.listdir(fd) if pattern.fullmatch(name))
+        finally:
+            os.close(fd)
 
     def has_import_state(self) -> bool:
         return any(

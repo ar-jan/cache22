@@ -230,6 +230,42 @@ def test_publication_interruption_keeps_recoverable_source(
     assert not repo.paths.bundle_staging.exists()
 
 
+def test_conversion_retry_recovers_manifest_published_before_inventory(
+    repo: Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo.commit("first")
+    repo.fetch()
+    read_bundle = git_bundle.read_bundle
+
+    def fail_validation(*args: Any) -> git_bundle.BundleState:
+        read_bundle(*args)
+        raise StructuralError("injected post-publication validation failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git_bundle, "read_bundle", fail_validation)
+        with pytest.raises(StructuralError, match="injected post-publication"):
+            repo.convert()
+
+    manifest = repo.paths.bundle_manifest.read_bytes()
+    bundle = repo.paths.repository_dir / json.loads(manifest)["bundle_file"]
+    assert bundle.is_file()
+    assert repo.paths.mirror_repository.is_dir()
+    assert repo.index.get(repo.id)["storage_format"] == "git"
+    assert repo.index.get(repo.id)["reconciliation_required"]
+
+    repo.source.rename(repo.source.with_name("offline"))
+    assert repo.convert() == bundle
+    assert repo.paths.bundle_manifest.read_bytes() == manifest
+    record = repo.index.get(repo.id)
+    assert record["storage_format"] == "bundle"
+    assert record["archive_path"] == str(bundle)
+    assert not record["reconciliation_required"]
+    assert record["last_converted_at"] is not None
+    assert not repo.paths.mirror_repository.exists()
+    assert not repo.paths.clone_complete_marker.exists()
+    assert not repo.paths.bundle_staging.exists()
+
+
 def test_corrupt_selected_bundle_prevents_source_retirement(
     repo: Repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
