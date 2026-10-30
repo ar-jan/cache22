@@ -20,6 +20,20 @@ and fail with exit code 1 if it is missing. Register a repository with `add` or
 `fetch`, or use `audit --fix` to rebuild inventory from managed archives. Help
 and configuration commands do not access the index.
 
+### SSH first, HTTPS fallback
+
+Remote Git commands (clone, fetch, and remote checks) try SSH first and fall back
+to HTTPS only when the SSH command fails, for example when the key is not
+authorized. HTTPS URLs map to `ssh://git@HOST/PATH`, the convention of common
+forges; SSH URLs map to `https://HOST/PATH`. HTTPS URLs with embedded
+credentials use HTTPS only. A fetch uses the transport that answered its first
+remote request for the rest of that operation; a new mirror records it as its
+origin URL. When both transports fail, the error reports each diagnostic.
+
+SSH runs without a terminal: use keys without a passphrase prompt (e.g. via
+`ssh-agent`) and known host keys. Set options such as `ConnectTimeout` in
+`~/.ssh/config` so an unreachable SSH port does not delay the fallback.
+
 ## Commands
 
 ```text

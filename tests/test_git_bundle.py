@@ -532,6 +532,8 @@ def test_remote_head_race_preserves_published_bundle(
 
     def racing_head(*args: Any) -> Any:
         nonlocal calls
+        if args[-1].startswith("ssh://"):
+            return remote_head(*args)
         calls += 1
         if calls == 2:
             repo.commit("raced")

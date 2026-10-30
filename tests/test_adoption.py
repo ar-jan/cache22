@@ -23,7 +23,7 @@ from cache22.archive_layout import ArchivePaths, archive_paths_for_repository
 from cache22.archive_storage import LOCK_SIGNATURE, repository_operation
 from cache22.cli import app
 from cache22.config import add_archive_dir
-from cache22.errors import RepositoryBusyError, StructuralError
+from cache22.errors import RepositoryBusyError, StructuralError, TransportError
 from cache22.fetch_service import fetch_repository
 from cache22.import_state import clean_repository_import_state
 from cache22.index import Index
@@ -537,6 +537,7 @@ def test_trusted_user_ssh_configuration_remains_available(
     git(mirror.source, "config", "--file", str(user_config), "core.sshcommand", str(ssh))
     git(mirror.source, "config", "--file", str(user_config), "ssh.variant", "simple")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(user_config))
+    monkeypatch.delenv("GIT_SSH_COMMAND")
     url = "git@host:team/project"
     git(mirror.paths.mirror_repository, "config", "remote.origin.url", url)
     latest = mirror.commit("authenticated update")
@@ -664,6 +665,8 @@ def test_fetched_head_must_match_even_when_advertisements_agree(
 
     def changing_remote(executable: Path, path: Path, url: str) -> git_mirror._RemoteHead:
         nonlocal discoveries, fetched
+        if url.startswith("ssh://"):
+            return discover(executable, path, url)
         discoveries += 1
         if discoveries == 2:
             # Restore the advertised OID after fetch has already received a different one.
@@ -696,6 +699,8 @@ def test_post_fetch_head_discovery_failure_retains_refs_for_retry(
 
     def failing_discovery(executable: Path, path: Path, url: str) -> git_mirror._RemoteHead:
         nonlocal discoveries
+        if url.startswith("ssh://"):
+            return discover(executable, path, url)
         discoveries += 1
         if discoveries == 2:
             raise subprocess.CalledProcessError(128, [str(executable), "ls-remote"])
@@ -703,7 +708,7 @@ def test_post_fetch_head_discovery_failure_retains_refs_for_retry(
 
     with (
         patch("cache22.git_mirror._remote_head", side_effect=failing_discovery),
-        pytest.raises(RuntimeError, match="refs were fetched, but HEAD synchronization failed"),
+        pytest.raises(TransportError, match="Remote HEAD discovery failed; retry the fetch"),
     ):
         fetch_repository(URL, mirror.root, index=inventory_index)
     assert (mirror.paths.mirror_repository / "HEAD").read_bytes() == previous_head

@@ -18,6 +18,7 @@ from .git_config import (
 )
 from .git_layout import validate_git_mirror_layout
 from .operation import run as run_git
+from .remote_transport import with_transport_fallback
 from .repository_ref import parse_repository_url
 
 
@@ -43,33 +44,37 @@ def ensure_git_mirror(
         )
 
     operation.progress("cloning")
-    try:
-        run_git(
-            [
-                str(git_executable),
-                "clone",
-                "--mirror",
-                "--progress",
-                "--",
-                url,
-                str(paths.mirror_repository),
-            ],
-            check=True,
-            observe_progress=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        _clear_incomplete_mirror(storage)
-        raise TransportError(
-            failure_message(f"git clone --mirror failed with exit code {exc.returncode}", exc, url)
-        ) from exc
+
+    def clone(candidate: str) -> None:
+        try:
+            run_git(
+                [
+                    str(git_executable),
+                    "clone",
+                    "--mirror",
+                    "--progress",
+                    "--",
+                    candidate,
+                    str(paths.mirror_repository),
+                ],
+                check=True,
+                observe_progress=True,
+            )
+        except subprocess.CalledProcessError:
+            _clear_incomplete_mirror(storage)
+            raise
+
+    url, _ = with_transport_fallback(
+        url, clone, lambda exc: f"git clone --mirror failed with exit code {exc.returncode}"
+    )
 
     try:
         # Git clone can turn a detached remote HEAD into a matching local branch.
         # Publish the actual advertised HEAD before declaring the clone complete.
-        head = _remote_head(git_executable, paths.mirror_repository, url)
+        head = _checked_remote_head(git_executable, paths.mirror_repository, url)
         operation.progress("HEAD synchronization")
         _synchronize_head(git_executable, paths.mirror_repository, head)
-        if _remote_head(git_executable, paths.mirror_repository, url) != head:
+        if _checked_remote_head(git_executable, paths.mirror_repository, url) != head:
             raise StructuralError("Remote HEAD changed during cloning; retry the fetch")
         storage.write_clone_marker()
     except OSError, RuntimeError, ValueError, subprocess.SubprocessError:
@@ -89,9 +94,12 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
         git_executable, mirror, parse_repository_url(url, case_sensitive=True).source_path
     )
     try:
-        head = _remote_head(git_executable, mirror, url)
-    except subprocess.CalledProcessError as exc:
-        raise TransportError(failure_message("Remote HEAD discovery failed", exc, url)) from exc
+        # The URL that answers discovery serves the fetch and its verification.
+        url, head = with_transport_fallback(
+            url,
+            lambda candidate: _remote_head(git_executable, mirror, candidate),
+            lambda exc: "Remote HEAD discovery failed",
+        )
     except StructuralError as exc:
         raise StructuralError(
             "Remote HEAD discovery failed; the initialized mirror was kept. "
@@ -133,7 +141,7 @@ def fetch_git_repository(*, git_executable: Path, url: str, mirror: Path) -> Non
             )
         ) from exc
     try:
-        if _remote_head(git_executable, mirror, url) != head:
+        if _checked_remote_head(git_executable, mirror, url) != head:
             raise StructuralError("Remote HEAD changed during fetching")
         operation.progress("HEAD synchronization")
         _synchronize_head(git_executable, mirror, head)
@@ -165,14 +173,19 @@ def _read_git(
     )
 
 
-def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
-    operation.progress("remote observation")
+def _checked_remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
     try:
-        advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
+        return _remote_head(git, mirror, url)
     except subprocess.CalledProcessError as exc:
         raise TransportError(
             failure_message("Remote HEAD discovery failed; retry the fetch", exc, url)
         ) from exc
+
+
+def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
+    """Raise ``CalledProcessError`` only when the remote cannot be reached."""
+    operation.progress("remote observation")
+    advertisement = _read_git(git, mirror, "ls-remote", "--symref", "--", url, "HEAD").stdout
     target = oid = None
     for line in advertisement.splitlines():
         value, _, name = line.partition("\t")
@@ -184,7 +197,8 @@ def _remote_head(git: Path, mirror: Path, url: str) -> _RemoteHead:
             target = value.removeprefix("ref: ")
             if not target.startswith("refs/"):
                 raise StructuralError("Invalid remote HEAD target")
-            _read_git(git, mirror, "check-ref-format", target)
+            if _read_git(git, mirror, "check-ref-format", target, check=False).returncode:
+                raise StructuralError("Invalid remote HEAD target")
         else:
             if oid is not None or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value):
                 raise StructuralError("Invalid remote HEAD object ID")
