@@ -84,6 +84,23 @@ def parse_repository_url(url: str, *, case_sensitive: bool = False) -> Repositor
     )
 
 
+def transport_urls(url: str) -> tuple[str, ...]:
+    """Remote URLs for one repository in attempt order: SSH first, then HTTPS.
+
+    HTTPS maps to ``ssh://git@HOST/PATH``, the convention of common forges; SSH maps
+    to ``https://HOST/PATH``. HTTPS URLs with embedded credentials stay HTTPS-only.
+    """
+    raw_url = url.strip()
+    host, raw_path = _split_clone_url(raw_url)
+    url_host = f"[{host}]" if ":" in host else host
+    path = raw_path.lstrip("/")
+    if raw_url.casefold().startswith("https://"):
+        if "@" in urlsplit(raw_url).netloc:
+            return (raw_url,)
+        return (f"ssh://git@{url_host}/{path}", raw_url)
+    return (raw_url, f"https://{url_host}/{path}")
+
+
 def _split_clone_url(raw_url: str) -> tuple[str, str]:
     if "://" not in raw_url:
         user_host, separator, path = raw_url.partition(":")

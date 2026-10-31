@@ -20,6 +20,20 @@ and fail with exit code 1 if it is missing. Register a repository with `add` or
 `fetch`, or use `audit --fix` to rebuild inventory from managed archives. Help
 and configuration commands do not access the index.
 
+### SSH first, HTTPS fallback
+
+Remote Git commands (clone, fetch, and remote checks) try SSH first and fall back
+to HTTPS only when the SSH command fails, for example when the key is not
+authorized. HTTPS URLs map to `ssh://git@HOST/PATH`, the convention of common
+forges; SSH URLs map to `https://HOST/PATH`. HTTPS URLs with embedded
+credentials use HTTPS only. A fetch uses the transport that answered its first
+remote request for the rest of that operation; a new mirror records it as its
+origin URL. When both transports fail, the error reports each diagnostic.
+
+SSH runs without a terminal: use keys without a passphrase prompt (e.g. via
+`ssh-agent`) and known host keys. Set options such as `ConnectTimeout` in
+`~/.ssh/config` so an unreachable SSH port does not delay the fallback.
+
 ## Commands
 
 ```text
@@ -43,7 +57,7 @@ cache22 jobs [SELECTOR]
 cache22 audit [--fix] [--adopt] [--json]
 cache22 worker [--once] [--timeout-check SECONDS]
                [--timeout-fetch SECONDS] [--timeout-convert SECONDS] [--json]
-cache22 web [--port PORT]
+cache22 web [--host HOST] [--port PORT] [--allow-host NAME]
 ```
 
 A `SELECTOR` is an exact canonical key (such as `github.com/ar-jan/cache22`)
@@ -192,7 +206,10 @@ cache22 worker
 ```
 
 The web server only serves the browser manager; it never starts a worker. It binds
-to loopback and accepts `--port` (default 8001). The browser can register repositories
+to loopback by default and accepts `--host` and `--port` (default 8001). Use
+`--host 0.0.0.0` to listen on all IPv4 interfaces and reach the manager from the
+LAN; the server then accepts any IP-literal Host plus local hostnames, and
+`--allow-host` adds further names. The browser can register repositories
 and queue jobs while workers are stopped. Each process can restart independently;
 closing the browser does not stop jobs.
 

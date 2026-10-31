@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from cache22.archive_layout import archive_paths_for_repository
+from cache22.errors import TransportError
 from cache22.fetch_service import fetch_repository
 from cache22.index import Index
 from cache22.repository_ref import parse_repository_url
@@ -50,7 +51,7 @@ def test_fetch_repository_clones_git_mirror(inventory_index: Index, tmp_path: Pa
             "--mirror",
             "--progress",
             "--",
-            "https://gitlab.com/group/subgroup/cache22.git",
+            "ssh://git@gitlab.com/group/subgroup/cache22.git",
             str(paths.mirror_repository),
         ]
     ]
@@ -115,16 +116,20 @@ def test_failed_clone_releases_lock_and_removes_only_incomplete_output(
         nonlocal calls
         calls += 1
         Path(args[-1]).mkdir()
-        if calls == 1:
-            raise subprocess.CalledProcessError(128, args)
+        if calls <= 2:
+            raise subprocess.CalledProcessError(128, args, stderr=f"denied {calls}")
         return subprocess.CompletedProcess(args, 0)
 
     with (
         patch("cache22.storage.find_git_executable", return_value=Path("/usr/bin/git")),
         patch("cache22.git_mirror.run_git", side_effect=clone),
     ):
-        with pytest.raises(RuntimeError, match="git clone --mirror failed"):
+        with pytest.raises(TransportError, match="git clone --mirror failed") as failure:
             fetch_repository(url, tmp_path, index=inventory_index)
+        assert str(failure.value) == (
+            "SSH: git clone --mirror failed with exit code 128\ndenied 1\n"
+            "HTTPS: git clone --mirror failed with exit code 128\ndenied 2"
+        )
         assert not paths.mirror_repository.exists()
         assert not paths.clone_complete_marker.exists()
         assert paths.lock_file.is_file()

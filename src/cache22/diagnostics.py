@@ -30,9 +30,11 @@ def error_text(exc: BaseException, *sources: str) -> str:
     return sanitize(str(exc), *sources)
 
 
-def failure_message(summary: str, error: subprocess.CalledProcessError, *sources: str) -> str:
+def failure_message(
+    summary: str, error: subprocess.CalledProcessError, *sources: str, limit: int = 4000
+) -> str:
     """Keep the final diagnostic after progress chatter, within the persisted error limit."""
-    summary = sanitize(summary, *sources)
+    summary = sanitize(summary, *sources)[:limit]
     stderr = error.stderr
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
@@ -41,7 +43,7 @@ def failure_message(summary: str, error: subprocess.CalledProcessError, *sources
     # Sanitize before taking the tail so truncation cannot split a credential-bearing URL.
     # Work line-by-line to avoid sanitize()'s prefix limit discarding the final error.
     detail = "\n".join(sanitize(line, *sources) for line in stderr.splitlines()).strip()
-    remaining = 4000 - len(summary) - 1
+    remaining = limit - len(summary) - 1
     if not detail or remaining <= 0:
         return summary
     return summary + "\n" + detail[-remaining:]

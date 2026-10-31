@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import ipaddress
 import json
 import sqlite3
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -28,13 +30,30 @@ from ..index import Index
 
 ASSETS = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=ASSETS / "templates")
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def is_ip_literal(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 class BrowserBoundary:
-    """Validate loopback Host and same-origin requests, including forwarded ports."""
+    """Validate allowed Host and same-origin requests, including forwarded ports."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_hosts: Collection[str] = LOOPBACK_HOSTS,
+        allow_ip_literals: bool = False,
+    ) -> None:
         self.app = app
+        self.allowed_hosts = {host.lower() for host in allowed_hosts}
+        self.allow_ip_literals = allow_ip_literals
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in {"http", "websocket"}:
@@ -47,9 +66,13 @@ class BrowserBoundary:
         host = headers.get("host", "")
         try:
             parsed = urlsplit("http://" + host)
+            hostname = (parsed.hostname or "").lower()
             valid = (
                 len(headers.getlist("host")) == 1
-                and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                and (
+                    hostname in self.allowed_hosts
+                    or (self.allow_ip_literals and is_ip_literal(hostname))
+                )
                 and not parsed.username
                 and not parsed.password
                 and not parsed.path
@@ -237,7 +260,12 @@ async def api(request: Request) -> Response:
     return JSONResponse(service.json_value(result))
 
 
-def create_app(path: Path | None = None) -> Starlette:
+def create_app(
+    path: Path | None = None,
+    *,
+    allowed_hosts: Collection[str] = LOOPBACK_HOSTS,
+    allow_ip_literals: bool = False,
+) -> Starlette:
     app = Starlette(
         routes=[
             Route("/", inventory_view),
@@ -262,6 +290,10 @@ def create_app(path: Path | None = None) -> Starlette:
         },
         max_body_size=2 * 1024 * 1024,
     )
-    app.add_middleware(BrowserBoundary)
+    app.add_middleware(
+        BrowserBoundary,
+        allowed_hosts=allowed_hosts,
+        allow_ip_literals=allow_ip_literals,
+    )
     app.state.index = Index.initialize(path)
     return app

@@ -15,7 +15,7 @@ from cache22.fetch_service import fetch_repository
 from cache22.import_state import clean_all_import_state, clean_repository_import_state
 from cache22.index import Index
 from cache22.repo_service import FetchResult
-from cache22.repository_ref import parse_repository_url
+from cache22.repository_ref import parse_repository_url, transport_urls
 
 pytestmark = pytest.mark.usefixtures("mock_inventory_git")
 
@@ -85,7 +85,7 @@ def test_ipv6_clone_url_and_archive_reuse(
         first = fetch_repository(
             url, tmp_path, case_sensitive=case_sensitive, index=inventory_index
         )
-        assert run.call_args.args[0][-2] == expected
+        assert run.call_args.args[0][-2] == transport_urls(expected)[0]
     with (
         patch("cache22.storage.find_git_executable", return_value=Path("git")),
         patch("cache22.git_mirror._fetch_git_mirror") as fetch,
@@ -112,7 +112,7 @@ def test_source_conflicts_before_archive_reuse(
         )
         assert (
             run.call_args.args[0][-2]
-            == parse_repository_url(URL, case_sensitive=first_override).clone_url
+            == transport_urls(parse_repository_url(URL, case_sensitive=first_override).clone_url)[0]
         )
     paths = archive_paths_for_repository(tmp_path, parse_repository_url(URL))
     before = paths.source_file.read_bytes()

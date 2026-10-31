@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cache22.repository_ref import parse_repository_url
+from cache22.repository_ref import parse_repository_url, transport_urls
 
 
 def test_parse_repository_url_normalizes_https_and_ssh_for_github() -> None:
@@ -63,3 +63,39 @@ def test_parse_repository_url_normalizes_case_for_alternative_git_host() -> None
     assert mixed_case == lowercase
     assert hash(mixed_case) == hash(lowercase)
     assert mixed_case.display_path != lowercase.display_path
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        (
+            "https://github.com/Ar-Jan/Cache22.git",
+            ("ssh://git@github.com/Ar-Jan/Cache22.git", "https://github.com/Ar-Jan/Cache22.git"),
+        ),
+        (
+            "https://git.example.org:8443/team/repo",
+            ("ssh://git@git.example.org/team/repo", "https://git.example.org:8443/team/repo"),
+        ),
+        (
+            "https://[2001:db8::1]/team/repo.git",
+            ("ssh://git@[2001:db8::1]/team/repo.git", "https://[2001:db8::1]/team/repo.git"),
+        ),
+        ("https://user:token@host/team/repo", ("https://user:token@host/team/repo",)),
+        (
+            "git@github.com:ar-jan/cache22.git",
+            ("git@github.com:ar-jan/cache22.git", "https://github.com/ar-jan/cache22.git"),
+        ),
+        (
+            "deploy@host:/srv/team/repo",
+            ("deploy@host:/srv/team/repo", "https://host/srv/team/repo"),
+        ),
+        (
+            "ssh://git@host:2222/team/repo.git",
+            ("ssh://git@host:2222/team/repo.git", "https://host/team/repo.git"),
+        ),
+    ],
+)
+def test_transport_urls_prefer_ssh_then_https(url: str, expected: tuple[str, ...]) -> None:
+    assert transport_urls(url) == expected
+    for candidate in expected:
+        assert parse_repository_url(candidate, case_sensitive=True) == parse_repository_url(url)

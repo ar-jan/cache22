@@ -11,13 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from . import operation
-from .diagnostics import failure_message
 from .errors import StructuralError, TransportError
 from .git_config import (
     git_local_environment,
     git_repository_command,
     git_repository_environment,
 )
+from .remote_transport import with_transport_fallback
 from .system_tools import find_git_executable
 
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -41,26 +41,21 @@ class RefSnapshot:
 
 
 def remote_snapshot(url: str) -> RefSnapshot:
-    try:
-        result = operation.run(
-            [
-                str(find_git_executable()),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "ls-remote",
-                "--symref",
-                "--",
-                url,
-            ],
+    git = find_git_executable()
+
+    def advertise(candidate: str) -> subprocess.CompletedProcess[str]:
+        return operation.run(
+            [str(git), "-c", "core.hooksPath=/dev/null", "ls-remote", "--symref", "--", candidate],
             check=True,
             capture_output=True,
             text=True,
             env=git_repository_environment(),
         )
-    except subprocess.CalledProcessError as exc:
-        raise TransportError(
-            failure_message(f"Remote check failed (Git exit {exc.returncode})", exc, url)
-        ) from exc
+
+    try:
+        _, result = with_transport_fallback(
+            url, advertise, lambda exc: f"Remote check failed (Git exit {exc.returncode})"
+        )
     except subprocess.TimeoutExpired as exc:
         raise TransportError("Remote check timed out") from exc
     except OSError as exc:

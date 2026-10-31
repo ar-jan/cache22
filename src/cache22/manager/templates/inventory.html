@@ -18,7 +18,7 @@
 </label>
 {% endfor %}
 <details {% if query.queued is not none or query.running is not none or query.scheduled is not none or query.schedule_blocked is not none or query.has_error is not none or query.reconciliation_required is not none %}open{% endif %}><summary>Activity and status filters</summary>
-{% for field in flags %}<label>{{ field|replace('_', ' ')|capitalize }} <select name="{{ field }}">
+{% for field in flags %}<label>{{ 'Has current issue' if field == 'has_error' else field|replace('_', ' ')|capitalize }} <select name="{{ field }}">
 <option value="">Any</option><option value="true" {% if query|attr(field) is sameas true %}selected{% endif %}>Yes</option><option value="false" {% if query|attr(field) is sameas false %}selected{% endif %}>No</option>
 </select></label>{% endfor %}
 </details>

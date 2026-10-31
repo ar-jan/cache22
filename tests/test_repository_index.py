@@ -151,6 +151,39 @@ def test_non_utf8_ref_failure_does_not_stop_unrelated_jobs(
     assert r.index.get(healthy["id"])["last_checked_at"] is not None
 
 
+def test_remote_git_prefers_ssh_and_falls_back_to_https(
+    repository: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = repository
+    log = tmp_path / "ssh.log"
+    ssh = tmp_path / "fake-ssh"
+    ssh.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec git-upload-pack "{r.source}"\n')
+    ssh.chmod(0o755)
+    monkeypatch.setenv("GIT_SSH_COMMAND", str(ssh))
+    monkeypatch.setenv("GIT_SSH_VARIANT", "simple")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{tmp_path / 'missing'}.insteadOf")
+    first = r.commit("first")
+
+    record = r.fetch()
+    mirror = Path(record["archive_path"])
+    assert git(mirror, "config", "remote.origin.url") == "ssh://git@example.test/team/project"
+    assert git(mirror, "rev-parse", "HEAD") == first
+    assert check_repository(r.id, index=r.index)["remote_head_oid"] == first
+    assert "git@example.test" in log.read_text()
+
+    monkeypatch.setenv("GIT_SSH_COMMAND", "false")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{r.source}.insteadOf")
+    second = r.commit("second")
+    assert check_repository(r.id, index=r.index)["remote_head_oid"] == second
+    assert r.fetch()["local_head_oid"] == second
+
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{tmp_path / 'missing'}.insteadOf")
+    with pytest.raises(TransportError) as failure:
+        check_repository(r.id, index=r.index)
+    assert "SSH: Remote check failed" in str(failure.value)
+    assert "HTTPS: Remote check failed" in str(failure.value)
+
+
 @pytest.mark.parametrize("stage", ["clone", "fetch", "ls-remote"])
 def test_git_failure_details_reach_cli_and_history(
     repository: Repository, monkeypatch: pytest.MonkeyPatch, stage: str

@@ -8,6 +8,9 @@ def isolated_index(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path_factory.mktemp("index")))
+    # SSH attempts fail without network access, so remote Git falls back to HTTPS,
+    # which integration tests redirect to local repositories with url.*.insteadOf.
+    monkeypatch.setenv("GIT_SSH_COMMAND", "false")
 
 
 @pytest.fixture

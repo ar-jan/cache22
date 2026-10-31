@@ -208,8 +208,10 @@
           ["State", "state"], ["Attempt", "attempt_number"], ["Due / retry", "due_at"], ["Waiting for job", "blocking_job_id"], ["Elapsed (s)", "elapsed_seconds"], ["Phase", progress], ["Diagnostic", r => r.diagnostic?.error]], data.jobs));
       } else {
         const detail = $("#c22-detail"); detail.replaceChildren();
+        const issueLabels = {last_error: "Current issue", last_error_kind: "Issue operation",
+          last_error_category: "Issue category", last_error_at: "Issue observed at", has_error: "Has current issue"};
         for (const [key, value] of Object.entries(data.repository)) {
-          detail.append(element("dt", key.replaceAll("_", " ")), element("dd", value));
+          detail.append(element("dt", issueLabels[key] || key.replaceAll("_", " ")), element("dd", value));
         }
         $("#c22-attempts").replaceChildren(table([["Attempt", "id"], ["Job", "job_id"], ["Operation", "kind"], ["Origin", "origin"],
           ["Started", "started_at"], ["Finished", "finished_at"], ["Outcome", "outcome"], ["Last phase", "phase"], ["Diagnostic", "error"]], data.attempts));

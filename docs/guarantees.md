@@ -265,11 +265,21 @@ preceding progress chatter.
 `jobs --state failed` shows the latest failed or interrupted completed attempt per
 problem job, including retries. Its diagnostic stays visible while another attempt
 runs; succeeded and cancelled jobs are excluded. A separate successful job does
-not hide an older failed job. Inventory's `has_error` follows the same rule;
+not hide an older failed job in job inspection or attempt history.
+
+Inventory's `has_error` describes unresolved operations. A later successful attempt
+for the same repository and operation kind resolves earlier failures, including
+failures from separate jobs. Queuing or starting new work does not resolve a
+failure, and a success for another repository or operation kind does not resolve
+it. Completion time and then attempt ID determine which attempt is later, including
+attempts completed in the same second. Job-level retry diagnostics still disappear
+when their job succeeds or is cancelled, including a check promoted to fetch.
 `last_error`, `last_error_kind`, `last_error_category`, and `last_error_at` describe
-the most recent such problem, ordered by completion time and then attempt ID.
+the most recent unresolved problem, ordered by completion time and then attempt ID.
 The error kind belongs to the completed attempt, even if its job has since been
-promoted from check to fetch. These fields are null when no problem job remains.
+promoted from check to fetch. These fields are null when no unresolved problem
+remains. The browser labels this diagnostic **Current issue** and its existing
+automatic refresh clears it after recovery. Attempts retain their original errors.
 
 Terminal history is retained for 30 days, except the latest successful job per
 repository and kind. Those jobs and their attempts remain until a newer success
@@ -294,7 +304,7 @@ exposed. Only Cache22 forms/API perform mutations through shared services.
 Host/Origin checks apply to every route; mutations require same-origin browser
 requests. Runtime assets are local, and no request launches Git or a worker.
 
-The index uses schema version 4; other versions are rejected without migration.
+The index uses schema version 5; other versions are rejected without migration.
 Before using an older index, stop all Cache22 processes, back it up, and discard that index
 and its SQLite `-wal`/`-shm` sidecars. A command that modifies inventory, or
 web/worker startup, then initializes the new schema.

@@ -14,7 +14,7 @@ from .errors import StructuralError
 from .operation import current_operation
 from .repository_ref import RepositoryRef, is_repository_url, parse_repository_url
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 WRITABLE_REPOSITORY_FIELDS = frozenset(
     {
@@ -122,8 +122,14 @@ CREATE VIEW inventory AS SELECT r.*,
  CAST(COALESCE(s.enabled,0) AS INTEGER) AS scheduled,
  CAST(COALESCE(s.blocked,0) AS INTEGER) AS schedule_blocked, s.interval_seconds, s.next_due_at
  FROM repositories r LEFT JOIN schedules s ON s.repository_id=r.id
- LEFT JOIN job_attempts e ON e.id=(SELECT attempt_id FROM job_errors
-   WHERE repository_id=r.id ORDER BY error_at DESC,attempt_id DESC LIMIT 1);
+ -- Job history retains failures. Inventory shows only unresolved operations.
+ LEFT JOIN job_attempts e ON e.id=(SELECT problem.attempt_id FROM job_errors problem
+   WHERE problem.repository_id=r.id AND NOT EXISTS (
+     SELECT 1 FROM jobs resolved JOIN job_attempts success ON success.job_id=resolved.id
+     WHERE resolved.repository_id=r.id AND success.kind=problem.kind
+       AND success.outcome='succeeded'
+       AND (success.finished_at,success.id) > (problem.error_at,problem.attempt_id)
+   ) ORDER BY problem.error_at DESC,problem.attempt_id DESC LIMIT 1);
 """
 
 
