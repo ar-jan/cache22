@@ -109,8 +109,10 @@ def test_query_agreement_facets_and_exports(tmp_path: Path) -> None:
             assert "&lt;img src=x onerror=alert(1)&gt;" in html
 
 
-@pytest.mark.parametrize("descending", [False, True])
-def test_date_added_sorting_across_pages_and_exports(tmp_path: Path, descending: bool) -> None:
+@pytest.mark.parametrize("descending", [None, False, True])
+def test_date_added_sorting_across_pages_and_exports(
+    tmp_path: Path, descending: bool | None
+) -> None:
     now = 0
     index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
     ids = []
@@ -124,25 +126,26 @@ def test_date_added_sorting_across_pages_and_exports(tmp_path: Path, descending:
     assert repeated["id"] == ids[0] and repeated["created_at"] == 300
     index.update(ids[0], local_state="ready")
 
-    query = InventoryQuery(q="keep", sort="created_at", descending=descending)
-    expected = [ids[i] for i in ([0, 2, 3, 1] if descending else [1, 2, 3, 0])]
+    raw = "q=keep"
+    if descending is not None:
+        raw += f"&sort=created_at&descending={str(descending).lower()}"
+    query = parse_query(raw).query
+    expected = [ids[i] for i in ([0, 2, 3, 1] if descending is not False else [1, 2, 3, 0])]
     # Equal timestamps retain ID order, including when descending and across page boundaries.
     for offset in (0, 2):
-        snapshot = inventory_page(index, InventoryRequest(query, limit=2, offset=offset))
+        snapshot = inventory_page(index, parse_query(f"{raw}&limit=2&offset={offset}"))
         assert snapshot.total == 4
         assert [row["id"] for row in snapshot.rows] == expected[offset : offset + 2]
     assert [row["id"] for row in export_inventory(index, query)] == expected
     with TestClient(create_app(index.path), base_url="http://localhost") as client:
-        selection = InventoryRequest(query, limit=2, offset=2)
-        assert [
-            row["id"] for row in client.get(selection.url("/inventory.json")).json()
-        ] == expected
-        csv_rows = csv.DictReader(io.StringIO(client.get(selection.url("/inventory.csv")).text))
+        parameters = f"?{raw}&limit=2&offset=2"
+        assert [row["id"] for row in client.get("/inventory.json" + parameters).json()] == expected
+        csv_rows = csv.DictReader(io.StringIO(client.get("/inventory.csv" + parameters).text))
         assert [int(row["id"]) for row in csv_rows] == expected
         for path in ("/", "/inventory/fragment"):
-            html = client.get(selection.url(path)).text
+            html = client.get(path + parameters).text
             assert html.index(f'data-id="{expected[2]}"') < html.index(f'data-id="{expected[3]}"')
-            assert f'aria-sort="{"descending" if descending else "ascending"}"' in html
+            assert f'aria-sort="{"descending" if descending is not False else "ascending"}"' in html
 
 
 def test_status_sorting_and_missing_values_last(tmp_path: Path) -> None:

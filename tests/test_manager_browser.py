@@ -77,6 +77,9 @@ def test_browser_selection_refresh_registration_and_queue(
                 assert table.locator("th").count() == 11
                 assert table.locator("th a").count() == 10
                 assert table.locator("th").first.inner_text() == "Select"
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "descending")
+                expect(page.locator('select[name="sort"]')).to_have_value("created_at")
+                expect(page.locator('input[name="descending"]')).to_be_checked()
                 cells = table.locator("tbody tr").first.locator("td")
                 assert cells.all_text_contents()[1:] == [
                     "example.org/team/repo0",
@@ -91,7 +94,8 @@ def test_browser_selection_refresh_registration_and_queue(
                     "—",
                 ]
                 repository_id = index.get("example.org/team/repo0")["id"]
-                expect(cells.nth(1).locator("a")).to_have_attribute(
+                expect(cells.nth(1).locator("a")).to_have_count(0)
+                expect(cells.nth(3).locator("a")).to_have_attribute(
                     "href", f"/repositories/{repository_id}"
                 )
                 expect(cells.nth(2).locator("time")).to_have_attribute(

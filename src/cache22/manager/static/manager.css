@@ -7,6 +7,7 @@
 .c22-table { border-collapse:collapse; width:100%; }
 .c22-table th, .c22-table td { padding:0.6rem; border-bottom:1px solid #ddd; text-align:left; vertical-align:top; }
 .c22-table td { max-width:35rem; overflow-wrap:anywhere; white-space:pre-wrap; }
+.c22-table .c22-repository { min-width:28rem; }
 .c22-sort { display:inline-flex; align-items:baseline; gap:0.35rem; }
 .c22-sort span { flex-shrink:0; }
 .c22-table th[aria-sort] { background:#edf2f6; }

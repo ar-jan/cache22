@@ -158,6 +158,7 @@ class InventoryRequest:
 
 
 def parse_query(raw: str) -> InventoryRequest:
+    """Parse web inventory parameters, showing newest repositories first by default."""
     try:
         values = parse_qs(raw, keep_blank_values=True, max_num_fields=200)
     except ValueError as exc:
@@ -187,6 +188,9 @@ def parse_query(raw: str) -> InventoryRequest:
                 raise StructuralError(f"{field} must be an integer") from exc
         else:
             data[field] = value
+    if "sort" not in data:
+        data["sort"] = "created_at"
+        data.setdefault("descending", True)
     return InventoryRequest(InventoryQuery(**data), **page)
 
 
