@@ -9,9 +9,10 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 from cache22 import operation
 from cache22.config import add_archive_dir
@@ -32,7 +33,8 @@ def test_browser_selection_refresh_registration_and_queue(
     add_archive_dir(archive)
     index = Index.initialize()
     for i in range(3):
-        add_repository(f"https://example.org/team/repo{i}", archive, index=index)
+        row = add_repository(f"https://example.org/team/repo{i}", archive, index=index)
+        index.update(row["id"], created_at=1704067200 + (2 - i) * 60)
     with sync_playwright() as playwright:
         executable = os.environ.get("CACHE22_BROWSER", playwright.chromium.executable_path)
         if not Path(executable).exists():
@@ -71,6 +73,83 @@ def test_browser_selection_refresh_registration_and_queue(
                 page.goto(base)
                 page.locator("#c22-actions button").wait_for()
                 assert page.locator(".c22-select").count() == 3
+                table = page.locator("#c22-inventory-data table")
+                assert table.locator("th").count() == 11
+                assert table.locator("th a").count() == 10
+                assert table.locator("th").first.inner_text() == "Select"
+                cells = table.locator("tbody tr").first.locator("td")
+                assert cells.all_text_contents()[1:] == [
+                    "example.org/team/repo0",
+                    "2024-01-01 00:02:00 UTC",
+                    "git",
+                    "unknown",
+                    "unknown",
+                    "No",
+                    "Never",
+                    "Disabled",
+                    "Idle",
+                    "—",
+                ]
+                repository_id = index.get("example.org/team/repo0")["id"]
+                expect(cells.nth(1).locator("a")).to_have_attribute(
+                    "href", f"/repositories/{repository_id}"
+                )
+                expect(cells.nth(2).locator("time")).to_have_attribute(
+                    "datetime", "2024-01-01T00:02:00Z"
+                )
+
+                # Sorting resets pagination while preserving repeated filters and captured IDs.
+                page.goto(base + "/?q=repo&host=example.org&host=other.invalid&limit=1&offset=2")
+                page.locator("#c22-page-select").click()
+                page.locator("#c22-sort-created_at").click()
+                assert parse_qs(urlsplit(page.url).query) == {
+                    "q": ["repo"],
+                    "host": ["example.org", "other.invalid"],
+                    "sort": ["created_at"],
+                    "descending": ["false"],
+                    "limit": ["1"],
+                    "offset": ["0"],
+                }
+                expect(table.locator("tbody td").nth(1)).to_have_text("example.org/team/repo2")
+                expect(page.locator(".c22-select")).to_be_checked()
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "ascending")
+                expect(page.locator('select[name="sort"]')).to_have_value("created_at")
+                expect(page.locator('input[name="descending"]')).not_to_be_checked()
+                page.locator("#c22-next").click()
+                expect(table.locator("tbody td").nth(1)).to_have_text("example.org/team/repo1")
+                page.locator("#c22-sort-created_at").click()
+                expect(table.locator("tbody td").nth(1)).to_have_text("example.org/team/repo0")
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "descending")
+                expect(page.locator('input[name="descending"]')).to_be_checked()
+                assert parse_qs(urlsplit(page.url).query)["offset"] == ["0"]
+                for extension in ("json", "csv"):
+                    href = page.locator(f"#c22-export-{extension}").get_attribute("href")
+                    assert href is not None
+                    params = parse_qs(urlsplit(href).query)
+                    assert params["sort"] == ["created_at"] and params["descending"] == ["true"]
+
+                # Polling retains the current sort and restores focus to the replacement header.
+                expect(page.locator("#c22-connection")).to_contain_text("Updated")
+                page.locator("#c22-sort-created_at").focus()
+                with page.expect_response("**/inventory/fragment*"):
+                    page.evaluate("window.dispatchEvent(new Event('online'))")
+                expect(page.locator("#c22-sort-created_at")).to_be_focused()
+                expect(table.locator("tbody td").nth(1)).to_have_text("example.org/team/repo0")
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "descending")
+                page.locator("#c22-sort-created_at").press("Enter")
+                expect(table.locator("tbody td").nth(1)).to_have_text("example.org/team/repo2")
+                expect(page.locator(".c22-select")).to_be_checked()
+                page.locator("#c22-search-apply").click()
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "ascending")
+                page.locator('select[name="sort"]').select_option("created_at")
+                page.locator('input[name="descending"]').check()
+                page.locator("#c22-search-apply").click()
+                expect(table.locator("th[aria-sort]")).to_have_attribute("aria-sort", "descending")
+                page.locator("#c22-sort-storage_format").click()
+                expect(page.locator('select[name="sort"]')).to_have_value("storage_format")
+                expect(page.locator('input[name="descending"]')).not_to_be_checked()
+                page.locator("#c22-clear-select").click()
+                page.goto(base)
                 assert not page.locator("#c22-actions input").is_visible()
                 page.locator("#c22-actions select").select_option("schedule")
                 assert page.locator("#c22-actions input").is_visible()

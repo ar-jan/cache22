@@ -1,3 +1,6 @@
+{% macro timestamp(value, missing='—') -%}
+{% if value %}<time class="c22-timestamp" datetime="{{ value }}">{{ value|replace('T', ' ')|replace('Z', ' UTC') }}</time>{% else %}{{ missing }}{% endif %}
+{%- endmacro %}
 <p class="c22-summary">{{ snapshot.total }} matching repositories. {% if rows %}Showing {{ selection.offset + 1 }}–{{ selection.offset + rows|length }}.{% endif %}
 <a id="c22-export-json" href="{{ selection.url('/inventory.json') }}">Export JSON</a> · <a id="c22-export-csv" href="{{ selection.url('/inventory.csv') }}">Export CSV</a></p>
 <div class="c22-facets" aria-label="Inventory facets">
@@ -11,17 +14,30 @@
 </div>
 <div class="c22-scroll">
 <table class="c22-table"><caption class="c22-visually-hidden">Matching repositories</caption>
-<thead><tr>{% for heading in ['Select', 'Repository', 'Archive', 'State', 'Schedule', 'Activity', 'Current issue'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead>
+<thead><tr>
+<th scope="col">Select</th>
+{% for field, heading in columns %}
+{% set active = query.sort == field %}
+{% set next_descending = active and not query.descending %}
+<th scope="col"{% if active %} aria-sort="{{ 'descending' if query.descending else 'ascending' }}"{% endif %}>
+<a class="c22-sort" id="c22-sort-{{ field }}" href="{{ selection.url(sort=field, descending='true' if next_descending else 'false', offset=0) }}" aria-label="Sort {{ heading }} {{ 'descending' if next_descending else 'ascending' }}">{{ heading }} <span aria-hidden="true">{{ ('↓' if query.descending else '↑') if active else '↕' }}</span></a>
+</th>
+{% endfor %}
+</tr></thead>
 <tbody>
 {% for row in rows %}<tr data-id="{{ row.id }}">
 <td><input id="repository-{{ row.id }}-select" type="checkbox" class="c22-select" value="{{ row.id }}" aria-label="Select {{ row.repo_key }}"></td>
-<td><a id="repository-{{ row.id }}-link" href="/repositories/{{ row.id }}">{{ row.project_name }}</a><small>{{ row.repo_key }}</small></td>
-<td>{{ row.storage_format }}<small>{{ row.archive_root }}</small></td>
-<td>{{ row.local_state|replace('_', ' ') }} · {{ row.remote_status|replace('_', ' ') }}{% if row.reconciliation_required %}<small>Reconciliation required</small>{% endif %}<small>Checked: {{ row.last_checked_at or 'never' }}</small></td>
-<td>{% if row.scheduled %}Every {{ row.interval_seconds }}s<small>Due: {{ row.next_due_at or 'unknown' }}</small>{% else %}Disabled{% endif %}{% if row.schedule_blocked %}<small>Blocked</small>{% endif %}</td>
+<td><a id="repository-{{ row.id }}-link" href="/repositories/{{ row.id }}">{{ row.repo_key }}</a></td>
+<td>{{ timestamp(row.created_at) }}</td>
+<td>{{ row.storage_format }}</td>
+<td>{{ row.local_state|replace('_', ' ') }}</td>
+<td>{{ row.remote_status|replace('_', ' ') }}</td>
+<td>{{ 'Yes' if row.reconciliation_required else 'No' }}</td>
+<td>{{ timestamp(row.last_checked_at, 'Never') }}</td>
+<td>{% if row.scheduled %}Every {{ row.interval_seconds }}s<small>Due: {{ timestamp(row.next_due_at, 'unknown') }}</small>{% else %}Disabled{% endif %}{% if row.schedule_blocked %}<small>Blocked</small>{% endif %}</td>
 <td>{% if row.running %}Running{% endif %}{% if row.queued %} Queued{% endif %}{% if not row.running and not row.queued %}Idle{% endif %}</td>
-<td>{% if row.has_error %}<span class="c22-error">{{ row.last_error }}</span><small>{{ row.last_error_kind }} · {{ row.last_error_at }}</small>{% else %}—{% endif %}</td>
-</tr>{% else %}<tr><td colspan="7">{% if snapshot.total %}No repositories on this page. Use Previous or First page to return to results.{% else %}No matching repositories. Adjust or reset the filters.{% endif %}</td></tr>{% endfor %}
+<td>{% if row.has_error %}<span class="c22-error">{{ row.last_error }}</span><small>{{ row.last_error_kind }} · {{ timestamp(row.last_error_at) }}</small>{% else %}—{% endif %}</td>
+</tr>{% else %}<tr><td colspan="{{ columns|length + 1 }}">{% if snapshot.total %}No repositories on this page. Use Previous or First page to return to results.{% else %}No matching repositories. Adjust or reset the filters.{% endif %}</td></tr>{% endfor %}
 </tbody></table>
 </div>
 <nav class="c22-pager" aria-label="Inventory pages">

@@ -22,7 +22,7 @@
 <option value="">Any</option><option value="true" {% if query|attr(field) is sameas true %}selected{% endif %}>Yes</option><option value="false" {% if query|attr(field) is sameas false %}selected{% endif %}>No</option>
 </select></label>{% endfor %}
 </details>
-<label>Sort <select name="sort">{% for field in sorts %}<option value="{{ field }}" {% if query.sort == field %}selected{% endif %}>{{ field|replace('_', ' ') }}</option>{% endfor %}</select></label>
+<label>Sort <select name="sort">{% for field in sorts %}<option value="{{ field }}" {% if query.sort == field %}selected{% endif %}>{{ sort_labels.get(field, field|replace('_', ' ')|capitalize) }}</option>{% endfor %}</select></label>
 <label><input type="checkbox" name="descending" value="true" {% if query.descending %}checked{% endif %}> Descending</label>
 <label>Rows <input type="number" name="limit" min="1" max="500" value="{{ selection.limit }}"></label>
 <button id="c22-search-apply" type="submit">Apply filters</button> <a href="/">Reset filters</a>

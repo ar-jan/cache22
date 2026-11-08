@@ -21,6 +21,7 @@ from cache22.inventory_service import (
     parse_query,
     selected_ids,
 )
+from cache22.job_queue import Queue
 from cache22.manager.app import create_app
 from cache22.repo_service import add_repository
 from cache22.scheduler import Scheduler
@@ -101,9 +102,89 @@ def test_query_agreement_facets_and_exports(tmp_path: Path) -> None:
         assert "No repositories on this page" in client.get("/?offset=100").text
         assert "No matching repositories" in client.get("/?q=nonexistent").text
         # Repository-controlled markup is always escaped in initial and refreshed pages.
-        index.update(ids[0], display_path="a/Team/<img src=x onerror=alert(1)>")
-        assert "<img src=x onerror=alert(1)>" not in client.get("/inventory/fragment").text
-        assert "&lt;img src=x onerror=alert(1)&gt;" in client.get("/inventory/fragment").text
+        add_repository("https://a/Team/<img src=x onerror=alert(1)>", tmp_path, index=index)
+        for path in ("/", "/inventory/fragment"):
+            html = client.get(path).text
+            assert "<img src=x onerror=alert(1)>" not in html
+            assert "&lt;img src=x onerror=alert(1)&gt;" in html
+
+
+@pytest.mark.parametrize("descending", [False, True])
+def test_date_added_sorting_across_pages_and_exports(tmp_path: Path, descending: bool) -> None:
+    now = 0
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
+    ids = []
+    for name, added_at in (("zeta", 300), ("alpha", 100), ("beta", 200), ("gamma", 200)):
+        now = added_at
+        ids.append(add_repository(f"https://host/team/keep-{name}", tmp_path, index=index)["id"])
+    now = 50
+    add_repository("https://host/team/excluded", tmp_path, index=index)
+    now = 999
+    repeated = add_repository("https://host/team/keep-zeta", tmp_path, index=index)
+    assert repeated["id"] == ids[0] and repeated["created_at"] == 300
+    index.update(ids[0], local_state="ready")
+
+    query = InventoryQuery(q="keep", sort="created_at", descending=descending)
+    expected = [ids[i] for i in ([0, 2, 3, 1] if descending else [1, 2, 3, 0])]
+    # Equal timestamps retain ID order, including when descending and across page boundaries.
+    for offset in (0, 2):
+        snapshot = inventory_page(index, InventoryRequest(query, limit=2, offset=offset))
+        assert snapshot.total == 4
+        assert [row["id"] for row in snapshot.rows] == expected[offset : offset + 2]
+    assert [row["id"] for row in export_inventory(index, query)] == expected
+    with TestClient(create_app(index.path), base_url="http://localhost") as client:
+        selection = InventoryRequest(query, limit=2, offset=2)
+        assert [
+            row["id"] for row in client.get(selection.url("/inventory.json")).json()
+        ] == expected
+        csv_rows = csv.DictReader(io.StringIO(client.get(selection.url("/inventory.csv")).text))
+        assert [int(row["id"]) for row in csv_rows] == expected
+        for path in ("/", "/inventory/fragment"):
+            html = client.get(selection.url(path)).text
+            assert html.index(f'data-id="{expected[2]}"') < html.index(f'data-id="{expected[3]}"')
+            assert f'aria-sort="{"descending" if descending else "ascending"}"' in html
+
+
+def test_status_sorting_and_missing_values_last(tmp_path: Path) -> None:
+    now = 1000
+    index = Index.initialize(tmp_path / "index.db", clock=lambda: now)
+    ids = [
+        add_repository(f"https://host/team/{name}", tmp_path, index=index)["id"]
+        for name in ("idle", "queued", "running", "both", "disabled")
+    ]
+    scheduler = Scheduler(index)
+    for repository_id, message in zip(ids[:2], ("Zulu issue", "Alpha issue"), strict=True):
+        scheduler.finish(scheduler.immediate(repository_id, "check"))
+        scheduler.finish(
+            scheduler.immediate(repository_id, "convert"), category="structural", error=message
+        )
+        now += 1
+    # Disabled schedules keep their old due date in storage, but have no displayed due date.
+    scheduler.schedule(ids[4], 3600)
+    scheduler.schedule(ids[4], None)
+    now = 2000
+    scheduler.schedule(ids[1], 3600)
+    now = 3000
+    scheduler.schedule(ids[0], 3600)
+    queue = Queue(index)
+    queue.enqueue(ids[1], "check")
+    scheduler.immediate(ids[2], "check")
+    queue.enqueue(ids[3], "fetch")
+    scheduler.immediate(ids[3], "check")
+    for repository_id in ids[2:4]:
+        index.update(repository_id, reconciliation_required=True)
+
+    orders = {
+        "activity": ([0, 4, 1, 2, 3], [2, 3, 1, 0, 4]),
+        "next_due_at": ([1, 0, 2, 3, 4], [0, 1, 2, 3, 4]),
+        "last_error": ([1, 0, 2, 3, 4], [0, 1, 2, 3, 4]),
+        "last_checked_at": ([0, 1, 2, 3, 4], [1, 0, 2, 3, 4]),
+        "reconciliation_required": ([0, 1, 4, 2, 3], [2, 3, 0, 1, 4]),
+    }
+    for field, (ascending, descending) in orders.items():
+        for reverse, order in ((False, ascending), (True, descending)):
+            rows = list_inventory(index, InventoryQuery(sort=field, descending=reverse))
+            assert [row["id"] for row in rows] == [ids[i] for i in order], (field, reverse)
 
 
 @pytest.mark.parametrize(

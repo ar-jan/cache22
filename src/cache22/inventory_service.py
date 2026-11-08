@@ -25,20 +25,25 @@ ENUMS = {
     "remote_status": ("unknown", "not_fetched", "current", "updates_available"),
     "storage_format": ("git", "bundle"),
 }
-SORTS = (
-    "repo_key",
-    "project_name",
-    "host",
-    "archive_root",
-    "local_state",
-    "remote_status",
-    "storage_format",
-    "local_head_committed_at",
-    "last_checked_at",
-    "last_fetched_at",
-    "last_converted_at",
-    "next_due_at",
-)
+# Only these trusted expressions may be interpolated into ORDER BY.
+SORTS = {
+    "repo_key": "repo_key",
+    "project_name": "project_name",
+    "host": "host",
+    "archive_root": "archive_root",
+    "local_state": "local_state",
+    "remote_status": "remote_status",
+    "storage_format": "storage_format",
+    "created_at": "created_at",
+    "reconciliation_required": "reconciliation_required",
+    "local_head_committed_at": "local_head_committed_at",
+    "last_checked_at": "last_checked_at",
+    "last_fetched_at": "last_fetched_at",
+    "last_converted_at": "last_converted_at",
+    "next_due_at": "CASE WHEN scheduled THEN next_due_at END",
+    "activity": "CASE WHEN running THEN 2 WHEN queued THEN 1 ELSE 0 END",
+    "last_error": "last_error",
+}
 # Explicit browser/download projection, independent of future schema additions.
 PUBLIC_FIELDS = (
     "id",
@@ -210,7 +215,9 @@ def _rows(
     db: sqlite3.Connection, query: InventoryQuery, page: InventoryRequest | None = None
 ) -> list[dict[str, Any]]:
     where, params = _predicate(query)
-    sql = f"SELECT * FROM inventory{where} ORDER BY {query.sort} {'DESC' if query.descending else 'ASC'},id"
+    sort = SORTS[query.sort]
+    direction = "DESC" if query.descending else "ASC"
+    sql = f"SELECT * FROM inventory{where} ORDER BY {sort} {direction} NULLS LAST,id"
     if page:
         sql += " LIMIT ? OFFSET ?"
         params.extend([page.limit, page.offset])

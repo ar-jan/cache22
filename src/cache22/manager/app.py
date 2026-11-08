@@ -31,6 +31,18 @@ from ..index import Index
 ASSETS = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=ASSETS / "templates")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+INVENTORY_COLUMNS = (
+    ("repo_key", "Repository"),
+    ("created_at", "Date added"),
+    ("storage_format", "Archive"),
+    ("local_state", "Local state"),
+    ("remote_status", "Remote status"),
+    ("reconciliation_required", "Reconciliation required"),
+    ("last_checked_at", "Last checked"),
+    ("next_due_at", "Schedule"),
+    ("activity", "Activity"),
+    ("last_error", "Current issue"),
+)
 
 
 def is_ip_literal(value: str) -> bool:
@@ -136,6 +148,8 @@ async def inventory_view(request: Request) -> Response:
         "flags": inventory.FLAGS,
         "enums": inventory.ENUMS,
         "sorts": inventory.SORTS,
+        "columns": INVENTORY_COLUMNS,
+        "sort_labels": dict(INVENTORY_COLUMNS),
     }
     template = (
         "inventory_fragment.html" if request.url.path.endswith("/fragment") else "inventory.html"
